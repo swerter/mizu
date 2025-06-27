@@ -21,18 +21,19 @@ import (
 )
 
 const (
-	// Session timeouts
-	SessionDeadline = 5 * time.Minute  // Hard limit for entire session
-	CommandTimeout  = 30 * time.Second // For individual SMTP commands
-	IdleTimeout     = 5 * time.Second  // Between commands
-	DataTimeout     = 2 * time.Minute  // For receiving email data
+	// Session timeouts for security and resource management
+	SessionDeadline = 5 * time.Minute  // Hard limit for entire SMTP session to prevent hanging connections
+	CommandTimeout  = 30 * time.Second // Timeout for individual SMTP commands (HELO, MAIL FROM, etc.)
+	IdleTimeout     = 5 * time.Second  // Maximum idle time between commands before disconnect
+	DataTimeout     = 2 * time.Minute  // Timeout for receiving email body after DATA command
 )
 
 // Backend implements smtp.Backend interface for our custom SMTP server.
+// It manages the overall server configuration and creates new sessions for incoming connections.
 type Backend struct {
-	Config        *config.Config
-	DomainManager DomainManager
-	Logger        *zap.Logger
+	Config        *config.Config // Server configuration (ports, TLS, domains, etc.)
+	DomainManager DomainManager  // Interface for validating recipient domains
+	Logger        *zap.Logger    // Structured logger for debugging and monitoring
 }
 
 // EHLO/HELO is called for the HELO/EHLO command.
@@ -44,18 +45,20 @@ func (be *Backend) EHLO(hostname string) error {
 }
 
 // DomainManager interface for domain validation
+// Implementations handle checking if a domain is allowed to receive mail
 type DomainManager interface {
-	IsValidDomain(domain string) bool
-	IsReady() bool
-	IsStale() bool
+	IsValidDomain(domain string) bool // Check if domain accepts mail
+	IsReady() bool                    // Check if domain list is loaded
+	IsStale() bool                    // Check if domain list refresh failed
 }
 
 // NewSession is called when a new SMTP session is started.
+// It performs initial validation (blacklists, reverse DNS) before creating a session.
 func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	remoteAddr := c.Conn().RemoteAddr().String()
 	log.Printf("New session from %s", remoteAddr)
 
-	// Check reverse DNS and blacklists (skip in local mode)
+	// Perform security checks in production mode
 	if !be.Config.Local {
 		// Extract IP from address
 		host, _, err := net.SplitHostPort(remoteAddr)
@@ -71,13 +74,13 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 			return nil, ErrInternalServerError
 		}
 
-		// Check DNS blacklists if enabled
+		// Check DNS blacklists (RBLs) to prevent spam
 		if be.Config.Blacklists.Enabled && len(be.Config.Blacklists.Lists) > 0 {
 			checker := blacklist.NewChecker(be.Config.Blacklists.Lists, be.Config.Blacklists.Timeout, be.Logger)
 			isListed, reason, err := checker.CheckIP(ip)
 			if err != nil {
 				be.Logger.Error("Blacklist check error", zap.Error(err), zap.String("ip", host))
-				// Don't reject on blacklist check errors, just log
+				// Don't reject on blacklist check errors - fail open for availability
 			} else if isListed {
 				log.Printf("Rejecting session from %s: blacklisted (%s)", remoteAddr, reason)
 				return nil, &smtp.SMTPError{
@@ -88,7 +91,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 			}
 		}
 
-		// Perform reverse DNS lookup
+		// Require valid reverse DNS (PTR record) - helps prevent spam from compromised hosts
 		names, err := net.LookupAddr(host)
 		if err != nil || len(names) == 0 {
 			log.Printf("Rejecting session from %s: no reverse DNS record", remoteAddr)
@@ -142,42 +145,45 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 }
 
 // Session represents an active SMTP session for an incoming email.
+// It tracks the SMTP conversation state and enforces protocol requirements.
 type Session struct {
-	conn          *smtp.Conn   // The underlying SMTP connection
-	helo          string       // HELO/EHLO domain from the client
-	from          string       // Sender's email address (MAIL FROM)
-	to            []string     // Recipient email addresses (RCPT TO)
-	remoteAddr    string       // Remote address of the client
-	mailData      bytes.Buffer // Buffer to store the raw email body
-	config        *config.Config
-	tlsState      *tls.ConnectionState // TLS connection state
-	domainManager DomainManager        // Domain validation manager
-	ctx           context.Context      // Session context with deadline
-	cancel        context.CancelFunc   // Cancel function for the context
+	conn          *smtp.Conn           // The underlying SMTP connection
+	helo          string               // HELO/EHLO domain from the client
+	from          string               // Sender's email address (MAIL FROM)
+	to            []string             // Recipient email addresses (RCPT TO)
+	remoteAddr    string               // Remote IP:port of the client
+	mailData      bytes.Buffer         // Buffer to store the raw email body
+	config        *config.Config       // Server configuration
+	tlsState      *tls.ConnectionState // TLS connection state (nil if not using TLS)
+	domainManager DomainManager        // Interface for validating recipient domains
+	ctx           context.Context      // Session context with deadline for timeout
+	cancel        context.CancelFunc   // Cancel function to clean up resources
 
 	// Anti-spam tracking
-	isJunk       bool     // Whether this message is considered junk
-	junkReasons  []string // Reasons why message is marked as junk
-	commandState int      // Track SMTP command sequence state
+	isJunk       bool     // Whether this message is considered junk/spam
+	junkReasons  []string // Specific reasons why message is marked as junk
+	commandState int      // Track SMTP command sequence state for protocol enforcement
 }
 
 // SMTP command states for sequence validation
+// Ensures commands are issued in the correct order per RFC 5321
 const (
-	stateNew = iota
-	stateHelo
-	stateMail
-	stateRcpt
-	stateData
+	stateNew  = iota // Initial state before HELO/EHLO
+	stateHelo        // After HELO/EHLO received
+	stateMail        // After MAIL FROM received
+	stateRcpt        // After at least one RCPT TO received
+	stateData        // After DATA command (currently receiving message)
 )
 
 // Helo is called for the HELO/EHLO command.
+// RFC 5321 requires this to be the first command in an SMTP session.
 func (s *Session) Helo(hostname string) error {
 	// Set timeout for this command
 	if err := s.setCommandTimeout(CommandTimeout); err != nil {
 		return err
 	}
 
-	// Enforce command sequence
+	// Enforce command sequence - HELO/EHLO must be first
 	if s.commandState != stateNew {
 		log.Printf("Rejecting HELO/EHLO from %s: already received HELO (state=%d)", s.remoteAddr, s.commandState)
 		return &smtp.SMTPError{
@@ -187,9 +193,9 @@ func (s *Session) Helo(hostname string) error {
 		}
 	}
 
-	// Validate HELO hostname (skip in local mode)
+	// Validate HELO hostname for security (skip in local development mode)
 	if !s.config.Local {
-		// Reject if HELO is our own domain
+		// Reject if HELO claims to be our own domain (spoofing attempt)
 		if hostname == s.config.SMTP.Domain {
 			log.Printf("Rejecting HELO/EHLO from %s: using our own domain %s", s.remoteAddr, hostname)
 			return &smtp.SMTPError{
@@ -229,7 +235,7 @@ func (s *Session) Helo(hostname string) error {
 			}
 		}
 
-		// Optional: Check if HELO hostname resolves
+		// Optional: Verify HELO hostname has valid DNS records
 		if s.config.Blacklists.CheckHELOResolves {
 			resolves, err := blacklist.CheckHELOResolves(hostname, s.config.Blacklists.Timeout)
 			if err != nil || !resolves {
@@ -278,8 +284,9 @@ func (s *Session) setCommandTimeout(timeout time.Duration) error {
 }
 
 // Mail is called for the MAIL FROM command.
+// This sets the envelope sender for the SMTP transaction.
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
-	// Get HELO hostname from the connection
+	// Handle case where go-smtp library processed EHLO internally
 	heloHostname := s.conn.Hostname()
 	if heloHostname != "" && s.helo == "" {
 		// EHLO was handled by go-smtp internally, update our state
@@ -310,7 +317,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		return ErrTLSRequiredStartTLS
 	}
 
-	// Reject null sender <> (bounce messages)
+	// Reject null sender <> (bounce messages) to prevent backscatter
 	if from == "" || from == "<>" {
 		log.Printf("Rejecting null sender from %s", s.remoteAddr)
 		return &smtp.SMTPError{
@@ -328,8 +335,8 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		senderDomain = strings.TrimSuffix(senderDomain, ">")
 	}
 
-	// Reject if sender domain is in our domains list (should use outbound relay)
-	// In local mode, also check against the SMTP domain
+	// Prevent spoofing: reject if sender claims to be from our domains
+	// Local senders should use the outbound relay, not the inbound MX
 	if senderDomain != "" {
 		isLocalDomain := false
 
@@ -365,13 +372,14 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 }
 
 // Rcpt is called for the RCPT TO command.
+// This validates and adds recipients to the envelope.
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	// Set timeout for this command
 	if err := s.setCommandTimeout(CommandTimeout); err != nil {
 		return err
 	}
 
-	// Enforce command sequence
+	// Enforce command sequence - must have MAIL FROM before RCPT TO
 	if s.commandState != stateMail && s.commandState != stateRcpt {
 		log.Printf("Rejecting RCPT TO from %s: bad command sequence", s.remoteAddr)
 		return &smtp.SMTPError{
@@ -390,9 +398,10 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 	log.Printf("RCPT TO: %s (Remote: %s)", to, s.remoteAddr)
 
-	// Check if domain is valid using the domain manager
+	// Verify recipient domain is one we handle mail for
 	if s.domainManager != nil && !s.domainManager.IsValidDomain(to) {
 		// If domain list is stale (last refresh failed), return temporary error
+		// This prevents rejecting valid mail during transient API failures
 		if s.domainManager.IsStale() {
 			log.Printf("Temporarily rejecting recipient %s: domain list is stale (refresh failed)", to)
 			return &smtp.SMTPError{
@@ -401,7 +410,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 				Message:      "temporary error - please try again later",
 			}
 		}
-		// Otherwise, permanently reject
+		// Otherwise, permanently reject unknown domains
 		log.Printf("Rejecting recipient %s: domain not in valid domains list", to)
 		return &smtp.SMTPError{
 			Code:         550,
@@ -416,13 +425,14 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 }
 
 // Data is called when the email body is received.
+// This is where we process the message headers and body, perform validation, and forward the email.
 func (s *Session) Data(r io.Reader) error {
-	// Set timeout for receiving data
+	// Set extended timeout for receiving potentially large email data
 	if err := s.setCommandTimeout(DataTimeout); err != nil {
 		return err
 	}
 
-	// Enforce command sequence
+	// Enforce command sequence - must have at least one recipient
 	if s.commandState != stateRcpt {
 		log.Printf("Rejecting DATA from %s: bad command sequence", s.remoteAddr)
 		return &smtp.SMTPError{
@@ -615,6 +625,13 @@ func (s *Session) Data(r io.Reader) error {
 					EnhancedCode: smtp.EnhancedCode{5, 7, 1},
 					Message:      "message rejected due to DMARC policy",
 				}
+			}
+
+			// Mark as junk if no DMARC record and SPF/DKIM failed
+			if dmarcResult.ShouldBeJunk {
+				s.isJunk = true
+				s.junkReasons = append(s.junkReasons, "No DMARC record and authentication failed")
+				log.Printf("Marking message as junk: %s", dmarcResult.FailureReasons)
 			}
 		}
 	}

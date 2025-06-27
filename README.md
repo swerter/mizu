@@ -246,12 +246,3 @@ This is a test message.
 .
 QUIT
 ```
-
-## Production Considerations
-
-- Implement proper retry queues for failed HTTP deliveries
-- Add comprehensive DMARC policy enforcement
-- Consider implementing rate limiting
-- Monitor certificate renewal processes
-- Set up proper logging and monitoring
-- Configure firewall rules for port 25 access

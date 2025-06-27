@@ -5,9 +5,8 @@ go 1.24.1
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/caddyserver/certmagic v0.23.0
-	github.com/emersion/go-dmarc v0.0.0-20190414201850-5be0047fe8f4
+	github.com/emersion/go-msgauth v0.6.8
 	github.com/emersion/go-smtp v0.22.0
-	github.com/mileusna/spf v0.9.5
 	github.com/minio/minio-go/v7 v7.0.94
 	github.com/spf13/pflag v1.0.6
 	go.uber.org/zap v1.27.0

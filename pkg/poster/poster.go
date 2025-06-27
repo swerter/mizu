@@ -11,25 +11,30 @@ import (
 	"time"
 )
 
-// HTTPClient for posting to a destination
+// HTTPClient is the shared HTTP client for posting emails to the destination endpoint.
+// Configured with a 30-second timeout to handle potentially slow backend systems.
 var HTTPClient = &http.Client{
-	Timeout: 30 * time.Second, // Allow more time for response
+	Timeout: 30 * time.Second,
 }
 
-// PostEmailToDestination sends the raw email content to the destination with retry logic
+// PostEmailToDestination sends the raw email content to the destination with retry logic.
+// This is a convenience wrapper that uses a background context.
 func PostEmailToDestination(rawEmail string, destinationURL, apiKey string, maxRetryAttempts int) error {
 	return PostEmailToDestinationWithContext(context.Background(), rawEmail, destinationURL, apiKey, maxRetryAttempts, false)
 }
 
-// PostEmailToDestinationWithContext sends the raw email content to the destination with retry logic and context support
+// PostEmailToDestinationWithContext sends the raw email content to the destination with retry logic and context support.
+// It implements exponential backoff between retries and respects context cancellation.
+// The isJunk parameter adds an X-Junk header to help the destination system handle spam appropriately.
 func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool) error {
 	var lastErr error
 
-	// Ensure at least one attempt
+	// Ensure at least one attempt even if configured incorrectly
 	if maxRetryAttempts < 1 {
 		maxRetryAttempts = 1
 	}
 
+	// Retry loop with exponential backoff
 	for attempt := 0; attempt < maxRetryAttempts; attempt++ {
 		// Check if context is cancelled
 		select {
@@ -38,12 +43,13 @@ func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, des
 		default:
 		}
 
-		// Calculate backoff delay (exponential: 0s, 1s, 2s, 4s, 8s...)
+		// Implement exponential backoff between retries to avoid overwhelming the destination
+		// Backoff sequence: 0s (first attempt), 1s, 2s, 4s, 8s, etc.
 		if attempt > 0 {
 			backoff := time.Duration(1<<(attempt-1)) * time.Second
 			log.Printf("Retrying HTTP post to URL (attempt %d/%d) after %v delay", attempt+1, maxRetryAttempts, backoff)
 
-			// Sleep with context
+			// Sleep with context awareness - allows early cancellation
 			select {
 			case <-time.After(backoff):
 				// Continue after backoff
@@ -60,7 +66,8 @@ func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, des
 
 		lastErr = err
 
-		// Check if error is retryable
+		// Determine if the error warrants a retry
+		// Non-retryable errors (like 4xx HTTP codes) fail immediately
 		if !isRetryableError(err) {
 			log.Printf("Non-retryable error posting to URL: %v", err)
 			return err
@@ -76,17 +83,19 @@ func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, des
 	return fmt.Errorf("failed after %d attempts: %w", maxRetryAttempts, lastErr)
 }
 
-// postEmailAttemptWithContext performs a single attempt to post the email with context support
+// postEmailAttemptWithContext performs a single attempt to post the email with context support.
+// It sends the raw email as message/rfc822 content type with API key authentication.
 func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, isJunk bool) error {
 	req, err := http.NewRequestWithContext(ctx, "POST", destinationURL, strings.NewReader(rawEmail))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "message/rfc822") // Standard MIME type for raw email
-	req.Header.Set("X-API-Key", apiKey)              // Custom header for API key authentication
+	// Set standard headers for email relay
+	req.Header.Set("Content-Type", "message/rfc822") // RFC 2822 compliant email format
+	req.Header.Set("X-API-Key", apiKey)              // Authentication header
 
-	// Add X-Junk header if message is marked as junk
+	// Signal to destination that this message was classified as junk/spam
 	if isJunk {
 		req.Header.Set("X-Junk", "yes")
 	}
@@ -106,25 +115,27 @@ func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinati
 	return nil
 }
 
-// isRetryableError determines if an error should trigger a retry
+// isRetryableError determines if an error should trigger a retry.
+// Returns false for permanent failures (4xx HTTP codes, context cancellation).
+// Returns true for temporary failures (5xx codes, network errors, timeouts).
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	// Check if it's an HTTP status error
+	// Check if it's an HTTP status error with specific retry logic
 	var httpErr *HTTPStatusError
 	if errors.As(err, &httpErr) {
-		return httpErr.IsRetryable()
+		return httpErr.IsRetryable() // 5xx errors are retryable, 4xx are not
 	}
 
-	// Check if it's a context error (non-retryable)
+	// Context errors indicate intentional cancellation - don't retry
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 
-	// Network errors are generally retryable
-	// Check for common network error patterns in the error chain
+	// Network errors are generally retryable as they're often temporary
+	// Check for common network error patterns in the error message
 	errStr := err.Error()
 	if strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "connection reset") ||
@@ -135,6 +146,6 @@ func isRetryableError(err error) bool {
 		return true
 	}
 
-	// Default to retryable for unknown errors
+	// Default to retryable for unknown errors to err on the side of delivery
 	return true
 }

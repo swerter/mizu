@@ -26,7 +26,7 @@ import (
 )
 
 func main() {
-	// Check for special flags
+	// Check for special flags - allows generating example config file
 	if len(os.Args) > 1 && os.Args[1] == "generate-config" {
 		if err := config.SaveExample("config.toml.example"); err != nil {
 			log.Fatalf("Failed to generate example config: %v", err)
@@ -61,6 +61,7 @@ func main() {
 		cancel()
 	}()
 
+	// Initialize TLS configuration and domain manager based on mode
 	var tlsConfig *tls.Config
 	var domainManager smtp.DomainManager
 
@@ -83,14 +84,14 @@ func main() {
 			logger.Sugar().Infof("Local mode: accepting emails for domain %s only", cfg.SMTP.Domain)
 		}
 	} else {
-		// Initialize domain manager
+		// Production mode: Initialize full domain manager with API support
 		manager := domains.NewManager(cfg.Domains.URL, cfg.Domains.APIKey, logger)
 		if err := manager.Start(ctx); err != nil {
 			logger.Sugar().Fatalf("Failed to initialize domain manager: %v", err)
 		}
 		domainManager = manager
 
-		// Configure certmagic logging
+		// Configure certmagic logging for debugging TLS certificate issues
 		if cfg.TLS.CertMagicVerbose {
 			certmagic.Default.Logger = logger
 		}
@@ -148,19 +149,21 @@ func main() {
 	}
 
 	// --- SMTP Server Setup ---
+	// Create the backend that handles SMTP protocol logic
 	be := &smtp.Backend{
 		Config:        cfg,
 		DomainManager: domainManager,
 		Logger:        logger,
 	}
 	server := gosmtp.NewServer(be)
-	server.Addr = cfg.SMTP.ListenAddr
-	server.Domain = cfg.SMTP.Domain
-	server.ReadTimeout = cfg.SMTP.TimeoutDuration
-	server.WriteTimeout = cfg.SMTP.TimeoutDuration
-	server.MaxMessageBytes = int64(cfg.SMTP.MaxMessageSize)
-	server.AllowInsecureAuth = false // Do not allow insecure authentication methods
-	server.EnableSMTPUTF8 = true     // Enable UTF-8 support for international email
+	// Configure SMTP server parameters
+	server.Addr = cfg.SMTP.ListenAddr                       // e.g., ":25" for standard SMTP port
+	server.Domain = cfg.SMTP.Domain                         // Server's hostname for HELO/EHLO responses
+	server.ReadTimeout = cfg.SMTP.TimeoutDuration           // Timeout for reading client commands
+	server.WriteTimeout = cfg.SMTP.TimeoutDuration          // Timeout for writing responses
+	server.MaxMessageBytes = int64(cfg.SMTP.MaxMessageSize) // Limit email size to prevent abuse
+	server.AllowInsecureAuth = false                        // Require TLS for authentication
+	server.EnableSMTPUTF8 = true                            // Support international characters in addresses
 	// Use the TLS config from certmagic which handles certificate management
 	server.TLSConfig = tlsConfig
 
@@ -225,6 +228,7 @@ func setupLogging(format string, verbose bool) (*zap.Logger, error) {
 }
 
 // getTLSVersion converts a string TLS version to the corresponding tls constant
+// Only TLS 1.2 and 1.3 are supported for security reasons
 func getTLSVersion(version string) uint16 {
 	switch version {
 	case "1.2":
@@ -232,7 +236,7 @@ func getTLSVersion(version string) uint16 {
 	case "1.3":
 		return tls.VersionTLS13
 	default:
-		// Default to TLS 1.2 for security - TLS 1.0 and 1.1 are not supported
+		// Default to TLS 1.2 for security - TLS 1.0 and 1.1 are deprecated
 		return tls.VersionTLS12
 	}
 }
