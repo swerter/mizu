@@ -235,11 +235,11 @@ func (s *Server) Start() {
 	}
 
 	s.logger.Sugar().Infof("Starting health check server on %s", s.listenAddr)
-	go func() {
+	logging.SafeGo(s.logger, "health-server", func() {
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			s.logger.Error("Health check server error", zap.Error(err))
 		}
-	}()
+	})
 }
 
 // Stop gracefully shuts down the HTTP server.

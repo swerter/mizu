@@ -70,11 +70,11 @@ func main() {
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	go func() {
+	logging.SafeGo(logger, "signal-handler", func() {
 		<-sigChan
 		logger.Sugar().Info("Received shutdown signal")
 		cancel()
-	}()
+	})
 
 	// Initialize memberlist cluster first (required for TLS leader election)
 	var clusterMgr *cluster.Cluster
@@ -107,7 +107,7 @@ func main() {
 		// Start ACME challenge servers for autocert
 		if cfg.TLS.EnableAutocert && tlsMgr != nil {
 			// Start HTTPS server on port 443 for TLS-ALPN-01 challenges (primary method)
-			go func() {
+			logging.SafeGo(logger, "acme-tls-alpn-server", func() {
 				logger.Info("Starting HTTPS server for ACME TLS-ALPN-01 challenges on :443")
 				server := &http.Server{
 					Addr:      ":443",
@@ -117,15 +117,15 @@ func main() {
 				if err := server.ListenAndServeTLS("", ""); err != nil {
 					logger.Error("TLS-ALPN-01 challenge server failed", zap.Error(err))
 				}
-			}()
+			})
 
 			// Start HTTP server on port 80 for HTTP-01 challenges (fallback)
-			go func() {
+			logging.SafeGo(logger, "acme-http-server", func() {
 				logger.Info("Starting HTTP server for ACME HTTP-01 challenges on :80")
 				if err := http.ListenAndServe(":80", tlsMgr.HTTPHandler()); err != nil {
 					logger.Error("HTTP-01 challenge server failed", zap.Error(err))
 				}
-			}()
+			})
 		}
 	}
 	circuitBreaker := initCircuitBreaker(cfg, logger)
@@ -183,7 +183,7 @@ func main() {
 
 	// Start stats manager and sync/export loops
 	statsManager.Start()
-	startStatsLoops(ctx, statsManager, s3Client, cfg)
+	startStatsLoops(ctx, statsManager, s3Client, cfg, logger)
 
 	// --- SMTP Server Setup ---
 
@@ -572,7 +572,7 @@ func startHealthServer(cfg *config.Config, logger *zap.Logger, statsManager *sta
 }
 
 // startStatsLoops starts the background loops for exporting and syncing stats data.
-func startStatsLoops(ctx context.Context, statsMgr *stats.Manager, s3Client *minio.Client, cfg *config.Config) {
+func startStatsLoops(ctx context.Context, statsMgr *stats.Manager, s3Client *minio.Client, cfg *config.Config, logger *zap.Logger) {
 	if !cfg.Stats.Enabled || !cfg.Stats.SyncEnabled || s3Client == nil {
 		return
 	}
@@ -587,16 +587,16 @@ func startStatsLoops(ctx context.Context, statsMgr *stats.Manager, s3Client *min
 	}
 
 	// Start export loop
-	go func() {
+	logging.SafeGo(logger, "stats-export-loop", func() {
 		statsMgr.StartExportLoop(ctx, s3Client, cfg.S3.Bucket, cfg.S3.Prefix,
 			hostname, time.Duration(cfg.Stats.SyncIntervalSeconds)*time.Second)
-	}()
+	})
 
 	// Start sync loop
-	go func() {
+	logging.SafeGo(logger, "stats-sync-loop", func() {
 		statsMgr.StartSyncLoop(ctx, s3Client, cfg.S3.Bucket, cfg.S3.Prefix,
 			time.Duration(cfg.Stats.SyncIntervalSeconds)*time.Second)
-	}()
+	})
 }
 
 // runSMTPServer configures and runs the main SMTP server, handling graceful shutdown.
@@ -621,14 +621,14 @@ func runSMTPServer(ctx context.Context, cfg *config.Config, be *smtp.Backend, tl
 
 	// Start server in a goroutine with panic recovery
 	serverErrors := make(chan error, 1)
-	go func() {
+	logging.SafeGo(logger, "smtp-server", func() {
 		logger.Sugar().Infof("Starting SMTP server on %s for domain %s", cfg.SMTP.ListenAddr, cfg.SMTP.Domain)
 		serverErrors <- server.Serve(listener)
-	}()
+	})
 
 	// Start session monitoring goroutine
 	monitorDone := make(chan struct{})
-	go func() {
+	logging.SafeGo(logger, "session-monitor", func() {
 		defer close(monitorDone)
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -646,7 +646,7 @@ func runSMTPServer(ctx context.Context, cfg *config.Config, be *smtp.Backend, tl
 				}
 			}
 		}
-	}()
+	})
 	defer func() {
 		<-monitorDone // Wait for monitoring goroutine to finish
 	}()
@@ -665,10 +665,10 @@ func runSMTPServer(ctx context.Context, cfg *config.Config, be *smtp.Backend, tl
 		logger.Sugar().Infof("Waiting up to %v for active SMTP sessions to complete...", time.Duration(cfg.SMTP.ShutdownTimeoutSeconds)*time.Second)
 
 		waitDone := make(chan struct{})
-		go func() {
+		logging.SafeGo(logger, "shutdown-wait", func() {
 			be.ActiveSessionsWg.Wait()
 			close(waitDone)
-		}()
+		})
 
 		select {
 		case <-waitDone:

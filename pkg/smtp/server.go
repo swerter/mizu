@@ -21,6 +21,7 @@ import (
 	"migadu/mizu/pkg/blacklist"
 	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/dns"
+	"migadu/mizu/pkg/logging"
 	"migadu/mizu/pkg/poster"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/validation"
@@ -554,7 +555,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		ip := net.ParseIP(ipStr)
 		if ip != nil {
 			wg.Add(1)
-			go func() {
+			logging.SafeGo(s.Logger, "spf-check", func() {
 				defer wg.Done()
 				res, err := validation.CheckSPF(context.Background(), ip, s.helo, from)
 				if err != nil {
@@ -570,7 +571,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 					}
 					spfMu.Unlock()
 				}
-			}()
+			})
 		}
 
 		// MX check in parallel
@@ -578,7 +579,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		var hasMX bool
 		if s.config.SMTP.RequireSenderMX && senderDomain != "" {
 			wg.Add(1)
-			go func() {
+			logging.SafeGo(s.Logger, "mx-check", func() {
 				defer wg.Done()
 				var err error
 				hasMX, err = validation.CheckMXRecord(context.Background(), senderDomain, s.dnsResolver, time.Duration(s.config.DNS.TimeoutSeconds)*time.Second)
@@ -591,7 +592,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 				} else {
 					s.Logger.Debug("Sender domain has valid MX records", zap.String("from", from), zap.String("domain", senderDomain))
 				}
-			}()
+			})
 		}
 
 		// Wait for both DNS queries to complete
