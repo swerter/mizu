@@ -118,17 +118,20 @@ func (c *Checker) CheckIP(ip net.IP) (bool, string, error) {
 }
 
 // CheckHELOResolves verifies that a given HELO hostname resolves to an IP address.
-func CheckHELOResolves(hostname string, timeout time.Duration) (bool, error) {
+func CheckHELOResolves(hostname string, timeout time.Duration) (bool, string, error) {
 	// Handle IP address literals in brackets [192.168.1.1]
 	if strings.HasPrefix(hostname, "[") && strings.HasSuffix(hostname, "]") {
 		ipStr := strings.Trim(hostname, "[]")
 		ip := net.ParseIP(ipStr)
-		return ip != nil, nil
+		if ip != nil {
+			return true, "IP address literal", nil
+		}
+		return false, "Invalid IP address literal", nil
 	}
 
 	// Empty hostname doesn't resolve
 	if hostname == "" {
-		return false, nil
+		return false, "Empty hostname", nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -138,13 +141,16 @@ func CheckHELOResolves(hostname string, timeout time.Duration) (bool, error) {
 	if err != nil {
 		// Check if it's a "no such host" error, which is a valid check result.
 		if dnsErr, ok := err.(*net.DNSError); ok && dnsErr.IsNotFound {
-			return false, nil
+			return false, "Hostname does not resolve", nil
 		}
 		// For other errors (e.g., timeout), return the error.
-		return false, err
+		return false, "", err
 	}
 
-	return len(addrs) > 0, nil
+	if len(addrs) > 0 {
+		return true, "Valid hostname", nil
+	}
+	return false, "No addresses found", nil
 }
 
 // reverseIP reverses the octets of an IPv4 address for DNSBL lookups.

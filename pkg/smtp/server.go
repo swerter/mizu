@@ -424,13 +424,13 @@ func (s *Session) Helo(hostname string) error {
 
 		// Optional: Verify HELO hostname has valid DNS records
 		if s.config.Blacklists.CheckHELOResolves {
-			resolves, err := blacklist.CheckHELOResolves(hostname, time.Duration(s.config.Blacklists.TimeoutSeconds)*time.Second)
+			resolves, reason, err := blacklist.CheckHELOResolves(hostname, time.Duration(s.config.Blacklists.TimeoutSeconds)*time.Second)
 			if err != nil || !resolves {
-				s.Logger.Warn("Rejecting HELO/EHLO - hostname mismatch", zap.String("remote_addr", s.remoteAddr), zap.String("hostname", hostname))
+				s.Logger.Warn("Rejecting HELO/EHLO - hostname check failed", zap.String("remote_addr", s.remoteAddr), zap.String("hostname", hostname), zap.String("reason", reason))
 				return &smtp.SMTPError{
 					Code:         550,
 					EnhancedCode: smtp.EnhancedCode{5, 7, 27},
-					Message:      "HELO hostname does not resolve",
+					Message:      fmt.Sprintf("HELO hostname check failed: %s", reason),
 				}
 			}
 		}

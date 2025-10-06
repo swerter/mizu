@@ -53,11 +53,11 @@ coverage:
 	go tool cover -html=coverage.out
 
 # Cross-compile with musl libc for Linux
-build-linux-musl:
+linux-musl:
 	CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++ GOARCH=amd64 GOOS=linux go build -ldflags="${LDFLAGS_VARS} -extldflags -static" -o $(mizu_LINUX_BINARY) ./cmd/mizu-server
 	CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++ GOARCH=amd64 GOOS=linux go build -ldflags="${LDFLAGS_VARS} -extldflags -static" -o $(mizu_ADMIN_LINUX_BINARY) ./cmd/mizu-admin
 
 # Cross-compile for FreeBSD
-build-freebsd:
+freebsd:
 	GOARCH=amd64 GOOS=freebsd go build $(LDFLAGS) -o $(mizu_FREEBSD_BINARY) ./cmd/mizu-server
 	GOARCH=amd64 GOOS=freebsd go build $(LDFLAGS) -o $(mizu_ADMIN_FREEBSD_BINARY) ./cmd/mizu-admin

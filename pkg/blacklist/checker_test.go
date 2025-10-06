@@ -78,36 +78,41 @@ func TestCheckHELOResolves(t *testing.T) {
 		hostname      string
 		shouldResolve bool
 		expectError   bool
+		expectReason  string
 	}{
 		{
 			name:          "IP in brackets",
 			hostname:      "[192.168.1.1]",
 			shouldResolve: true,
 			expectError:   false,
+			expectReason:  "IP address literal",
 		},
 		{
 			name:          "valid hostname",
 			hostname:      "localhost",
 			shouldResolve: true,
 			expectError:   false,
+			expectReason:  "Valid hostname",
 		},
 		{
 			name:          "invalid hostname",
 			hostname:      "this-hostname-definitely-does-not-exist-12345.invalid",
 			shouldResolve: false,
 			expectError:   false, // A non-resolving host is a valid check, not an error
+			expectReason:  "Hostname does not resolve",
 		},
 		{
 			name:          "empty hostname",
 			hostname:      "",
 			shouldResolve: false,
 			expectError:   false, // Should not resolve, but not error
+			expectReason:  "Empty hostname",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resolves, err := CheckHELOResolves(tt.hostname, 2*time.Second)
+			resolves, reason, err := CheckHELOResolves(tt.hostname, 2*time.Second)
 
 			if tt.expectError && err == nil {
 				t.Error("expected error but got none")
@@ -119,6 +124,10 @@ func TestCheckHELOResolves(t *testing.T) {
 
 			if !tt.expectError && resolves != tt.shouldResolve {
 				t.Errorf("CheckHELOResolves(%s) = %v; want %v", tt.hostname, resolves, tt.shouldResolve)
+			}
+
+			if !tt.expectError && reason != tt.expectReason {
+				t.Errorf("CheckHELOResolves(%s) reason = %q; want %q", tt.hostname, reason, tt.expectReason)
 			}
 		})
 	}

@@ -21,14 +21,6 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
-// PostEmailToDestination sends the raw email content to the destination with retry logic.
-// This is a convenience wrapper that uses a background context.
-// Deprecated: Use PostEmailToDestinationWithContext instead.
-func PostEmailToDestination(rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, logger *zap.Logger) error {
-	client := NewHTTPClient(30 * time.Second) // Use default 30s timeout for backward compatibility
-	return PostEmailToDestinationWithContext(context.Background(), rawEmail, destinationURL, apiKey, maxRetryAttempts, false, "", nil, "", nil, client, logger)
-}
-
 // PostEmailToDestinationWithContext sends the raw email content to the destination with retry logic and context support.
 // It implements exponential backoff between retries and respects context cancellation.
 // The isJunk parameter adds an X-Junk header to help the destination system handle spam appropriately.
