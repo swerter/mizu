@@ -1,12 +1,10 @@
 package smtp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -16,17 +14,23 @@ import (
 	"migadu/mizu/pkg/config"
 )
 
-// RateLimiter implements a multi-dimensional sliding window rate limiter with optional distributed gossip sync.
+// RateLimiterCluster interface allows for testing and abstraction
+type RateLimiterCluster interface {
+	BroadcastRateLimit(data []byte) error
+	RegisterRateLimitHandler(handler func(data []byte))
+}
+
+// RateLimiter implements a multi-dimensional sliding window rate limiter with memberlist gossip sync.
 // It tracks connection attempts across multiple configurable dimensions (e.g., IP, FROM, TO, combinations).
 type RateLimiter struct {
 	mu             sync.RWMutex
 	enabled        bool
 	dimensions     []dimensionTracker           // Configured rate limit dimensions
-	windows        map[string]*connectionWindow // composite key -> sliding window of connection timestamps
+	windows        map[string]*connectionWindow // composite key -> connection window with local/peer counts
 	gossipEnabled  bool
 	gossipInterval time.Duration
 	logger         *zap.Logger
-	peerURLs       []string // Cluster peer URLs for gossip
+	cluster        RateLimiterCluster // Memberlist cluster for gossip
 	ctx            context.Context
 	cancel         context.CancelFunc
 }
@@ -40,17 +44,21 @@ type dimensionTracker struct {
 }
 
 // connectionWindow tracks connection attempts for a single composite key using a sliding window
+// Uses counter-based approach to avoid timestamp accumulation bugs from gossip
 type connectionWindow struct {
-	timestamps  []time.Time
-	lastCleanup time.Time
+	localCount  int       // Connections from this node
+	peerCount   int       // Estimated connections from peers (from gossip)
+	windowStart time.Time // Start of current window
+	lastUpdate  time.Time // Last time this window was updated
+	lastCleanup time.Time // Last time old windows were cleaned up
 }
 
 // RateLimitData represents rate limit data that can be gossiped across the cluster
 type RateLimitData struct {
 	CompositeKey string    `json:"composite_key"` // e.g., "IP:1.2.3.4" or "FROM:user@example.com,TO:recipient@example.com"
-	Connections  int       `json:"connections"`
-	WindowStart  time.Time `json:"window_start"`
-	ReportedAt   time.Time `json:"reported_at"`
+	Count        int       `json:"count"`         // Connection count in current window
+	WindowStart  time.Time `json:"window_start"`  // Start of this node's window
+	ReportedAt   time.Time `json:"reported_at"`   // When this data was reported
 }
 
 // SessionContext holds all the information needed for rate limiting checks
@@ -60,8 +68,8 @@ type SessionContext struct {
 	To         []string // RCPT TO addresses
 }
 
-// NewRateLimiter creates a new multi-dimensional rate limiter with the specified configuration
-func NewRateLimiter(rlConfig config.RateLimitConfig, peerURLs []string, logger *zap.Logger) *RateLimiter {
+// NewRateLimiter creates a new multi-dimensional rate limiter with memberlist gossip
+func NewRateLimiter(rlConfig config.RateLimitConfig, cluster RateLimiterCluster, logger *zap.Logger) *RateLimiter {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -88,13 +96,14 @@ func NewRateLimiter(rlConfig config.RateLimitConfig, peerURLs []string, logger *
 		gossipEnabled:  rlConfig.GossipEnabled,
 		gossipInterval: rlConfig.GossipInterval,
 		logger:         logger,
-		peerURLs:       peerURLs,
+		cluster:        cluster,
 		ctx:            ctx,
 		cancel:         cancel,
 	}
 
-	// Start gossip loop if enabled
-	if rlConfig.GossipEnabled && len(peerURLs) > 0 {
+	// Register handler for rate limit gossip from peers
+	if rlConfig.GossipEnabled && cluster != nil {
+		cluster.RegisterRateLimitHandler(rl.handleGossipMessage)
 		go rl.gossipLoop()
 	}
 
@@ -127,38 +136,41 @@ func (rl *RateLimiter) CheckRateLimit(sessionCtx SessionContext) error {
 		window, exists := rl.windows[compositeKey]
 		if !exists {
 			window = &connectionWindow{
-				timestamps:  make([]time.Time, 0),
+				localCount:  0,
+				peerCount:   0,
+				windowStart: now,
+				lastUpdate:  now,
 				lastCleanup: now,
 			}
 			rl.windows[compositeKey] = window
 		}
 
-		// Remove timestamps outside the window
-		cutoff := now.Add(-dim.window)
-		validTimestamps := make([]time.Time, 0, len(window.timestamps))
-		for _, ts := range window.timestamps {
-			if ts.After(cutoff) {
-				validTimestamps = append(validTimestamps, ts)
-			}
+		// Reset window if it has expired
+		if now.Sub(window.windowStart) > dim.window {
+			window.localCount = 0
+			window.peerCount = 0
+			window.windowStart = now
+			window.lastUpdate = now
 		}
-		window.timestamps = validTimestamps
-		window.lastCleanup = now
 
-		// Check if adding this connection would exceed the limit
-		currentCount := len(window.timestamps)
-		if currentCount >= dim.limit {
+		// Check if adding this connection would exceed the limit (local + peer counts)
+		totalCount := window.localCount + window.peerCount
+		if totalCount >= dim.limit {
 			rl.mu.Unlock()
 			rl.logger.Warn("Rate limit exceeded",
 				zap.String("dimension", dim.name),
 				zap.String("composite_key", compositeKey),
-				zap.Int("current", currentCount),
+				zap.Int("local_count", window.localCount),
+				zap.Int("peer_count", window.peerCount),
+				zap.Int("total", totalCount),
 				zap.Int("limit", dim.limit),
 				zap.Duration("window", dim.window))
-			return fmt.Errorf("rate limit exceeded for %s: %d/%d connections in %v", dim.name, currentCount, dim.limit, dim.window)
+			return fmt.Errorf("rate limit exceeded for %s: %d/%d connections in %v", dim.name, totalCount, dim.limit, dim.window)
 		}
 
-		// Add this connection to the window
-		window.timestamps = append(window.timestamps, now)
+		// Increment local count for this connection
+		window.localCount++
+		window.lastUpdate = now
 		rl.mu.Unlock()
 	}
 
@@ -257,28 +269,20 @@ func (rl *RateLimiter) gossipLoop() {
 	}
 }
 
-// sendGossip broadcasts current rate limit state to all peers
+// sendGossip broadcasts current rate limit state via memberlist
 func (rl *RateLimiter) sendGossip() {
 	rl.mu.RLock()
 
-	// Collect data for all composite keys
+	// Collect data for all composite keys (only send non-zero local counts)
 	now := time.Now()
 	data := make([]RateLimitData, 0, len(rl.windows))
 
 	for compositeKey, window := range rl.windows {
-		if len(window.timestamps) > 0 {
-			// Find oldest timestamp still in any window
-			oldestTimestamp := window.timestamps[0]
-			for _, ts := range window.timestamps {
-				if ts.Before(oldestTimestamp) {
-					oldestTimestamp = ts
-				}
-			}
-
+		if window.localCount > 0 {
 			data = append(data, RateLimitData{
 				CompositeKey: compositeKey,
-				Connections:  len(window.timestamps),
-				WindowStart:  oldestTimestamp,
+				Count:        window.localCount,
+				WindowStart:  window.windowStart,
 				ReportedAt:   now,
 			})
 		}
@@ -292,57 +296,28 @@ func (rl *RateLimiter) sendGossip() {
 
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		rl.logger.Error("Failed to marshal gossip data", zap.Error(err))
+		rl.logger.Error("Failed to marshal rate limit data", zap.Error(err))
 		return
 	}
 
-	// Send to all peers in parallel
-	for _, peerURL := range rl.peerURLs {
-		go rl.sendToPeer(peerURL, jsonData)
+	if err := rl.cluster.BroadcastRateLimit(jsonData); err != nil {
+		rl.logger.Debug("Failed to broadcast rate limit data", zap.Error(err))
 	}
 }
 
-// sendToPeer sends gossip data to a single peer
-func (rl *RateLimiter) sendToPeer(peerURL string, jsonData []byte) {
-	url := peerURL + "/api/rate-limit-gossip"
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(jsonData))
-	if err != nil {
-		rl.logger.Debug("Failed to send rate limit gossip to peer", zap.String("peer", peerURL), zap.Error(err))
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		rl.logger.Debug("Peer returned non-OK status for rate limit gossip", zap.String("peer", peerURL), zap.Int("status", resp.StatusCode))
-	}
-}
-
-// HandleGossip processes incoming gossip data from a peer (HTTP handler)
-func (rl *RateLimiter) HandleGossip(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+// handleGossipMessage processes rate limit gossip messages from memberlist
+func (rl *RateLimiter) handleGossipMessage(data []byte) {
+	var rateLimitData []RateLimitData
+	if err := json.Unmarshal(data, &rateLimitData); err != nil {
+		rl.logger.Warn("Failed to unmarshal rate limit gossip data", zap.Error(err))
 		return
 	}
 
-	var data []RateLimitData
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		rl.logger.Warn("Failed to decode rate limit gossip data", zap.Error(err))
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	rl.MergeGossipData(data)
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{
-		"status": "success",
-		"merged": len(data),
-	})
+	rl.MergeGossipData(rateLimitData)
 }
 
 // MergeGossipData merges received gossip data into local state
+// Uses sum of peer counts to estimate cluster-wide rate limit consumption
 func (rl *RateLimiter) MergeGossipData(data []RateLimitData) {
 	if !rl.gossipEnabled {
 		return
@@ -352,10 +327,16 @@ func (rl *RateLimiter) MergeGossipData(data []RateLimitData) {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	maxWindow := rl.getMaxWindow()
 
+	// First, reset all peer counts (we'll rebuild from gossip)
+	for _, window := range rl.windows {
+		window.peerCount = 0
+	}
+
+	// Aggregate peer counts from gossip
 	for _, item := range data {
 		// Skip stale data (older than any configured window)
-		maxWindow := rl.getMaxWindow()
 		if now.Sub(item.ReportedAt) > maxWindow {
 			continue
 		}
@@ -364,24 +345,17 @@ func (rl *RateLimiter) MergeGossipData(data []RateLimitData) {
 		window, exists := rl.windows[item.CompositeKey]
 		if !exists {
 			window = &connectionWindow{
-				timestamps:  make([]time.Time, 0, item.Connections),
+				localCount:  0,
+				peerCount:   0,
+				windowStart: item.WindowStart,
+				lastUpdate:  now,
 				lastCleanup: now,
 			}
 			rl.windows[item.CompositeKey] = window
 		}
 
-		// Add timestamps from peer (approximate distribution across window)
-		// This is a simplified merge - real timestamps not available from peers
-		for i := 0; i < item.Connections; i++ {
-			// Distribute timestamps evenly across the window
-			offset := time.Duration(i) * (now.Sub(item.WindowStart)) / time.Duration(item.Connections)
-			ts := item.WindowStart.Add(offset)
-
-			// Only add if not too old for any dimension
-			if now.Sub(ts) <= maxWindow {
-				window.timestamps = append(window.timestamps, ts)
-			}
-		}
+		// Add peer's count to our peer count (sum across all peers)
+		window.peerCount += item.Count
 	}
 }
 
@@ -411,27 +385,18 @@ func (rl *RateLimiter) cleanupLoop() {
 	}
 }
 
-// cleanup removes old timestamps and empty windows
+// cleanup removes old windows that are no longer active
 func (rl *RateLimiter) cleanup() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	now := time.Now()
 	maxWindow := rl.getMaxWindow()
-	cutoff := now.Add(-maxWindow * 2) // Keep 2x max window for safety
+	staleThreshold := maxWindow * 2 // Keep windows for 2x max window
 
 	for compositeKey, window := range rl.windows {
-		// Remove old timestamps
-		validTimestamps := make([]time.Time, 0, len(window.timestamps))
-		for _, ts := range window.timestamps {
-			if ts.After(cutoff) {
-				validTimestamps = append(validTimestamps, ts)
-			}
-		}
-		window.timestamps = validTimestamps
-
-		// Remove empty windows
-		if len(window.timestamps) == 0 && now.Sub(window.lastCleanup) > maxWindow {
+		// Remove windows that haven't been updated recently and have no counts
+		if window.localCount == 0 && window.peerCount == 0 && now.Sub(window.lastUpdate) > staleThreshold {
 			delete(rl.windows, compositeKey)
 		}
 	}

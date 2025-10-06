@@ -20,6 +20,7 @@ import (
 
 	"migadu/mizu/pkg/blacklist"
 	"migadu/mizu/pkg/config"
+	"migadu/mizu/pkg/dns"
 	"migadu/mizu/pkg/poster"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/validation"
@@ -49,26 +50,11 @@ func generateTraceID() string {
 }
 
 // NewDNSResolver creates a DNS resolver based on configuration.
-// If custom DNS servers are configured, uses them; otherwise uses system default resolver.
+// If custom DNS servers are configured, uses them with round-robin and failover;
+// otherwise uses system default resolver.
 func NewDNSResolver(dnsServers []string, timeout time.Duration) *net.Resolver {
-	if len(dnsServers) == 0 {
-		// Use system default resolver
-		return net.DefaultResolver
-	}
-
-	// Create custom resolver with configured DNS servers
-	// We'll use round-robin across multiple servers
-	return &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			// Use the first configured DNS server
-			// In production, you might want to implement round-robin or failover
-			d := net.Dialer{
-				Timeout: timeout,
-			}
-			return d.DialContext(ctx, "udp", dnsServers[0])
-		},
-	}
+	// Use the resilient resolver which implements round-robin and failover
+	return dns.NewResilientResolver(dnsServers, timeout)
 }
 
 // Backend implements smtp.Backend interface for our custom SMTP server.

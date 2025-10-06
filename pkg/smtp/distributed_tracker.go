@@ -7,30 +7,46 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"migadu/mizu/pkg/cluster"
 	"migadu/mizu/pkg/health"
 	"net"
-	"net/http"
 	"path"
 	"sync"
 	"time"
 
+	"github.com/hashicorp/memberlist"
 	"github.com/minio/minio-go/v7"
 	"go.uber.org/zap"
 )
 
-// DistributedTracker wraps ConnectionTracker with P2P gossip and S3 sync capabilities
+// ClusterManager interface allows for testing and abstraction
+type ClusterManager interface {
+	BroadcastConnectionState(data []byte) error
+	RegisterConnectionStateHandler(handler func(data []byte))
+	NumMembers() int
+	SetStateDelegate(delegate cluster.StateDelegate)
+	SetEventDelegate(delegate cluster.EventDelegate)
+}
+
+// DistributedTracker wraps ConnectionTracker with memberlist gossip and S3 sync capabilities
 type DistributedTracker struct {
 	local    *ConnectionTracker // Local connection tracking (fast path)
 	hostname string             // This server's hostname
 	logger   *zap.Logger
 
-	// P2P gossip configuration
-	peers           []string      // Peer HTTP endpoints (e.g., "https://smtp2:8080")
-	gossipInterval  time.Duration // How often to broadcast (default: 5s)
+	// Vector clock for conflict resolution
+	vectorClock *cluster.VectorClock
+	clockMu     sync.RWMutex
+
+	// Memberlist cluster for peer discovery and gossip
+	cluster        ClusterManager
+	gossipInterval time.Duration // How often to broadcast (default: 5s)
+
+	// Peer state from memberlist gossip
 	peerConnections map[string]*PeerConnectionState
 	peerMu          sync.RWMutex
 
-	// S3 sync configuration
+	// S3 sync configuration (for cold start and backup)
 	s3Client       *minio.Client
 	s3Bucket       string
 	s3Prefix       string
@@ -53,11 +69,12 @@ type DistributedTracker struct {
 
 // PeerConnectionState holds connection counts from a peer server
 type PeerConnectionState struct {
-	Hostname    string         `json:"hostname"`
-	Timestamp   time.Time      `json:"timestamp"`
-	Connections map[string]int `json:"connections"` // IP -> count
-	TotalCount  int            `json:"total_count"`
-	UpdatedAt   time.Time      `json:"-"` // When we received this update
+	Hostname    string               `json:"hostname"`
+	Timestamp   time.Time            `json:"timestamp"`
+	Connections map[string]int       `json:"connections"` // IP -> count
+	TotalCount  int                  `json:"total_count"`
+	VectorClock *cluster.VectorClock `json:"vector_clock"`
+	UpdatedAt   time.Time            `json:"-"` // When we received this update
 }
 
 // ConnectionSnapshot represents the state to sync
@@ -66,7 +83,7 @@ type ConnectionSnapshot struct {
 	Timestamp      time.Time               `json:"timestamp"`
 	Connections    map[string]int          `json:"connections"`
 	TotalCount     int                     `json:"total_count"`
-	Version        int                     `json:"version"` // For conflict resolution
+	VectorClock    *cluster.VectorClock    `json:"vector_clock"`
 	RecipientCache *RecipientCacheSnapshot `json:"recipient_cache,omitempty"`
 }
 
@@ -79,14 +96,14 @@ type RecipientCacheSnapshot struct {
 // DistributedConfig holds configuration for distributed tracking
 type DistributedConfig struct {
 	Hostname          string
-	Peers             []string      // Peer endpoints
-	GossipInterval    time.Duration // P2P broadcast interval
-	S3SyncInterval    time.Duration // S3 sync interval
-	GlobalMaxPerIP    int           // Global per-IP limit across cluster
-	RecipientCacheTTL time.Duration // How long to cache recipient validation results
+	Cluster           ClusterManager // Memberlist cluster instance
+	GossipInterval    time.Duration  // How often to broadcast (default: 5s)
+	S3SyncInterval    time.Duration  // S3 sync interval (default: 30s)
+	GlobalMaxPerIP    int            // Global per-IP limit across cluster
+	RecipientCacheTTL time.Duration  // How long to cache recipient validation results
 }
 
-// NewDistributedTracker creates a new distributed connection tracker
+// NewDistributedTracker creates a new distributed connection tracker using memberlist
 func NewDistributedTracker(
 	local *ConnectionTracker,
 	s3Client *minio.Client,
@@ -96,10 +113,11 @@ func NewDistributedTracker(
 ) *DistributedTracker {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &DistributedTracker{
+	dt := &DistributedTracker{
 		local:             local,
 		hostname:          config.Hostname,
-		peers:             config.Peers,
+		vectorClock:       cluster.NewVectorClock(config.Hostname),
+		cluster:           config.Cluster,
 		gossipInterval:    config.GossipInterval,
 		s3Client:          s3Client,
 		s3Bucket:          s3Bucket,
@@ -114,23 +132,86 @@ func NewDistributedTracker(
 		ctx:               ctx,
 		cancel:            cancel,
 	}
+
+	// Register handlers, state delegate, and event delegate with the cluster
+	if config.Cluster != nil {
+		config.Cluster.RegisterConnectionStateHandler(dt.handleGossipMessage)
+		config.Cluster.SetStateDelegate(dt)
+		config.Cluster.SetEventDelegate(dt)
+	}
+
+	return dt
+}
+
+// GetState returns the current state of the tracker as a byte slice.
+// This is used for state synchronization when a new node joins the cluster.
+func (dt *DistributedTracker) GetState() []byte {
+	// Increment vector clock for state synchronization event
+	dt.clockMu.Lock()
+	dt.vectorClock.Increment()
+	dt.clockMu.Unlock()
+
+	snapshot := dt.createSnapshot()
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		dt.logger.Error("Failed to marshal state snapshot", zap.Error(err))
+		return nil
+	}
+	return data
+}
+
+// MergeState merges the remote state into the local state.
+// This is used for state synchronization when a new node joins the cluster.
+func (dt *DistributedTracker) MergeState(data []byte) {
+	var snapshot ConnectionSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		dt.logger.Error("Failed to unmarshal remote state snapshot", zap.Error(err))
+		return
+	}
+
+	// Update local vector clock with remote clock
+	if snapshot.VectorClock != nil {
+		dt.clockMu.Lock()
+		dt.vectorClock.Update(snapshot.VectorClock)
+		dt.clockMu.Unlock()
+	}
+
+	// We can just use the same handler as for gossip messages
+	dt.handleGossipMessage(data)
+
+	clockStr := "nil"
+	if snapshot.VectorClock != nil {
+		clockStr = snapshot.VectorClock.String()
+	}
+	dt.logger.Info("Merged remote state from peer",
+		zap.String("peer", snapshot.Hostname),
+		zap.Int("total_connections", snapshot.TotalCount),
+		zap.Int("unique_ips", len(snapshot.Connections)),
+		zap.String("vector_clock", clockStr))
 }
 
 // Start begins the gossip and sync loops
 func (dt *DistributedTracker) Start() {
+	clusterMembers := 0
+	if dt.cluster != nil {
+		clusterMembers = dt.cluster.NumMembers()
+	}
+
 	dt.logger.Info("Starting distributed connection tracker",
 		zap.String("hostname", dt.hostname),
-		zap.Int("peers", len(dt.peers)),
+		zap.Int("cluster_members", clusterMembers),
 		zap.Duration("gossip_interval", dt.gossipInterval),
 		zap.Duration("s3_sync_interval", dt.s3SyncInterval),
 		zap.Int("global_max_per_ip", dt.globalMaxPerIP),
 		zap.Duration("recipient_cache_ttl", dt.recipientCacheTTL))
 
-	// Start P2P gossip loop
-	dt.wg.Add(1)
-	go dt.gossipLoop()
+	// Start memberlist gossip loop
+	if dt.cluster != nil {
+		dt.wg.Add(1)
+		go dt.gossipLoop()
+	}
 
-	// Start S3 sync loop (if configured)
+	// Start S3 sync loop (if configured - for cold start and backup)
 	if dt.s3Client != nil && dt.s3Bucket != "" {
 		dt.wg.Add(1)
 		go dt.s3SyncLoop()
@@ -341,7 +422,7 @@ func (dt *DistributedTracker) estimateGlobalCount(remoteAddr string) int {
 	return localCount + peerTotal
 }
 
-// gossipLoop periodically broadcasts connection state to peers
+// gossipLoop periodically broadcasts connection state via memberlist
 func (dt *DistributedTracker) gossipLoop() {
 	defer dt.wg.Done()
 
@@ -353,23 +434,28 @@ func (dt *DistributedTracker) gossipLoop() {
 		case <-dt.ctx.Done():
 			return
 		case <-ticker.C:
-			dt.broadcastToPeers()
+			dt.broadcastToCluster()
 		}
 	}
 }
 
-// broadcastToPeers sends current connection state to all peers
-func (dt *DistributedTracker) broadcastToPeers() {
+// broadcastToCluster broadcasts current connection state via memberlist
+func (dt *DistributedTracker) broadcastToCluster() {
+	// Increment vector clock for each broadcast
+	dt.clockMu.Lock()
+	dt.vectorClock.Increment()
+	dt.clockMu.Unlock()
+
 	snapshot := dt.createSnapshot()
 
-	for _, peer := range dt.peers {
-		go func(peerURL string) {
-			if err := dt.sendToPeer(peerURL, snapshot); err != nil {
-				dt.logger.Debug("Failed to send gossip to peer",
-					zap.String("peer", peerURL),
-					zap.Error(err))
-			}
-		}(peer)
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		dt.logger.Error("Failed to marshal connection snapshot", zap.Error(err))
+		return
+	}
+
+	if err := dt.cluster.BroadcastConnectionState(data); err != nil {
+		dt.logger.Debug("Failed to broadcast connection state", zap.Error(err))
 	}
 }
 
@@ -397,71 +483,101 @@ func (dt *DistributedTracker) createSnapshot() *ConnectionSnapshot {
 		}
 	}
 
+	// Copy vector clock
+	dt.clockMu.RLock()
+	clockCopy := dt.vectorClock.Copy()
+	dt.clockMu.RUnlock()
+
 	return &ConnectionSnapshot{
 		Hostname:       dt.hostname,
 		Timestamp:      time.Now(),
 		Connections:    perIP,
 		TotalCount:     total,
-		Version:        1, // Simple versioning
+		VectorClock:    clockCopy,
 		RecipientCache: recipientCache,
 	}
 }
 
-// sendToPeer sends a snapshot to a peer server
-func (dt *DistributedTracker) sendToPeer(peerURL string, snapshot *ConnectionSnapshot) error {
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("failed to marshal snapshot: %w", err)
+// handleGossipMessage processes connection state gossip messages from memberlist
+func (dt *DistributedTracker) handleGossipMessage(data []byte) {
+	var snapshot ConnectionSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		dt.logger.Warn("Failed to unmarshal connection snapshot from gossip", zap.Error(err))
+		return
 	}
 
-	endpoint := peerURL + "/api/connections/sync"
-	client := &http.Client{
-		Timeout: 5 * time.Second, // Prevent gossip from hanging
-	}
-	req, err := http.NewRequestWithContext(dt.ctx, "POST", endpoint, bytes.NewReader(data))
-	if err != nil {
-		return fmt.Errorf("failed to create request for peer: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
+	// Perform conflict resolution using vector clocks
+	shouldMerge := true
+	conflictType := "new"
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to post to peer: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("peer returned non-OK status: %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
-// HandlePeerUpdate processes a connection snapshot from a peer
-func (dt *DistributedTracker) HandlePeerUpdate(snapshot *ConnectionSnapshot) {
 	dt.peerMu.Lock()
-	// Convert to PeerConnectionState
-	peerState := &PeerConnectionState{
-		Hostname:    snapshot.Hostname,
-		Timestamp:   snapshot.Timestamp,
-		Connections: snapshot.Connections,
-		TotalCount:  snapshot.TotalCount,
-		UpdatedAt:   time.Now(),
+	if existingPeer, exists := dt.peerConnections[snapshot.Hostname]; exists && existingPeer.VectorClock != nil && snapshot.VectorClock != nil {
+		comparison := snapshot.VectorClock.Compare(existingPeer.VectorClock)
+		switch comparison {
+		case 1:
+			// New snapshot happened after existing one - accept
+			conflictType = "newer"
+			shouldMerge = true
+		case -1:
+			// New snapshot happened before existing one - reject (stale)
+			conflictType = "stale"
+			shouldMerge = false
+			dt.logger.Debug("Rejecting stale snapshot",
+				zap.String("peer", snapshot.Hostname),
+				zap.String("local_clock", existingPeer.VectorClock.String()),
+				zap.String("remote_clock", snapshot.VectorClock.String()))
+		case 0:
+			// Concurrent updates - use timestamp as tiebreaker
+			conflictType = "concurrent"
+			shouldMerge = snapshot.Timestamp.After(existingPeer.Timestamp)
+			dt.logger.Debug("Concurrent snapshot detected, using timestamp tiebreaker",
+				zap.String("peer", snapshot.Hostname),
+				zap.Bool("accepting", shouldMerge),
+				zap.Time("local_time", existingPeer.Timestamp),
+				zap.Time("remote_time", snapshot.Timestamp))
+		}
 	}
 
-	// Update peer state
-	dt.peerConnections[snapshot.Hostname] = peerState
-	dt.peerMu.Unlock()
+	if shouldMerge {
+		// Convert to PeerConnectionState
+		peerState := &PeerConnectionState{
+			Hostname:    snapshot.Hostname,
+			Timestamp:   snapshot.Timestamp,
+			Connections: snapshot.Connections,
+			TotalCount:  snapshot.TotalCount,
+			VectorClock: snapshot.VectorClock,
+			UpdatedAt:   time.Now(),
+		}
 
-	// Merge recipient cache from peer
-	if snapshot.RecipientCache != nil {
-		dt.mergeRecipientCache(snapshot.RecipientCache)
+		// Update peer state
+		dt.peerConnections[snapshot.Hostname] = peerState
+		dt.peerMu.Unlock()
+
+		// Update our vector clock with the remote clock
+		if snapshot.VectorClock != nil {
+			dt.clockMu.Lock()
+			dt.vectorClock.Update(snapshot.VectorClock)
+			dt.clockMu.Unlock()
+		}
+
+		// Merge recipient cache from peer
+		if snapshot.RecipientCache != nil {
+			dt.mergeRecipientCache(snapshot.RecipientCache)
+		}
+
+		clockStr := "nil"
+		if snapshot.VectorClock != nil {
+			clockStr = snapshot.VectorClock.String()
+		}
+		dt.logger.Debug("Received connection state from peer via memberlist",
+			zap.String("peer", snapshot.Hostname),
+			zap.Int("total_connections", snapshot.TotalCount),
+			zap.Int("unique_ips", len(snapshot.Connections)),
+			zap.String("conflict_type", conflictType),
+			zap.String("vector_clock", clockStr))
+	} else {
+		dt.peerMu.Unlock()
 	}
-
-	dt.logger.Debug("Received peer update",
-		zap.String("peer", snapshot.Hostname),
-		zap.Int("total_connections", snapshot.TotalCount),
-		zap.Int("unique_ips", len(snapshot.Connections)))
 }
 
 // mergeRecipientCache merges recipient cache from a peer snapshot
@@ -661,8 +777,8 @@ func (dt *DistributedTracker) downloadPeerState(objectKey string) error {
 		return fmt.Errorf("failed to unmarshal: %w", err)
 	}
 
-	// Process the update (same as P2P gossip)
-	dt.HandlePeerUpdate(&snapshot)
+	// Process the update (same as memberlist gossip)
+	dt.handleGossipMessage(data)
 
 	return nil
 }
@@ -696,31 +812,6 @@ func (dt *DistributedTracker) GetGlobalStats() (localTotal, estimatedGlobalTotal
 	return localTotal, localTotal + peerTotal, len(globalPerIP), globalPerIP
 }
 
-// HTTPHandler returns an HTTP handler for receiving peer gossip updates
-func (dt *DistributedTracker) HTTPHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var snapshot ConnectionSnapshot
-		if err := json.NewDecoder(r.Body).Decode(&snapshot); err != nil {
-			dt.logger.Error("Failed to decode peer snapshot", zap.Error(err))
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-
-		// Process the update
-		dt.HandlePeerUpdate(&snapshot)
-
-		// Respond with our current state
-		mySnapshot := dt.createSnapshot()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(mySnapshot)
-	}
-}
-
 // parseAddr extracts IP from "IP:port" format
 func parseAddr(addr string) (string, string, error) {
 	// Try to parse as IP:port
@@ -730,6 +821,36 @@ func parseAddr(addr string) (string, string, error) {
 		return addr, "", nil
 	}
 	return host, port, nil
+}
+
+// --- EventDelegate Interface Implementation ---
+
+// NotifyJoin is called when a node joins the cluster
+func (dt *DistributedTracker) NotifyJoin(node *memberlist.Node) {
+	dt.logger.Info("Peer joined - expecting state sync",
+		zap.String("peer", node.Name),
+		zap.String("addr", node.Address()))
+}
+
+// NotifyLeave is called when a node leaves the cluster gracefully
+func (dt *DistributedTracker) NotifyLeave(node *memberlist.Node) {
+	nodeName := node.Name
+
+	dt.peerMu.Lock()
+	if _, exists := dt.peerConnections[nodeName]; exists {
+		delete(dt.peerConnections, nodeName)
+		dt.logger.Info("Proactively removed peer state on leave event",
+			zap.String("peer", nodeName),
+			zap.String("addr", node.Address()))
+	}
+	dt.peerMu.Unlock()
+}
+
+// NotifyUpdate is called when a node's metadata is updated
+func (dt *DistributedTracker) NotifyUpdate(node *memberlist.Node) {
+	dt.logger.Debug("Peer updated",
+		zap.String("peer", node.Name),
+		zap.String("addr", node.Address()))
 }
 
 // Name returns the name of this health checker
@@ -754,10 +875,16 @@ func (dt *DistributedTracker) CheckHealth() health.ComponentStatus {
 	}
 	dt.peerMu.RUnlock()
 
+	// Get cluster members count
+	clusterMembers := 0
+	if dt.cluster != nil {
+		clusterMembers = dt.cluster.NumMembers()
+	}
+
 	// Determine status
 	status := "healthy"
-	if len(dt.peers) > 0 && activePeers == 0 {
-		// We have peers configured but none are responding
+	if clusterMembers > 1 && activePeers == 0 {
+		// We have cluster members but none are sending gossip
 		status = "degraded"
 	}
 
@@ -767,7 +894,7 @@ func (dt *DistributedTracker) CheckHealth() health.ComponentStatus {
 			"local_connections":  localTotal,
 			"global_connections": globalTotal,
 			"unique_ips":         uniqueIPs,
-			"configured_peers":   len(dt.peers),
+			"cluster_members":    clusterMembers,
 			"active_peers":       activePeers,
 			"stale_peers":        stalePeers,
 			"global_max_per_ip":  dt.globalMaxPerIP,

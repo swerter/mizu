@@ -56,16 +56,18 @@ type DNSConfig struct {
 	Timeout time.Duration `toml:"timeout"` // DNS query timeout (default: 5s)
 }
 
-// ClusterConfig holds global cluster/peering configuration
+// ClusterConfig holds global cluster/peering configuration (using memberlist)
 type ClusterConfig struct {
-	Enabled  bool     `toml:"enabled"`   // Enable cluster mode
-	Hostname string   `toml:"hostname"`  // This server's hostname (auto-detected if empty)
-	PeerPort string   `toml:"peer_port"` // Port for peer-to-peer communication (default: same as health.listen_addr)
-	Peers    []string `toml:"peers"`     // List of peer hostnames (e.g., ["smtp2.example.com", "smtp3.example.com"])
+	Enabled       bool     `toml:"enabled"`        // Enable cluster mode (memberlist)
+	NodeName      string   `toml:"node_name"`      // This node's name (defaults to hostname)
+	BindAddr      string   `toml:"bind_addr"`      // Address to bind memberlist to (e.g., "0.0.0.0")
+	BindPort      int      `toml:"bind_port"`      // Port for memberlist (default: 7946)
+	AdvertiseAddr string   `toml:"advertise_addr"` // Address to advertise to peers (optional, auto-detected)
+	AdvertisePort int      `toml:"advertise_port"` // Port to advertise (optional, defaults to bind_port)
+	SeedNodes     []string `toml:"seed_nodes"`     // Initial nodes to join (e.g., ["node1.example.com:7946"])
 }
 
 // DistributedLimitsConfig holds configuration for distributed connection tracking
-// Note: Peer configuration is now in ClusterConfig (cluster.peers + cluster.peer_port)
 type DistributedLimitsConfig struct {
 	Enabled           bool          `toml:"enabled"`             // Enable distributed tracking (requires cluster.enabled=true)
 	GlobalMaxPerIP    int           `toml:"global_max_per_ip"`   // Global max connections per IP across cluster (0 = use local limit only)
@@ -219,10 +221,13 @@ func DefaultConfig() *Config {
 			MaxDomainEntries:  50000,  // 50k domain entries
 		},
 		Cluster: ClusterConfig{
-			Enabled:  false,
-			Hostname: "",         // Auto-detected if empty
-			PeerPort: ":8080",    // Default to health check port
-			Peers:    []string{}, // No peers by default
+			Enabled:       false,
+			NodeName:      "",         // Auto-detected if empty
+			BindAddr:      "0.0.0.0",  // Bind to all interfaces
+			BindPort:      7946,       // Standard memberlist port
+			AdvertiseAddr: "",         // Auto-detected
+			AdvertisePort: 0,          // Defaults to BindPort
+			SeedNodes:     []string{}, // No seed nodes by default
 		},
 		LogFormat: "text",
 		Local:     false,

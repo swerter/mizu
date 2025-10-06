@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"migadu/mizu/pkg/cluster"
 	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/health"
 	"migadu/mizu/pkg/logging"
@@ -79,6 +80,16 @@ func main() {
 	}
 	circuitBreaker := initCircuitBreaker(cfg, logger)
 
+	// Initialize memberlist cluster (if enabled)
+	var clusterMgr *cluster.Cluster
+	if cfg.Cluster.Enabled {
+		clusterMgr, err = initCluster(cfg, logger)
+		if err != nil {
+			logger.Sugar().Fatalf("Failed to initialize cluster: %v", err)
+		}
+		defer clusterMgr.Shutdown()
+	}
+
 	// Create HTTP client with configured timeout for posting emails to destination
 	httpClient := poster.NewHTTPClient(cfg.Destination.HTTPTimeout)
 
@@ -86,18 +97,20 @@ func main() {
 	connTracker := smtp.NewConnectionTracker(cfg.SMTP.MaxConnections, cfg.SMTP.MaxConnectionsPerIP)
 	logger.Sugar().Infof("Connection limits: max_total=%d, max_per_ip=%d", cfg.SMTP.MaxConnections, cfg.SMTP.MaxConnectionsPerIP)
 
-	// Create distributed tracker if enabled (requires cluster configuration)
+	// Create distributed tracker if enabled (requires cluster)
 	var distTracker *smtp.DistributedTracker
 	if cfg.SMTP.Distributed.Enabled {
-		if !cfg.Cluster.Enabled {
+		if !cfg.Cluster.Enabled || clusterMgr == nil {
 			logger.Sugar().Fatal("Distributed connection tracking requires cluster.enabled=true")
 		}
 
-		// Build peer URLs using cluster configuration (hostname + peer_port)
-		// Note: Path will be added by DistributedTracker.sendToPeer()
-		peerURLs := make([]string, len(cfg.Cluster.Peers))
-		for i, hostname := range cfg.Cluster.Peers {
-			peerURLs[i] = fmt.Sprintf("http://%s%s", hostname, cfg.Cluster.PeerPort)
+		// Use node name from cluster config
+		nodeName := cfg.Cluster.NodeName
+		if nodeName == "" {
+			// Auto-detect
+			if h, err := os.Hostname(); err == nil {
+				nodeName = h
+			}
 		}
 
 		distTracker = smtp.NewDistributedTracker(
@@ -106,8 +119,8 @@ func main() {
 			cfg.S3.Bucket,
 			cfg.S3.Prefix,
 			smtp.DistributedConfig{
-				Hostname:          cfg.Cluster.Hostname,
-				Peers:             peerURLs,
+				Hostname:          nodeName,
+				Cluster:           clusterMgr, // Pass memberlist cluster
 				GossipInterval:    cfg.SMTP.Distributed.GossipInterval,
 				S3SyncInterval:    cfg.SMTP.Distributed.S3SyncInterval,
 				GlobalMaxPerIP:    cfg.SMTP.Distributed.GlobalMaxPerIP,
@@ -116,20 +129,12 @@ func main() {
 			logger,
 		)
 		distTracker.Start()
-		logger.Sugar().Infof("Distributed connection tracking enabled: global_max_per_ip=%d, peers=%d",
-			cfg.SMTP.Distributed.GlobalMaxPerIP, len(cfg.Cluster.Peers))
+		logger.Sugar().Infof("Distributed connection tracking enabled: global_max_per_ip=%d, cluster_members=%d",
+			cfg.SMTP.Distributed.GlobalMaxPerIP, clusterMgr.NumMembers())
 	}
 
 	// Initialize and start health check server
 	healthServer := startHealthServer(cfg, logger, statsManager, circuitBreaker, connTracker, distTracker, s3Client)
-
-	// Register distributed connection sync endpoint if enabled
-	if distTracker != nil && healthServer != nil {
-		healthServer.RegisterHandler("/api/connections/sync", distTracker.HTTPHandler())
-		logger.Info("Registered distributed connection sync endpoint at /api/connections/sync")
-	}
-
-	// Note: Rate limiter gossip endpoint will be registered after rate limiter is created
 
 	// Start stats manager and sync/export loops
 	statsManager.Start()
@@ -148,16 +153,12 @@ func main() {
 	// Create rate limiter
 	var rateLimiter *smtp.RateLimiter
 	if cfg.SMTP.RateLimit.Enabled {
-		// Build peer URLs for gossip if cluster mode and gossip enabled
-		var peerURLs []string
-		if cfg.SMTP.RateLimit.GossipEnabled && cfg.Cluster.Enabled && len(cfg.Cluster.Peers) > 0 {
-			peerURLs = make([]string, len(cfg.Cluster.Peers))
-			for i, peer := range cfg.Cluster.Peers {
-				peerURLs[i] = "http://" + peer + cfg.Cluster.PeerPort
-			}
+		// Check if gossip requires cluster
+		if cfg.SMTP.RateLimit.GossipEnabled && (!cfg.Cluster.Enabled || clusterMgr == nil) {
+			logger.Sugar().Fatal("Rate limit gossip requires cluster.enabled=true")
 		}
 
-		rateLimiter = smtp.NewRateLimiter(cfg.SMTP.RateLimit, peerURLs, logger)
+		rateLimiter = smtp.NewRateLimiter(cfg.SMTP.RateLimit, clusterMgr, logger)
 
 		// Log configured dimensions
 		logger.Info("Rate limiting enabled",
@@ -169,12 +170,6 @@ func main() {
 				zap.Strings("keys", dim.Keys),
 				zap.Int("limit", dim.Limit),
 				zap.Duration("window", dim.Window))
-		}
-
-		// Register rate limit gossip endpoint with health server
-		if cfg.SMTP.RateLimit.GossipEnabled && healthServer != nil {
-			healthServer.RegisterHandler("/api/rate-limit-gossip", rateLimiter.HandleGossip)
-			logger.Info("Registered rate limit gossip endpoint at /api/rate-limit-gossip")
 		}
 	}
 
@@ -220,17 +215,24 @@ func initStatsManager(cfg *config.Config, logger *zap.Logger) *stats.Manager {
 		return stats.NewManager(false, 0, "", false, 0, nil, 0, 0, logger)
 	}
 
-	// Use cluster peers for stats sync (build full URLs with peer port)
+	// Stats sync still uses HTTP (not migrated to memberlist yet)
+	// Build peer URLs from seed nodes for stats HTTP sync
 	var syncServers []string
 	if cfg.Stats.SyncEnabled && cfg.Cluster.Enabled {
-		syncServers = make([]string, len(cfg.Cluster.Peers))
-		for i, hostname := range cfg.Cluster.Peers {
-			syncServers[i] = fmt.Sprintf("http://%s%s", hostname, cfg.Cluster.PeerPort)
+		// Convert seed nodes to HTTP URLs (assuming health server port 8080)
+		syncServers = make([]string, len(cfg.Cluster.SeedNodes))
+		for i, seedNode := range cfg.Cluster.SeedNodes {
+			// Extract hostname from "hostname:port" format
+			host, _, _ := net.SplitHostPort(seedNode)
+			if host == "" {
+				host = seedNode // No port specified
+			}
+			syncServers[i] = fmt.Sprintf("http://%s:8080", host)
 		}
 	}
 
-	// Use cluster hostname for stats identification
-	hostname := cfg.Cluster.Hostname
+	// Use node name for stats identification
+	hostname := cfg.Cluster.NodeName
 	if hostname == "" {
 		// Auto-detect hostname if not configured
 		if h, err := os.Hostname(); err == nil {
@@ -348,6 +350,38 @@ func initCircuitBreaker(cfg *config.Config, logger *zap.Logger) *poster.CircuitB
 	return cb
 }
 
+// initCluster initializes the memberlist cluster for distributed operations
+func initCluster(cfg *config.Config, logger *zap.Logger) (*cluster.Cluster, error) {
+	// Determine node name
+	nodeName := cfg.Cluster.NodeName
+	if nodeName == "" {
+		// Auto-detect from OS hostname
+		if h, err := os.Hostname(); err == nil {
+			nodeName = h
+		} else {
+			return nil, fmt.Errorf("failed to auto-detect hostname: %w", err)
+		}
+	}
+
+	clusterCfg := cluster.Config{
+		NodeName:      nodeName,
+		BindAddr:      cfg.Cluster.BindAddr,
+		BindPort:      cfg.Cluster.BindPort,
+		AdvertiseAddr: cfg.Cluster.AdvertiseAddr,
+		AdvertisePort: cfg.Cluster.AdvertisePort,
+		SeedNodes:     cfg.Cluster.SeedNodes,
+		Logger:        logger,
+	}
+
+	logger.Info("Initializing memberlist cluster",
+		zap.String("node_name", nodeName),
+		zap.String("bind_addr", cfg.Cluster.BindAddr),
+		zap.Int("bind_port", cfg.Cluster.BindPort),
+		zap.Int("seed_nodes", len(cfg.Cluster.SeedNodes)))
+
+	return cluster.NewCluster(clusterCfg)
+}
+
 // startHealthServer initializes and starts the health check server.
 func startHealthServer(cfg *config.Config, logger *zap.Logger, statsManager *stats.Manager, cb *poster.CircuitBreaker, connTracker *smtp.ConnectionTracker, distTracker *smtp.DistributedTracker, s3Client *minio.Client) *health.Server {
 	if !cfg.Health.Enabled {
@@ -410,8 +444,8 @@ func startStatsLoops(ctx context.Context, statsMgr *stats.Manager, s3Client *min
 		return
 	}
 
-	// Use cluster hostname for stats identification
-	hostname := cfg.Cluster.Hostname
+	// Use node name for stats identification
+	hostname := cfg.Cluster.NodeName
 	if hostname == "" {
 		// Auto-detect hostname if not configured
 		if h, err := os.Hostname(); err == nil {

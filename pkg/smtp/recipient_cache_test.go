@@ -1,9 +1,8 @@
 package smtp
 
 import (
+	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -23,7 +22,7 @@ func TestRecipientCache_NotFoundCaching(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server1",
-			Peers:             []string{},
+			Cluster:           newMockCluster(),
 			GossipInterval:    1 * time.Hour, // Don't gossip during test
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,
@@ -66,7 +65,7 @@ func TestRecipientCache_BlockedCaching(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server1",
-			Peers:             []string{},
+			Cluster:           newMockCluster(),
 			GossipInterval:    1 * time.Hour,
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,
@@ -103,7 +102,7 @@ func TestRecipientCache_Expiry(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server1",
-			Peers:             []string{},
+			Cluster:           newMockCluster(),
 			GossipInterval:    1 * time.Hour,
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,
@@ -144,7 +143,7 @@ func TestRecipientCache_GossipPropagation(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server1",
-			Peers:             []string{},
+			Cluster:           newMockCluster(),
 			GossipInterval:    1 * time.Hour,
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,
@@ -162,7 +161,7 @@ func TestRecipientCache_GossipPropagation(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server2",
-			Peers:             []string{},
+			Cluster:           newMockCluster(),
 			GossipInterval:    1 * time.Hour,
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,
@@ -185,7 +184,8 @@ func TestRecipientCache_GossipPropagation(t *testing.T) {
 	snapshot := dt1.createSnapshot()
 
 	// Server 2 processes the update (simulating receiving gossip)
-	dt2.HandlePeerUpdate(snapshot)
+	snapshotJSON, _ := json.Marshal(snapshot)
+	dt2.handleGossipMessage(snapshotJSON)
 
 	// Now server 2 should have the cached entries
 	found, isBlocked, reason := dt2.IsRecipientCached("user@example.com")
@@ -224,7 +224,7 @@ func TestRecipientCache_MergeStrategy(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server1",
-			Peers:             []string{},
+			Cluster:           newMockCluster(),
 			GossipInterval:    1 * time.Hour,
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,
@@ -279,7 +279,7 @@ func TestRecipientCache_HTTPEndToEnd(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server1",
-			Peers:             []string{},
+			Cluster:           newMockCluster(),
 			GossipInterval:    1 * time.Hour,
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,
@@ -292,13 +292,9 @@ func TestRecipientCache_HTTPEndToEnd(t *testing.T) {
 	dt1.CacheRecipientNotFound("user1@example.com")
 	dt1.CacheRecipientBlocked("user2@example.com")
 
-	// Create HTTP test server
-	handler := dt1.HTTPHandler()
-	server := httptest.NewServer(handler)
-	defer server.Close()
-
 	// Create server 2
 	local2 := NewConnectionTracker(100, 10)
+	mockCluster2 := newMockCluster()
 	dt2 := NewDistributedTracker(
 		local2,
 		nil,
@@ -306,7 +302,7 @@ func TestRecipientCache_HTTPEndToEnd(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server2",
-			Peers:             []string{server.URL},
+			Cluster:           mockCluster2,
 			GossipInterval:    1 * time.Hour,
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,
@@ -315,36 +311,37 @@ func TestRecipientCache_HTTPEndToEnd(t *testing.T) {
 		logger,
 	)
 
-	// Server 2 sends its snapshot to server 1 (via HTTP)
-	snapshot := dt2.createSnapshot()
-	err := dt2.sendToPeer(server.URL, snapshot)
-	if err != nil {
-		t.Fatalf("Failed to send gossip to peer: %v", err)
+	// Server 1 sends its snapshot to server 2 (via memberlist gossip)
+	snapshot := dt1.createSnapshot()
+	snapshotJSON, _ := json.Marshal(snapshot)
+	mockCluster2.simulateIncomingGossip(snapshotJSON)
+
+	// Verify server 2 received the cache from server 1
+	found, _, _ := dt2.IsRecipientCached("user1@example.com")
+	if !found {
+		t.Error("Expected server 2 to have user1@example.com in cache")
 	}
 
-	// After the HTTP call, server 2 should have received server 1's response
-	// which includes the recipient cache
-	// The HTTP handler returns server 1's snapshot in the response
-
-	// Manually decode what the HTTP response would contain
-	// In real scenario, this happens automatically via HandlePeerUpdate
-	resp, err := http.Get(server.URL + "?test=1")
-	if err == nil {
-		resp.Body.Close()
+	found, isBlocked, _ := dt2.IsRecipientCached("user2@example.com")
+	if !found || !isBlocked {
+		t.Error("Expected server 2 to have user2@example.com as blocked in cache")
 	}
 }
 
 // TestRecipientCache_TwoServerIntegration is a comprehensive integration test
-// that simulates two SMTP servers gossiping recipient cache entries
+// that simulates two SMTP servers gossiping recipient cache entries via memberlist
 func TestRecipientCache_TwoServerIntegration(t *testing.T) {
 	logger := zap.NewNop()
 
-	// Create two servers
+	// Create two servers with mock clusters
 	servers := make([]*DistributedTracker, 2)
-	httpServers := make([]*httptest.Server, 2)
+	mockClusters := make([]*mockCluster, 2)
 
 	for i := 0; i < 2; i++ {
 		local := NewConnectionTracker(100, 10)
+		mockCluster := newMockCluster()
+		mockClusters[i] = mockCluster
+
 		dt := NewDistributedTracker(
 			local,
 			nil,
@@ -352,7 +349,7 @@ func TestRecipientCache_TwoServerIntegration(t *testing.T) {
 			"",
 			DistributedConfig{
 				Hostname:          fmt.Sprintf("server%d", i+1),
-				Peers:             []string{},             // Will be set after we create HTTP servers
+				Cluster:           mockCluster,
 				GossipInterval:    100 * time.Millisecond, // Fast gossip for testing
 				S3SyncInterval:    1 * time.Hour,
 				GlobalMaxPerIP:    20,
@@ -361,23 +358,12 @@ func TestRecipientCache_TwoServerIntegration(t *testing.T) {
 			logger,
 		)
 		servers[i] = dt
-
-		// Create HTTP server for gossip endpoint
-		handler := dt.HTTPHandler()
-		httpServers[i] = httptest.NewServer(handler)
 	}
 	defer func() {
-		for _, s := range httpServers {
-			s.Close()
-		}
 		for _, dt := range servers {
 			dt.Stop()
 		}
 	}()
-
-	// Configure peers (each server knows about the other)
-	servers[0].peers = []string{httpServers[1].URL}
-	servers[1].peers = []string{httpServers[0].URL}
 
 	t.Log("✓ Created two test servers")
 
@@ -398,15 +384,17 @@ func TestRecipientCache_TwoServerIntegration(t *testing.T) {
 	}
 	t.Log("✓ Verified initial cache isolation")
 
-	// Start gossip loops
-	for _, dt := range servers {
-		dt.Start()
-	}
-	t.Log("✓ Started gossip loops (100ms interval)")
+	// Simulate gossip exchange: server 1 broadcasts to server 2
+	snapshot1 := servers[0].createSnapshot()
+	snapshot1JSON, _ := json.Marshal(snapshot1)
+	mockClusters[1].simulateIncomingGossip(snapshot1JSON)
+	t.Log("✓ Server 1 broadcasted to Server 2")
 
-	// Wait for gossip to propagate
-	time.Sleep(500 * time.Millisecond)
-	t.Log("✓ Waited 500ms for gossip propagation")
+	// Simulate gossip exchange: server 2 broadcasts to server 1
+	snapshot2 := servers[1].createSnapshot()
+	snapshot2JSON, _ := json.Marshal(snapshot2)
+	mockClusters[0].simulateIncomingGossip(snapshot2JSON)
+	t.Log("✓ Server 2 broadcasted to Server 1")
 
 	// Verify that cache entries have propagated
 	// Server 1 should now have Server 2's blocked recipient
@@ -435,12 +423,15 @@ func TestRecipientCache_TwoServerIntegration(t *testing.T) {
 	}
 	t.Log("✓ Server 2 received notfound@example.com from Server 1")
 
-	// Add a new recipient to Server 2 while gossip is running
+	// Add a new recipient to Server 2
 	servers[1].CacheRecipientNotFound("newuser@example.com")
 	t.Log("✓ Server 2 cached newuser@example.com")
 
-	// Wait for gossip
-	time.Sleep(500 * time.Millisecond)
+	// Simulate another gossip round from server 2 to server 1
+	snapshot2Again := servers[1].createSnapshot()
+	snapshot2AgainJSON, _ := json.Marshal(snapshot2Again)
+	mockClusters[0].simulateIncomingGossip(snapshot2AgainJSON)
+	t.Log("✓ Server 2 broadcasted again to Server 1")
 
 	// Server 1 should receive it
 	found, _, _ = servers[0].IsRecipientCached("newuser@example.com")
@@ -464,7 +455,7 @@ func TestRecipientCache_CleanupExpiredEntries(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server1",
-			Peers:             []string{},
+			Cluster:           newMockCluster(),
 			GossipInterval:    1 * time.Hour,
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,
@@ -525,7 +516,7 @@ func TestRecipientCache_ConcurrentAccess(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:          "server1",
-			Peers:             []string{},
+			Cluster:           newMockCluster(),
 			GossipInterval:    1 * time.Hour,
 			S3SyncInterval:    1 * time.Hour,
 			GlobalMaxPerIP:    20,

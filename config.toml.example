@@ -13,6 +13,7 @@ require_sender_mx = true
 shutdown_timeout = "1m0s"
 max_connections = 100
 max_connections_per_ip = 10
+
 [smtp.rate_limit]
 enabled = true
 gossip_enabled = false
@@ -83,6 +84,9 @@ max_domain_entries = 50000
 
 [cluster]
 enabled = false
-hostname = ""
-peer_port = ":8080"
-peers = []
+node_name = ""         # Auto-detected from hostname if empty
+bind_addr = "0.0.0.0"  # Address to bind memberlist to
+bind_port = 7946       # Memberlist gossip port (standard port)
+advertise_addr = ""    # Address to advertise to peers (auto-detected if empty)
+advertise_port = 0     # Port to advertise (defaults to bind_port if 0)
+seed_nodes = []        # Initial nodes to join, e.g., ["node1.example.com:7946", "node2.example.com:7946"]

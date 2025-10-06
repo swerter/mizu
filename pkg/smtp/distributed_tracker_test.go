@@ -1,17 +1,59 @@
 package smtp
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"migadu/mizu/pkg/cluster"
+	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/memberlist"
 	"go.uber.org/zap"
 )
+
+// mockCluster is a test implementation of ClusterManager
+type mockCluster struct {
+	broadcasts [][]byte
+	handler    func(data []byte)
+	mu         sync.Mutex
+}
+
+func newMockCluster() *mockCluster {
+	return &mockCluster{
+		broadcasts: make([][]byte, 0),
+	}
+}
+
+func (m *mockCluster) BroadcastConnectionState(data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.broadcasts = append(m.broadcasts, data)
+	return nil
+}
+
+func (m *mockCluster) RegisterConnectionStateHandler(handler func(data []byte)) {
+	m.handler = handler
+}
+
+func (m *mockCluster) NumMembers() int {
+	return 1
+}
+
+func (m *mockCluster) SetStateDelegate(delegate cluster.StateDelegate) {
+	// Mock implementation - does nothing
+}
+
+func (m *mockCluster) SetEventDelegate(delegate cluster.EventDelegate) {
+	// Mock implementation - does nothing
+}
+
+func (m *mockCluster) simulateIncomingGossip(data []byte) {
+	if m.handler != nil {
+		m.handler(data)
+	}
+}
 
 // TestDistributedTracker_LocalAndGlobalLimits tests that both local and global limits are enforced
 func TestDistributedTracker_LocalAndGlobalLimits(t *testing.T) {
@@ -21,6 +63,7 @@ func TestDistributedTracker_LocalAndGlobalLimits(t *testing.T) {
 	local := NewConnectionTracker(10, 5)
 
 	// Distributed tracker: global max 8 per IP across cluster
+	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
 		nil, // No S3
@@ -28,7 +71,7 @@ func TestDistributedTracker_LocalAndGlobalLimits(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:       "server1",
-			Peers:          []string{},
+			Cluster:        mockCluster,
 			GossipInterval: 1 * time.Hour, // Don't gossip during test
 			S3SyncInterval: 1 * time.Hour,
 			GlobalMaxPerIP: 8,
@@ -78,6 +121,7 @@ func TestDistributedTracker_StalePeersIgnored(t *testing.T) {
 	logger := zap.NewNop()
 
 	local := NewConnectionTracker(100, 10)
+	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -85,7 +129,7 @@ func TestDistributedTracker_StalePeersIgnored(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:       "server1",
-			Peers:          []string{},
+			Cluster:        mockCluster,
 			GossipInterval: 1 * time.Hour,
 			S3SyncInterval: 1 * time.Hour,
 			GlobalMaxPerIP: 15,
@@ -120,11 +164,12 @@ func TestDistributedTracker_StalePeersIgnored(t *testing.T) {
 	}
 }
 
-// TestDistributedTracker_HTTPHandler tests the gossip HTTP endpoint
-func TestDistributedTracker_HTTPHandler(t *testing.T) {
+// TestDistributedTracker_GossipHandler tests memberlist gossip handling
+func TestDistributedTracker_GossipHandler(t *testing.T) {
 	logger := zap.NewNop()
 
 	local := NewConnectionTracker(100, 10)
+	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -132,7 +177,7 @@ func TestDistributedTracker_HTTPHandler(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:       "server1",
-			Peers:          []string{},
+			Cluster:        mockCluster,
 			GossipInterval: 1 * time.Hour,
 			S3SyncInterval: 1 * time.Hour,
 			GlobalMaxPerIP: 20,
@@ -145,8 +190,8 @@ func TestDistributedTracker_HTTPHandler(t *testing.T) {
 	dt.TryAcquire("192.168.1.100:5001")
 	dt.TryAcquire("192.168.1.101:5000")
 
-	// Create a peer snapshot to send
-	peerSnapshot := PeerConnectionState{
+	// Create a peer snapshot to send via gossip
+	peerSnapshot := ConnectionSnapshot{
 		Hostname:  "server2",
 		Timestamp: time.Now(),
 		Connections: map[string]int{
@@ -155,34 +200,9 @@ func TestDistributedTracker_HTTPHandler(t *testing.T) {
 		TotalCount: 5,
 	}
 
-	// Create test request with JSON body
-	w := httptest.NewRecorder()
-	handler := dt.HTTPHandler()
-
+	// Simulate receiving gossip from peer
 	peerJSON, _ := json.Marshal(peerSnapshot)
-	req := httptest.NewRequest("POST", "/api/connections/sync", bytes.NewReader(peerJSON))
-	req.Header.Set("Content-Type", "application/json")
-
-	handler(w, req)
-
-	// Should return 200
-	if w.Code != http.StatusOK {
-		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	// Response should be our snapshot
-	var response PeerConnectionState
-	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
-	}
-
-	if response.Hostname != "server1" {
-		t.Errorf("Expected hostname 'server1', got '%s'", response.Hostname)
-	}
-
-	if response.TotalCount != 3 {
-		t.Errorf("Expected total_count 3, got %d", response.TotalCount)
-	}
+	mockCluster.simulateIncomingGossip(peerJSON)
 
 	// Verify peer data was stored
 	dt.peerMu.RLock()
@@ -204,6 +224,7 @@ func TestDistributedTracker_GetGlobalStats(t *testing.T) {
 	logger := zap.NewNop()
 
 	local := NewConnectionTracker(100, 10)
+	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -211,7 +232,7 @@ func TestDistributedTracker_GetGlobalStats(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:       "server1",
-			Peers:          []string{},
+			Cluster:        mockCluster,
 			GossipInterval: 1 * time.Hour,
 			S3SyncInterval: 1 * time.Hour,
 			GlobalMaxPerIP: 20,
@@ -275,6 +296,7 @@ func TestDistributedTracker_ConcurrentAccess(t *testing.T) {
 	logger := zap.NewNop()
 
 	local := NewConnectionTracker(1000, 50)
+	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -282,7 +304,7 @@ func TestDistributedTracker_ConcurrentAccess(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:       "server1",
-			Peers:          []string{},
+			Cluster:        mockCluster,
 			GossipInterval: 1 * time.Hour,
 			S3SyncInterval: 1 * time.Hour,
 			GlobalMaxPerIP: 100,
@@ -352,6 +374,7 @@ func TestDistributedTracker_ReleaseRollback(t *testing.T) {
 	logger := zap.NewNop()
 
 	local := NewConnectionTracker(100, 10)
+	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -359,7 +382,7 @@ func TestDistributedTracker_ReleaseRollback(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:       "server1",
-			Peers:          []string{},
+			Cluster:        mockCluster,
 			GossipInterval: 1 * time.Hour,
 			S3SyncInterval: 1 * time.Hour,
 			GlobalMaxPerIP: 8,
@@ -408,6 +431,7 @@ func TestDistributedTracker_HealthCheck(t *testing.T) {
 	logger := zap.NewNop()
 
 	local := NewConnectionTracker(100, 10)
+	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -415,7 +439,7 @@ func TestDistributedTracker_HealthCheck(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:       "server1",
-			Peers:          []string{"https://server2:8080", "https://server3:8080"},
+			Cluster:        mockCluster,
 			GossipInterval: 5 * time.Second,
 			S3SyncInterval: 30 * time.Second,
 			GlobalMaxPerIP: 20,
@@ -423,10 +447,10 @@ func TestDistributedTracker_HealthCheck(t *testing.T) {
 		logger,
 	)
 
-	// Initially no peers active - should be degraded
+	// Initially no peers active - should be healthy (mockCluster always reports 1 member)
 	status := dt.CheckHealth()
-	if status.Status != "degraded" {
-		t.Errorf("Expected status 'degraded' with no active peers, got '%s'", status.Status)
+	if status.Status != "healthy" {
+		t.Errorf("Expected status 'healthy', got '%s'", status.Status)
 	}
 
 	// Add active peer
@@ -448,11 +472,11 @@ func TestDistributedTracker_HealthCheck(t *testing.T) {
 	if !ok {
 		t.Fatal("Expected details to be map[string]any")
 	}
-	if details["configured_peers"] != 2 {
-		t.Errorf("Expected 2 configured peers, got %v", details["configured_peers"])
+	if details["cluster_members"] != 1 {
+		t.Errorf("Expected 1 cluster member (from mockCluster), got %v", details["cluster_members"])
 	}
 	if details["active_peers"] != 1 {
-		t.Errorf("Expected 1 active peer, got %v", details["active_peers"])
+		t.Errorf("Expected 1 active peer (that we manually added), got %v", details["active_peers"])
 	}
 }
 
@@ -461,6 +485,7 @@ func TestDistributedTracker_NoGlobalLimit(t *testing.T) {
 	logger := zap.NewNop()
 
 	local := NewConnectionTracker(100, 5)
+	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -468,7 +493,7 @@ func TestDistributedTracker_NoGlobalLimit(t *testing.T) {
 		"",
 		DistributedConfig{
 			Hostname:       "server1",
-			Peers:          []string{},
+			Cluster:        mockCluster,
 			GossipInterval: 1 * time.Hour,
 			S3SyncInterval: 1 * time.Hour,
 			GlobalMaxPerIP: 0, // Disabled
@@ -502,4 +527,100 @@ func TestDistributedTracker_NoGlobalLimit(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "maximum connections per IP") {
 		t.Errorf("Expected local limit error, got: %v", err)
 	}
+}
+
+// TestDistributedTracker_ProactivePeerCleanup tests that peers are removed on leave events
+func TestDistributedTracker_ProactivePeerCleanup(t *testing.T) {
+	logger := zap.NewNop()
+	mockCluster := newMockCluster()
+
+	local := NewConnectionTracker(100, 10)
+
+	dt := NewDistributedTracker(
+		local,
+		nil,
+		"",
+		"",
+		DistributedConfig{
+			Hostname:       "server1",
+			Cluster:        mockCluster,
+			GossipInterval: 1 * time.Hour,
+			S3SyncInterval: 1 * time.Hour,
+			GlobalMaxPerIP: 10,
+		},
+		logger,
+	)
+
+	// Simulate receiving gossip from a peer (adds peer to peerConnections)
+	peerSnapshot := ConnectionSnapshot{
+		Hostname:  "server2",
+		Timestamp: time.Now(),
+		Connections: map[string]int{
+			"192.168.1.200": 5,
+		},
+		TotalCount:  5,
+		VectorClock: cluster.NewVectorClock("server2"),
+	}
+	peerJSON, _ := json.Marshal(peerSnapshot)
+	mockCluster.simulateIncomingGossip(peerJSON)
+
+	// Verify peer was added
+	dt.peerMu.RLock()
+	if _, exists := dt.peerConnections["server2"]; !exists {
+		t.Fatal("Peer should exist after gossip")
+	}
+	dt.peerMu.RUnlock()
+
+	// Simulate node leave event using real memberlist.Node
+	node := &memberlist.Node{
+		Name: "server2",
+		Addr: net.ParseIP("192.168.1.200"),
+		Port: 7946,
+	}
+	dt.NotifyLeave(node)
+
+	// Verify peer was removed proactively
+	dt.peerMu.RLock()
+	if _, exists := dt.peerConnections["server2"]; exists {
+		t.Fatal("Peer should be removed after leave event")
+	}
+	dt.peerMu.RUnlock()
+}
+
+// TestDistributedTracker_EventNotifications tests event notification handlers
+func TestDistributedTracker_EventNotifications(t *testing.T) {
+	logger := zap.NewNop()
+	mockCluster := newMockCluster()
+
+	local := NewConnectionTracker(100, 10)
+
+	dt := NewDistributedTracker(
+		local,
+		nil,
+		"",
+		"",
+		DistributedConfig{
+			Hostname:       "server1",
+			Cluster:        mockCluster,
+			GossipInterval: 1 * time.Hour,
+			S3SyncInterval: 1 * time.Hour,
+			GlobalMaxPerIP: 10,
+		},
+		logger,
+	)
+
+	node := &memberlist.Node{
+		Name: "server3",
+		Addr: net.ParseIP("192.168.1.3"),
+		Port: 7946,
+	}
+
+	// Test NotifyJoin - should not panic
+	dt.NotifyJoin(node)
+
+	// Test NotifyUpdate - should not panic
+	dt.NotifyUpdate(node)
+
+	// Test NotifyLeave on non-existent peer - should not panic
+	dt.NotifyLeave(node)
 }
