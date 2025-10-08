@@ -112,7 +112,11 @@ func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinati
 
 	// Set standard headers for email relay
 	req.Header.Set("Content-Type", "message/rfc822") // RFC 2822 compliant email format
-	req.Header.Set("X-API-Key", apiKey)              // Authentication header
+
+	// Only set API key if provided (custom endpoints may use URL-based auth)
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey) // Authentication header
+	}
 
 	// Add envelope addresses as headers
 	if mailFrom != "" {

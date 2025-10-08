@@ -23,6 +23,8 @@ import (
 	"migadu/mizu/pkg/logging"
 	"migadu/mizu/pkg/metrics"
 	"migadu/mizu/pkg/poster"
+	"migadu/mizu/pkg/queue"
+	"migadu/mizu/pkg/routing"
 	"migadu/mizu/pkg/smtp"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/storage"
@@ -132,7 +134,7 @@ func main() {
 	circuitBreaker := initCircuitBreaker(cfg, logger, metricsInstance)
 
 	// Create HTTP client with configured timeout for posting emails to destination
-	httpClient := poster.NewHTTPClient(time.Duration(cfg.Destination.HTTPTimeoutSeconds) * time.Second)
+	httpClient := poster.NewHTTPClient(time.Duration(cfg.Delivery.HTTPTimeoutSeconds) * time.Second)
 
 	// Create connection tracker for DoS protection (global and per-IP limits)
 	connTracker := smtp.NewConnectionTracker(cfg.SMTP.MaxConnections, cfg.SMTP.MaxConnectionsPerIP)
@@ -248,6 +250,104 @@ func main() {
 			zap.String("selector", cfg.SMTP.ARCSign.Selector))
 	}
 
+	// Initialize routing client if enabled
+	var routingClient smtp.RoutingClient
+	if cfg.Routing.Enabled {
+		// Create circuit breaker for routing endpoint
+		var routingCircuitBreaker *poster.CircuitBreaker
+		if cfg.Routing.CircuitBreaker.Enabled {
+			cbConfig := poster.CircuitBreakerConfig{
+				Enabled:          true,
+				FailureThreshold: cfg.Routing.CircuitBreaker.FailureThreshold,
+				SuccessThreshold: cfg.Routing.CircuitBreaker.SuccessThreshold,
+				Timeout:          time.Duration(cfg.Routing.CircuitBreaker.TimeoutSeconds) * time.Second,
+				HalfOpenMaxCalls: cfg.Routing.CircuitBreaker.HalfOpenMaxCalls,
+				ResetTimeout:     time.Duration(cfg.Routing.CircuitBreaker.ResetTimeoutSeconds) * time.Second,
+			}
+			routingCircuitBreaker = poster.NewCircuitBreaker(cbConfig, logger, metricsInstance)
+			logger.Info("Routing circuit breaker enabled",
+				zap.Int("failure_threshold", cfg.Routing.CircuitBreaker.FailureThreshold),
+				zap.Int("timeout_seconds", cfg.Routing.CircuitBreaker.TimeoutSeconds))
+		}
+
+		routingClient, err = routing.NewClient(routing.ClientConfig{
+			Endpoint:                cfg.Routing.Endpoint,
+			APIKey:                  cfg.Routing.APIKey,
+			TimeoutMS:               cfg.Routing.TimeoutMS,
+			MaxRetries:              cfg.Routing.RetryAttempts,
+			CacheTTLSeconds:         cfg.Routing.CacheTTLSeconds,
+			CacheNegativeTTLSeconds: cfg.Routing.CacheNegativeTTLSeconds,
+			CacheMaxEntries:         cfg.Routing.CacheMaxEntries,
+			FallbackOnError:         cfg.Routing.FallbackOnError,
+			CircuitBreaker:          routingCircuitBreaker,
+			Logger:                  logger,
+		})
+		if err != nil {
+			logger.Fatal("Failed to initialize routing client", zap.Error(err))
+		}
+		logger.Info("Routing client initialized",
+			zap.String("endpoint", cfg.Routing.Endpoint),
+			zap.Int("cache_max_entries", cfg.Routing.CacheMaxEntries),
+			zap.Int("cache_ttl_seconds", cfg.Routing.CacheTTLSeconds))
+	}
+
+	// Initialize delivery queue if routing + queue enabled
+	var deliveryQueue smtp.DeliveryQueue
+	if cfg.Routing.Enabled && cfg.Queue.Enabled {
+		// Create circuit breaker for forwarding endpoint if enabled
+		var forwardingCircuitBreaker *poster.CircuitBreaker
+		if cfg.Forwarding.Enabled && cfg.Forwarding.CircuitBreaker.Enabled {
+			fwdCBConfig := poster.CircuitBreakerConfig{
+				Enabled:          true,
+				FailureThreshold: cfg.Forwarding.CircuitBreaker.FailureThreshold,
+				SuccessThreshold: cfg.Forwarding.CircuitBreaker.SuccessThreshold,
+				Timeout:          time.Duration(cfg.Forwarding.CircuitBreaker.TimeoutSeconds) * time.Second,
+				HalfOpenMaxCalls: cfg.Forwarding.CircuitBreaker.HalfOpenMaxCalls,
+				ResetTimeout:     time.Duration(cfg.Forwarding.CircuitBreaker.ResetTimeoutSeconds) * time.Second,
+			}
+			forwardingCircuitBreaker = poster.NewCircuitBreaker(fwdCBConfig, logger, metricsInstance)
+			logger.Info("Forwarding circuit breaker enabled",
+				zap.Int("failure_threshold", cfg.Forwarding.CircuitBreaker.FailureThreshold),
+				zap.Int("timeout_seconds", cfg.Forwarding.CircuitBreaker.TimeoutSeconds))
+		}
+
+		// Use persistent queue with BadgerDB (48-hour retry window)
+		dataDir := cfg.Queue.DataDir
+		if dataDir == "" {
+			dataDir = "./data/queue"
+		}
+
+		queueConfig := queue.QueueConfig{
+			Workers:         cfg.Queue.Workers,
+			MaxRetryHours:   cfg.Queue.MaxRetryHours,
+			DeliveryTimeout: time.Duration(cfg.Delivery.HTTPTimeoutSeconds) * time.Second,
+		}
+
+		persistentQueue, err := queue.NewPersistentQueue(
+			queueConfig,
+			dataDir,
+			httpClient,
+			circuitBreaker,
+			forwardingCircuitBreaker,
+			logger,
+			metricsInstance,
+		)
+		if err != nil {
+			logger.Fatal("Failed to create persistent delivery queue", zap.Error(err))
+		}
+
+		if err := persistentQueue.Start(); err != nil {
+			logger.Fatal("Failed to start persistent delivery queue", zap.Error(err))
+		}
+
+		deliveryQueue = persistentQueue
+
+		logger.Info("Persistent delivery queue started",
+			zap.Int("workers", cfg.Queue.Workers),
+			zap.Int("max_retry_hours", cfg.Queue.MaxRetryHours),
+			zap.String("data_dir", dataDir))
+	}
+
 	// Create the backend that handles SMTP protocol logic with connection tracking
 	var activeSessionsWg sync.WaitGroup
 	var activeSessionCount atomic.Int64
@@ -267,7 +367,9 @@ func main() {
 		ActiveSessionsWg:   &activeSessionsWg,
 		ActiveSessionCount: &activeSessionCount,
 		ShutdownChan:       shutdownChan,
-		ARCSigner:          arcSigner, // Add ARC signer (nil if disabled)
+		ARCSigner:          arcSigner,     // Add ARC signer (nil if disabled)
+		RoutingClient:      routingClient, // Add routing client (nil if disabled)
+		DeliveryQueue:      deliveryQueue, // Add delivery queue (nil if disabled)
 	}
 
 	// Run the SMTP server and wait for it to complete
@@ -505,21 +607,21 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *zap.Logger
 
 // initCircuitBreaker initializes the circuit breaker for the destination endpoint.
 func initCircuitBreaker(cfg *config.Config, logger *zap.Logger, metricsInstance *metrics.Metrics) *poster.CircuitBreaker {
-	if cfg.Local || !cfg.Destination.CircuitBreaker.Enabled {
+	if cfg.Local || !cfg.Delivery.CircuitBreaker.Enabled {
 		return nil
 	}
 
 	cb := poster.NewCircuitBreaker(poster.CircuitBreakerConfig{
-		Enabled:          cfg.Destination.CircuitBreaker.Enabled,
-		FailureThreshold: cfg.Destination.CircuitBreaker.FailureThreshold,
-		SuccessThreshold: cfg.Destination.CircuitBreaker.SuccessThreshold,
-		Timeout:          time.Duration(cfg.Destination.CircuitBreaker.TimeoutSeconds) * time.Second,
-		HalfOpenMaxCalls: cfg.Destination.CircuitBreaker.HalfOpenMaxCalls,
-		ResetTimeout:     time.Duration(cfg.Destination.CircuitBreaker.ResetTimeoutSeconds) * time.Second,
+		Enabled:          cfg.Delivery.CircuitBreaker.Enabled,
+		FailureThreshold: cfg.Delivery.CircuitBreaker.FailureThreshold,
+		SuccessThreshold: cfg.Delivery.CircuitBreaker.SuccessThreshold,
+		Timeout:          time.Duration(cfg.Delivery.CircuitBreaker.TimeoutSeconds) * time.Second,
+		HalfOpenMaxCalls: cfg.Delivery.CircuitBreaker.HalfOpenMaxCalls,
+		ResetTimeout:     time.Duration(cfg.Delivery.CircuitBreaker.ResetTimeoutSeconds) * time.Second,
 	}, logger, metricsInstance)
 	logger.Sugar().Infof("Circuit breaker enabled: failure_threshold=%d, timeout=%v",
-		cfg.Destination.CircuitBreaker.FailureThreshold,
-		time.Duration(cfg.Destination.CircuitBreaker.TimeoutSeconds)*time.Second)
+		cfg.Delivery.CircuitBreaker.FailureThreshold,
+		time.Duration(cfg.Delivery.CircuitBreaker.TimeoutSeconds)*time.Second)
 	return cb
 }
 
@@ -601,8 +703,8 @@ func startHealthServer(cfg *config.Config, logger *zap.Logger, statsManager *sta
 	if s3Client != nil {
 		checkers = append(checkers, health.NewCheckS3Connection(s3Client, cfg.Storage.Bucket))
 	}
-	if !cfg.Local && cfg.Destination.URL != "" {
-		checkers = append(checkers, health.NewCheckDestination(cfg.Destination.URL, 5*time.Second))
+	if !cfg.Local && cfg.Delivery.URL != "" {
+		checkers = append(checkers, health.NewCheckDestination(cfg.Delivery.URL, 5*time.Second))
 	}
 	if !cfg.Local && cfg.SMTP.Domain != "" && cfg.SMTP.Domain != "mail.yourdomain.com" {
 		// Extract port from listen address
@@ -748,6 +850,22 @@ func runSMTPServer(ctx context.Context, cfg *config.Config, be *smtp.Backend, tl
 			logger.Sugar().Info("All SMTP sessions completed gracefully")
 		case <-time.After(time.Duration(cfg.SMTP.ShutdownTimeoutSeconds) * time.Second):
 			logger.Sugar().Warn("Shutdown timeout reached, forcing termination of remaining sessions")
+		}
+
+		// Phase 2.5: Stop delivery queue (drain pending jobs)
+		if be.DeliveryQueue != nil {
+			logger.Sugar().Info("Stopping delivery queue...")
+			queueStats := be.DeliveryQueue.GetStats()
+			if queueStats.CurrentSize > 0 {
+				logger.Sugar().Infof("Draining %d pending delivery jobs...", queueStats.CurrentSize)
+			}
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Queue.ShutdownTimeoutSeconds)*time.Second)
+			defer cancel()
+			if err := be.DeliveryQueue.Shutdown(shutdownCtx); err != nil {
+				logger.Sugar().Warnf("Queue shutdown error: %v", err)
+			} else {
+				logger.Sugar().Info("Delivery queue stopped")
+			}
 		}
 
 		// Phase 3: Stop stats manager (ensures events are flushed)

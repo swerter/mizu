@@ -1,19 +1,24 @@
 package config
 
+import "time"
+
 // Config holds all configuration for the SMTP relay server
 type Config struct {
-	SMTP        SMTPConfig        `toml:"smtp"`
-	DNS         DNSConfig         `toml:"dns"`
-	Storage     StorageConfig     `toml:"storage"`
-	Destination DestinationConfig `toml:"destination"`
-	TLS         TLSConfig         `toml:"tls"`
-	Blacklists  BlacklistsConfig  `toml:"blacklists"`
-	Health      HealthConfig      `toml:"health"`
-	Metrics     MetricsConfig     `toml:"metrics"`
-	Stats       StatsConfig       `toml:"stats"`
-	Cluster     ClusterConfig     `toml:"cluster"`    // Global cluster/peering configuration
-	LogFormat   string            `toml:"log_format"` // "json" or "text"
-	Local       bool              `toml:"local"`      // Local development mode
+	SMTP       SMTPConfig       `toml:"smtp"`
+	DNS        DNSConfig        `toml:"dns"`
+	Storage    StorageConfig    `toml:"storage"`
+	Delivery   DeliveryConfig   `toml:"delivery"`
+	Forwarding ForwardingConfig `toml:"forwarding"` // Optional forwarding endpoint (used with routing)
+	Routing    RoutingConfig    `toml:"routing"`    // Optional routing/aliasing system
+	Queue      QueueConfig      `toml:"queue"`      // Optional async delivery queue (used with routing)
+	TLS        TLSConfig        `toml:"tls"`
+	Blacklists BlacklistsConfig `toml:"blacklists"`
+	Health     HealthConfig     `toml:"health"`
+	Metrics    MetricsConfig    `toml:"metrics"`
+	Stats      StatsConfig      `toml:"stats"`
+	Cluster    ClusterConfig    `toml:"cluster"`    // Global cluster/peering configuration
+	LogFormat  string           `toml:"log_format"` // "json" or "text"
+	Local      bool             `toml:"local"`      // Local development mode
 }
 
 // SMTPConfig holds SMTP server configuration
@@ -98,8 +103,8 @@ type StorageConfig struct {
 	Region          string `toml:"region"`            // S3 region
 }
 
-// DestinationConfig holds configuration for the HTTP destination endpoint
-type DestinationConfig struct {
+// DeliveryConfig holds configuration for the HTTP delivery endpoint
+type DeliveryConfig struct {
 	URL                string               `toml:"url"`
 	APIKey             string               `toml:"api_key"`
 	MaxRetryAttempts   int                  `toml:"max_retry_attempts"`
@@ -115,6 +120,26 @@ type CircuitBreakerConfig struct {
 	TimeoutSeconds      int  `toml:"timeout_seconds"`       // time to wait before half-open in seconds (default: 30)
 	HalfOpenMaxCalls    int  `toml:"half_open_max_calls"`   // max concurrent calls in half-open (default: 1)
 	ResetTimeoutSeconds int  `toml:"reset_timeout_seconds"` // time before resetting counters in seconds (default: 60)
+}
+
+// ForwardingConfig holds configuration for the forwarding endpoint (used with routing)
+type ForwardingConfig struct {
+	Enabled            bool                 `toml:"enabled"`              // Enable forwarding functionality
+	URL                string               `toml:"url"`                  // HTTP endpoint for forwarding
+	APIKey             string               `toml:"api_key"`              // API key for authentication (or use FORWARDING_API_KEY env var)
+	MaxRetryAttempts   int                  `toml:"max_retry_attempts"`   // Max retries (used by queue, default: 5)
+	HTTPTimeoutSeconds int                  `toml:"http_timeout_seconds"` // HTTP client timeout in seconds (default: 30)
+	CircuitBreaker     CircuitBreakerConfig `toml:"circuit_breaker"`      // Circuit breaker for forwarding endpoint
+}
+
+// QueueConfig holds configuration for async delivery queue (used with routing)
+type QueueConfig struct {
+	Enabled                bool          `toml:"enabled"`                  // Enable async queue (only when routing.enabled=true)
+	DataDir                string        `toml:"data_dir"`                 // Directory for persistent queue storage (default: ./data/queue)
+	Workers                int           `toml:"workers"`                  // Number of concurrent workers (default: 10)
+	MaxRetryHours          int           `toml:"max_retry_hours"`          // Maximum hours to retry before giving up (default: 48)
+	ShutdownTimeoutSeconds int           `toml:"shutdown_timeout_seconds"` // Max time to wait for graceful shutdown (default: 30)
+	DeliveryTimeout        time.Duration // HTTP delivery timeout (set from http_timeout_seconds)
 }
 
 // HealthConfig holds configuration for the health check endpoint.
@@ -149,6 +174,21 @@ type TLSConfig struct {
 	UseLocalCA       bool     `toml:"use_local_ca"`      // Use local CA for testing
 	CertMagicVerbose bool     `toml:"certmagic_verbose"` // Enable verbose certmagic logging
 	EnableAutocert   bool     `toml:"enable_autocert"`   // Enable autocert for automatic certificate management
+}
+
+// RoutingConfig holds configuration for the optional routing/aliasing system
+type RoutingConfig struct {
+	Enabled                 bool                 `toml:"enabled"`                    // Enable routing lookups (default: false)
+	Endpoint                string               `toml:"endpoint"`                   // HTTP endpoint for routing lookups (e.g., Cloudflare Worker)
+	APIKey                  string               `toml:"api_key"`                    // API key for authentication (or use ROUTING_API_KEY env var)
+	TimeoutMS               int                  `toml:"timeout_ms"`                 // Timeout for routing queries in milliseconds (default: 100)
+	RetryAttempts           int                  `toml:"retry_attempts"`             // Number of retry attempts (default: 2)
+	CacheTTLSeconds         int                  `toml:"cache_ttl_seconds"`          // Cache TTL for successful lookups (default: 300 = 5min)
+	CacheNegativeTTLSeconds int                  `toml:"cache_negative_ttl_seconds"` // Cache TTL for failures (default: 60 = 1min)
+	CacheMaxEntries         int                  `toml:"cache_max_entries"`          // Maximum cache entries (default: 50000)
+	FallbackOnError         string               `toml:"fallback_on_error"`          // Behavior on routing error: "tempfail" (451) or "reject" (550)
+	ValidateDuringRcpt      bool                 `toml:"validate_during_rcpt"`       // Validate recipient during RCPT TO (vs. DATA)
+	CircuitBreaker          CircuitBreakerConfig `toml:"circuit_breaker"`            // Circuit breaker for routing endpoint
 }
 
 // StatsConfig holds configuration for IP and domain reputation tracking
@@ -219,7 +259,7 @@ func DefaultConfig() Config {
 			Prefix:         "certs/",
 			Region:         "us-east-1",
 		},
-		Destination: DestinationConfig{
+		Delivery: DeliveryConfig{
 			URL:                "https://your-worker.example.com/email",
 			APIKey:             "your-api-key-here",
 			MaxRetryAttempts:   3,
@@ -232,6 +272,48 @@ func DefaultConfig() Config {
 				HalfOpenMaxCalls:    1,
 				ResetTimeoutSeconds: 60,
 			},
+		},
+		Forwarding: ForwardingConfig{
+			Enabled:            false,                                      // Disabled by default
+			URL:                "https://forward-worker.example.com/relay", // Example forwarding endpoint
+			APIKey:             "",                                         // No API key by default
+			MaxRetryAttempts:   5,                                          // 5 retries (handled by queue)
+			HTTPTimeoutSeconds: 30,                                         // 30s timeout
+			CircuitBreaker: CircuitBreakerConfig{
+				Enabled:             true,
+				FailureThreshold:    5,
+				SuccessThreshold:    2,
+				TimeoutSeconds:      30,
+				HalfOpenMaxCalls:    1,
+				ResetTimeoutSeconds: 60,
+			},
+		},
+		Routing: RoutingConfig{
+			Enabled:                 false,                                         // Disabled by default
+			Endpoint:                "https://routing.example.workers.dev/resolve", // Example endpoint
+			APIKey:                  "",                                            // No API key by default
+			TimeoutMS:               100,                                           // 100ms timeout
+			RetryAttempts:           2,                                             // 2 retries
+			CacheTTLSeconds:         300,                                           // 5min cache for hits
+			CacheNegativeTTLSeconds: 60,                                            // 1min cache for misses
+			CacheMaxEntries:         50000,                                         // 50k cache entries
+			FallbackOnError:         "tempfail",                                    // Temp fail on routing errors
+			ValidateDuringRcpt:      true,                                          // Validate during RCPT TO
+			CircuitBreaker: CircuitBreakerConfig{
+				Enabled:             true, // Enabled by default to protect routing endpoint
+				FailureThreshold:    10,   // 10 failures before opening (routing should be fast)
+				SuccessThreshold:    3,    // 3 successes to close
+				TimeoutSeconds:      5,    // Try again after 5s (routing is critical)
+				HalfOpenMaxCalls:    2,    // Allow 2 concurrent test calls
+				ResetTimeoutSeconds: 30,   // Reset counters after 30s
+			},
+		},
+		Queue: QueueConfig{
+			Enabled:                false,          // Disabled by default (only used with routing)
+			DataDir:                "./data/queue", // Default data directory
+			Workers:                10,             // 10 concurrent workers
+			MaxRetryHours:          48,             // 48 hours retry window
+			ShutdownTimeoutSeconds: 30,             // 30s shutdown timeout
 		},
 		TLS: TLSConfig{
 			Email:            "admin@example.com",

@@ -24,6 +24,8 @@ import (
 	"migadu/mizu/pkg/logging"
 	"migadu/mizu/pkg/metrics"
 	"migadu/mizu/pkg/poster"
+	"migadu/mizu/pkg/queue"
+	"migadu/mizu/pkg/routing"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/validation"
 
@@ -65,6 +67,14 @@ func NewDNSResolver(dnsServers []string, timeout time.Duration, cacheTTL time.Du
 	return resolver, wrapper
 }
 
+// RoutingClient defines the interface for routing lookups
+// This allows for easier testing and potential alternative implementations
+type RoutingClient interface {
+	Resolve(ctx context.Context, recipient, sender, clientIP, subject string) (*routing.ResolveResponse, error)
+	FlushCache()
+	GetStats() map[string]interface{}
+}
+
 // Backend implements smtp.Backend interface for our custom SMTP server.
 // It manages the overall server configuration and creates new sessions for incoming connections.
 type Backend struct {
@@ -84,6 +94,17 @@ type Backend struct {
 	DistTracker        *DistributedTracker   // Optional: Distributed connection tracking
 	RateLimiter        *RateLimiter          // Rate limiter to prevent rapid connection attempts
 	ARCSigner          *validation.ARCSigner // Optional: ARC signer for adding ARC headers
+	RoutingClient      RoutingClient         // Optional: Routing/aliasing client
+	DeliveryQueue      DeliveryQueue         // Optional: Async delivery queue (used with routing)
+}
+
+// DeliveryQueue defines the interface for async email delivery
+type DeliveryQueue interface {
+	Enqueue(job *queue.DeliveryJob) error
+	GetStats() queue.QueueStats
+	Size() int
+	Start() error
+	Shutdown(ctx context.Context) error
 }
 
 // EHLO/HELO is called for the HELO/EHLO command.
@@ -348,7 +369,9 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		sessionCount:   be.ActiveSessionCount,
 		commandState:   stateNew, // Explicitly initialize command state
 		traceID:        traceID,
-		arcSigner:      be.ARCSigner, // Add ARC signer (nil if disabled)
+		arcSigner:      be.ARCSigner,     // Add ARC signer (nil if disabled)
+		routingClient:  be.RoutingClient, // Add routing client (nil if disabled)
+		deliveryQueue:  be.DeliveryQueue, // Add delivery queue (nil if disabled)
 	}
 
 	sessionCreated = true
@@ -394,6 +417,11 @@ type Session struct {
 	dmarcResult *validation.DMARCResult
 	arcResult   *validation.ARCResult
 	arcSigner   *validation.ARCSigner // ARC signer (nil if ARC signing disabled)
+
+	// Routing
+	routingClient RoutingClient            // Routing client for recipient validation and aliasing (nil if disabled)
+	routingResult *routing.ResolveResponse // Result from routing lookup (cached during RCPT TO)
+	deliveryQueue DeliveryQueue            // Async delivery queue (nil if disabled)
 }
 
 // SMTP command states for sequence validation
@@ -755,6 +783,81 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		}
 	}
 
+	// Perform routing lookup if enabled and configured to validate during RCPT
+	if s.routingClient != nil && s.config.Routing.Enabled && s.config.Routing.ValidateDuringRcpt {
+		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
+		// Note: subject is not available during RCPT TO, will be empty
+		result, err := s.routingClient.Resolve(s.ctx, to, s.from, ipStr, "")
+		if err != nil {
+			s.Logger.Warn("Routing lookup failed", zap.String("to", to), zap.Error(err))
+
+			// Handle fallback based on configuration
+			if s.config.Routing.FallbackOnError == "reject" {
+				return &smtp.SMTPError{
+					Code:         550,
+					EnhancedCode: smtp.EnhancedCode{5, 4, 0},
+					Message:      "recipient validation failed",
+				}
+			}
+			// Default: tempfail
+			return &smtp.SMTPError{
+				Code:         451,
+				EnhancedCode: smtp.EnhancedCode{4, 4, 0},
+				Message:      "temporary failure, please try again later",
+			}
+		}
+
+		// Check if recipient is accepted
+		if !result.Accepted {
+			s.Logger.Info("Recipient rejected by routing",
+				zap.String("to", to),
+				zap.String("error_code", result.ErrorCode),
+				zap.String("error_message", result.ErrorMessage))
+
+			// Map error codes to SMTP errors
+			switch result.ErrorCode {
+			case routing.ErrorCodeDomainNotFound:
+				return &smtp.SMTPError{
+					Code:         550,
+					EnhancedCode: smtp.EnhancedCode{5, 1, 1},
+					Message:      "relay not permitted",
+				}
+			case routing.ErrorCodeRecipientNotFound:
+				return &smtp.SMTPError{
+					Code:         550,
+					EnhancedCode: smtp.EnhancedCode{5, 1, 1},
+					Message:      "mailbox does not exist",
+				}
+			case routing.ErrorCodeRecipientBlocked:
+				return &smtp.SMTPError{
+					Code:         550,
+					EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+					Message:      "recipient blocked",
+				}
+			case routing.ErrorCodeQuotaExceeded:
+				return &smtp.SMTPError{
+					Code:         552,
+					EnhancedCode: smtp.EnhancedCode{5, 2, 2},
+					Message:      "mailbox full",
+				}
+			default:
+				return &smtp.SMTPError{
+					Code:         550,
+					EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+					Message:      result.ErrorMessage,
+				}
+			}
+		}
+
+		// Store routing result for use in DATA
+		s.routingResult = result
+		s.Logger.Info("Recipient accepted by routing",
+			zap.String("to", to),
+			zap.Strings("deliver_to", result.DeliverTo),
+			zap.Strings("forward_to", result.ForwardTo),
+			zap.Bool("is_catchall", result.IsCatchall))
+	}
+
 	// Reset to idle timeout to wait for the next command
 	if err := s.setCommandTimeout(IdleTimeout); err != nil {
 		return err
@@ -955,11 +1058,34 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 // It translates delivery errors into appropriate SMTP temporary or permanent failure codes.
 // It also checks the recipient cache before attempting delivery and caches 404/403 responses.
 func (s *Session) deliverMessage(rawEmail string) error {
-	// Sign email with ARC if enabled
-	signedEmail := rawEmail
+	// Step 1: Inject Received and X-Mizu-* headers
+	// This must happen BEFORE ARC signing so the signature covers these headers
+	tlsVersionStr := "none"
+	if s.tlsState != nil {
+		tlsVersionStr = tlsVersionString(s.tlsState.Version)
+	}
+
+	emailWithHeaders := InjectMizuHeaders(
+		rawEmail,
+		s.config.SMTP.Domain,
+		s.remoteAddr,
+		s.helo,
+		s.traceID,
+		tlsVersionStr,
+		s.spfResult,
+		s.dmarcResult,
+		s.arcResult,
+		s.isJunk,
+	)
+
+	s.Logger.Debug("Injected Received and X-Mizu-* headers")
+
+	// Step 2: Sign email with ARC if enabled
+	// ARC signature covers the complete message including our added headers
+	signedEmail := emailWithHeaders
 	if s.arcSigner != nil && s.config.SMTP.ARCSign.Enabled {
 		var err error
-		signedEmail, err = s.arcSigner.SignEmail(rawEmail, s.spfResult, s.dmarcResult, s.arcResult)
+		signedEmail, err = s.arcSigner.SignEmail(emailWithHeaders, s.spfResult, s.dmarcResult, s.arcResult)
 		if err != nil {
 			s.Logger.Warn("Failed to sign email with ARC", zap.Error(err))
 			// Don't fail delivery on ARC signing error, just log and continue
@@ -968,6 +1094,181 @@ func (s *Session) deliverMessage(rawEmail string) error {
 		}
 	}
 
+	// Step 3: Choose delivery path based on routing configuration
+	if s.routingClient != nil && s.config.Routing.Enabled && s.deliveryQueue != nil && s.config.Queue.Enabled {
+		// Async delivery with routing
+		return s.deliverWithRouting(signedEmail)
+	}
+
+	// Traditional synchronous delivery
+	return s.deliverSynchronous(signedEmail)
+}
+
+// deliverWithRouting handles async delivery using routing results and queue
+func (s *Session) deliverWithRouting(signedEmail string) error {
+	var routingResult *routing.ResolveResponse
+
+	// If we have a cached result from RCPT TO, perform a fresh lookup with subject
+	// This allows routing policies to consider the email subject
+	if s.routingResult != nil {
+		// Extract subject from the email
+		subject := extractSubject(signedEmail)
+
+		// Perform fresh routing lookup with subject for the first recipient
+		// (in most cases there's only one recipient per SMTP transaction)
+		if len(s.to) > 0 {
+			ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
+			freshResult, err := s.routingClient.Resolve(s.ctx, s.to[0], s.from, ipStr, subject)
+			if err != nil {
+				s.Logger.Warn("Fresh routing lookup with subject failed, using cached result",
+					zap.String("recipient", s.to[0]),
+					zap.Error(err))
+				routingResult = s.routingResult // Fall back to cached result
+			} else {
+				routingResult = freshResult
+				s.Logger.Debug("Used fresh routing lookup with subject",
+					zap.String("recipient", s.to[0]),
+					zap.String("subject", subject))
+			}
+		} else {
+			routingResult = s.routingResult
+		}
+	} else {
+		s.Logger.Warn("No routing result available - falling back to synchronous delivery")
+		return s.deliverSynchronous(signedEmail)
+	}
+
+	// Create delivery jobs based on routing result
+	jobs := s.createDeliveryJobs(signedEmail, routingResult)
+
+	if len(jobs) == 0 {
+		s.Logger.Warn("No delivery jobs created from routing result")
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 4, 0},
+			Message:      "no valid delivery targets",
+		}
+	}
+
+	// Enqueue all jobs
+	for _, job := range jobs {
+		if err := s.deliveryQueue.Enqueue(job); err != nil {
+			s.Logger.Error("Failed to enqueue delivery job",
+				zap.String("job_id", job.ID),
+				zap.String("endpoint", job.Endpoint),
+				zap.Error(err))
+
+			return &smtp.SMTPError{
+				Code:         451,
+				EnhancedCode: smtp.EnhancedCode{4, 4, 0},
+				Message:      "temporary failure, please try again later",
+			}
+		}
+
+		s.Logger.Info("Delivery job enqueued",
+			zap.String("job_id", job.ID),
+			zap.String("trace_id", s.traceID),
+			zap.String("endpoint", job.Endpoint),
+			zap.Strings("recipients", job.Recipients),
+			zap.Bool("is_forwarding", job.IsForwarding))
+	}
+
+	// Return success immediately - async delivery
+	s.Logger.Info("Message queued for async delivery",
+		zap.Int("job_count", len(jobs)),
+		zap.String("trace_id", s.traceID))
+
+	// Record as successful delivery for stats (we accepted it)
+	s.finalizeSuccessfulDelivery()
+
+	return nil
+}
+
+// createDeliveryJobs creates queue jobs from routing response
+func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.ResolveResponse) []*queue.DeliveryJob {
+	jobs := []*queue.DeliveryJob{}
+
+	// Job for local delivery
+	if len(routing.DeliverTo) > 0 {
+		endpoint := routing.DeliveryEndpoint
+		isCustomEndpoint := (routing.DeliveryEndpoint != "")
+		if endpoint == "" {
+			endpoint = s.config.Delivery.URL
+		}
+
+		// For custom endpoints from routing, don't send API key
+		// Custom endpoints should have authentication in their URL
+		apiKey := s.config.Delivery.APIKey
+		if routing.DeliveryEndpoint != "" {
+			apiKey = "" // Custom endpoint - no API key (auth should be in URL)
+		}
+
+		job := &queue.DeliveryJob{
+			ID:               queue.GenerateJobID(),
+			TraceID:          s.traceID,
+			EmailContent:     signedEmail,
+			Recipients:       routing.DeliverTo,
+			Endpoint:         endpoint,
+			APIKey:           apiKey,
+			IsForwarding:     false,
+			IsCustomEndpoint: isCustomEndpoint,
+			From:             s.from,
+			OriginalTo:       s.to[0], // Original RCPT TO
+			IsJunk:           s.isJunk,
+			MaxAttempts:      0, // Not used by persistent queue (uses time-based retries)
+		}
+
+		jobs = append(jobs, job)
+
+		s.Logger.Debug("Created delivery job",
+			zap.String("job_id", job.ID),
+			zap.String("endpoint", endpoint),
+			zap.Strings("recipients", routing.DeliverTo))
+	}
+
+	// Job for forwarding
+	if len(routing.ForwardTo) > 0 {
+		endpoint := routing.ForwardEndpoint
+		isCustomEndpoint := (routing.ForwardEndpoint != "")
+		if endpoint == "" {
+			endpoint = s.config.Forwarding.URL
+		}
+
+		// For custom endpoints from routing, don't send API key
+		// Custom endpoints should have authentication in their URL
+		apiKey := s.config.Forwarding.APIKey
+		if routing.ForwardEndpoint != "" {
+			apiKey = "" // Custom endpoint - no API key (auth should be in URL)
+		}
+
+		job := &queue.DeliveryJob{
+			ID:               queue.GenerateJobID(),
+			TraceID:          s.traceID,
+			EmailContent:     signedEmail,
+			Recipients:       routing.ForwardTo,
+			Endpoint:         endpoint,
+			APIKey:           apiKey,
+			IsForwarding:     true,
+			IsCustomEndpoint: isCustomEndpoint,
+			From:             s.from,
+			OriginalTo:       s.to[0],
+			IsJunk:           s.isJunk,
+			MaxAttempts:      0, // Not used by persistent queue (uses time-based retries)
+		}
+
+		jobs = append(jobs, job)
+
+		s.Logger.Debug("Created forwarding job",
+			zap.String("job_id", job.ID),
+			zap.String("endpoint", endpoint),
+			zap.Strings("recipients", routing.ForwardTo))
+	}
+
+	return jobs
+}
+
+// deliverSynchronous handles traditional synchronous delivery
+func (s *Session) deliverSynchronous(signedEmail string) error {
 	// Check recipient cache first (if distributed tracking is enabled)
 	if s.distTracker != nil && len(s.to) > 0 {
 		// Check cache for all recipients
@@ -987,9 +1288,9 @@ func (s *Session) deliverMessage(rawEmail string) error {
 	err := poster.PostEmailToDestinationWithContext(
 		s.ctx,
 		signedEmail,
-		s.config.Destination.URL,
-		s.config.Destination.APIKey,
-		s.config.Destination.MaxRetryAttempts,
+		s.config.Delivery.URL,
+		s.config.Delivery.APIKey,
+		s.config.Delivery.MaxRetryAttempts,
 		s.isJunk,
 		s.from,
 		s.to,
@@ -1194,4 +1495,13 @@ func tlsVersionString(version uint16) string {
 	default:
 		return fmt.Sprintf("Unknown (0x%x)", version)
 	}
+}
+
+// extractSubject extracts the Subject header from an email
+func extractSubject(rawEmail string) string {
+	msg, err := mail.ReadMessage(strings.NewReader(rawEmail))
+	if err != nil {
+		return ""
+	}
+	return msg.Header.Get("Subject")
 }

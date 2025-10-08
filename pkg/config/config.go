@@ -8,19 +8,19 @@ import (
 // Validate checks the configuration for required fields and placeholder values.
 func (c *Config) Validate() error {
 	// Validate retry attempts (prevent infinite loops and excessive delays)
-	if c.Destination.MaxRetryAttempts > 5 {
-		return fmt.Errorf("destination.max_retry_attempts must be <= 5 (got %d) to prevent excessive delays", c.Destination.MaxRetryAttempts)
+	if c.Delivery.MaxRetryAttempts > 5 {
+		return fmt.Errorf("destination.max_retry_attempts must be <= 5 (got %d) to prevent excessive delays", c.Delivery.MaxRetryAttempts)
 	}
-	if c.Destination.MaxRetryAttempts < 1 {
-		return fmt.Errorf("destination.max_retry_attempts must be >= 1 (got %d)", c.Destination.MaxRetryAttempts)
+	if c.Delivery.MaxRetryAttempts < 1 {
+		return fmt.Errorf("destination.max_retry_attempts must be >= 1 (got %d)", c.Delivery.MaxRetryAttempts)
 	}
 
 	// Validate HTTP timeout
-	if c.Destination.HTTPTimeoutSeconds < 1 {
-		return fmt.Errorf("destination.http_timeout_seconds must be >= 1 (got %d)", c.Destination.HTTPTimeoutSeconds)
+	if c.Delivery.HTTPTimeoutSeconds < 1 {
+		return fmt.Errorf("destination.http_timeout_seconds must be >= 1 (got %d)", c.Delivery.HTTPTimeoutSeconds)
 	}
-	if c.Destination.HTTPTimeoutSeconds > 300 {
-		return fmt.Errorf("destination.http_timeout_seconds must be <= 300 (5m) (got %d) to prevent blocking SMTP sessions", c.Destination.HTTPTimeoutSeconds)
+	if c.Delivery.HTTPTimeoutSeconds > 300 {
+		return fmt.Errorf("destination.http_timeout_seconds must be <= 300 (5m) (got %d) to prevent blocking SMTP sessions", c.Delivery.HTTPTimeoutSeconds)
 	}
 
 	// Validate distributed tracking settings
@@ -41,10 +41,10 @@ func (c *Config) Validate() error {
 	if c.SMTP.Domain == "" || c.SMTP.Domain == "mail.example.com" {
 		return errors.New("smtp.domain must be set")
 	}
-	if c.Destination.URL == "" {
+	if c.Delivery.URL == "" {
 		return errors.New("destination.url must be set")
 	}
-	if c.Destination.APIKey == "" || c.Destination.APIKey == "your-api-key-here" {
+	if c.Delivery.APIKey == "" || c.Delivery.APIKey == "your-api-key-here" {
 		return errors.New("destination.api_key must be set")
 	}
 

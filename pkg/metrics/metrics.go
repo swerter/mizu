@@ -60,6 +60,20 @@ type Metrics struct {
 	RecipientCacheHits   *prometheus.CounterVec
 	RecipientCacheMisses prometheus.Counter
 	RecipientCacheSize   *prometheus.GaugeVec
+
+	// Queue metrics
+	QueueJobsTotal        prometheus.Counter   // Total jobs enqueued
+	QueueJobsActive       prometheus.Gauge     // Current jobs in queue
+	QueueJobsDelivered    prometheus.Counter   // Total jobs successfully delivered
+	QueueJobsFailed       prometheus.Counter   // Total jobs failed
+	QueueJobsRetries      prometheus.Counter   // Total retry attempts
+	QueueJobsDLQ          prometheus.Gauge     // Jobs in dead letter queue
+	QueueWorkers          prometheus.Gauge     // Number of active workers
+	QueueDeliveryDuration prometheus.Histogram // Time to deliver a job
+	QueueJobAge           prometheus.Histogram // Age of jobs when delivered
+	QueueStorageSize      prometheus.Gauge     // Storage size in bytes
+	QueueEmailFiles       prometheus.Gauge     // Number of email files on disk
+	QueueScheduleEntries  prometheus.Gauge     // Number of schedule entries
 }
 
 // New creates and registers all Prometheus metrics
@@ -307,5 +321,81 @@ func New(namespace string) *Metrics {
 			Name:      "size",
 			Help:      "Current size of recipient cache",
 		}, []string{"type"}),
+
+		// Queue metrics
+		QueueJobsTotal: promauto.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "jobs_total",
+			Help:      "Total number of jobs enqueued",
+		}),
+		QueueJobsActive: promauto.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "jobs_active",
+			Help:      "Current number of jobs in queue",
+		}),
+		QueueJobsDelivered: promauto.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "jobs_delivered_total",
+			Help:      "Total number of jobs successfully delivered",
+		}),
+		QueueJobsFailed: promauto.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "jobs_failed_total",
+			Help:      "Total number of jobs that failed permanently",
+		}),
+		QueueJobsRetries: promauto.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "jobs_retries_total",
+			Help:      "Total number of retry attempts",
+		}),
+		QueueJobsDLQ: promauto.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "jobs_dlq",
+			Help:      "Current number of jobs in dead letter queue",
+		}),
+		QueueWorkers: promauto.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "workers",
+			Help:      "Number of active workers processing jobs",
+		}),
+		QueueDeliveryDuration: promauto.NewHistogram(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "delivery_duration_seconds",
+			Help:      "Time taken to deliver a job to endpoint",
+			Buckets:   prometheus.DefBuckets,
+		}),
+		QueueJobAge: promauto.NewHistogram(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "job_age_seconds",
+			Help:      "Age of jobs when delivered (time from creation to delivery)",
+			Buckets:   []float64{1, 5, 10, 30, 60, 300, 600, 1800, 3600, 7200, 14400, 28800, 86400, 172800}, // 1s to 48h
+		}),
+		QueueStorageSize: promauto.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "storage_bytes",
+			Help:      "Total storage used by queue in bytes",
+		}),
+		QueueEmailFiles: promauto.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "email_files",
+			Help:      "Number of email files stored on filesystem",
+		}),
+		QueueScheduleEntries: promauto.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: "queue",
+			Name:      "schedule_entries",
+			Help:      "Number of schedule entries for retry timing",
+		}),
 	}
 }

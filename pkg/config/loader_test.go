@@ -97,7 +97,7 @@ endpoint = "s3.amazonaws.com"
 bucket = "test-bucket"
 region = "us-west-2"
 
-[destination]
+[delivery]
 url = "https://destination.example.com/email"
 api_key = "test-api-key"
 
@@ -126,8 +126,8 @@ log_format = "json"
 		t.Errorf("Storage.Bucket = %s; want test-bucket", cfg.Storage.Bucket)
 	}
 
-	if cfg.Destination.URL != "https://destination.example.com/email" {
-		t.Errorf("Destination.URL = %s; want https://destination.example.com/email", cfg.Destination.URL)
+	if cfg.Delivery.URL != "https://destination.example.com/email" {
+		t.Errorf("Destination.URL = %s; want https://destination.example.com/email", cfg.Delivery.URL)
 	}
 
 	// LogFormat from config file
@@ -176,15 +176,15 @@ func TestLoadEnvVars(t *testing.T) {
 	os.Setenv("S3_ACCESS_KEY_ID", "test-access-key")
 	os.Setenv("S3_SECRET_ACCESS_KEY", "test-secret-key")
 	os.Setenv("S3_ENDPOINT", "test-endpoint")
-	os.Setenv("DESTINATION_URL", "https://test-destination.com")
-	os.Setenv("DESTINATION_API_KEY", "test-dest-key")
+	os.Setenv("DELIVERY_URL", "https://test-destination.com")
+	os.Setenv("DELIVERY_API_KEY", "test-dest-key")
 
 	defer func() {
 		os.Unsetenv("S3_ACCESS_KEY_ID")
 		os.Unsetenv("S3_SECRET_ACCESS_KEY")
 		os.Unsetenv("S3_ENDPOINT")
-		os.Unsetenv("DESTINATION_URL")
-		os.Unsetenv("DESTINATION_API_KEY")
+		os.Unsetenv("DELIVERY_URL")
+		os.Unsetenv("DELIVERY_API_KEY")
 	}()
 
 	defaultCfg := DefaultConfig()
@@ -203,12 +203,12 @@ func TestLoadEnvVars(t *testing.T) {
 		t.Errorf("S3.Endpoint = %s; want test-endpoint", cfg.Storage.Endpoint)
 	}
 
-	if cfg.Destination.URL != "https://test-destination.com" {
-		t.Errorf("Destination.URL = %s; want https://test-destination.com", cfg.Destination.URL)
+	if cfg.Delivery.URL != "https://test-destination.com" {
+		t.Errorf("Destination.URL = %s; want https://test-destination.com", cfg.Delivery.URL)
 	}
 
-	if cfg.Destination.APIKey != "test-dest-key" {
-		t.Errorf("Destination.APIKey = %s; want test-dest-key", cfg.Destination.APIKey)
+	if cfg.Delivery.APIKey != "test-dest-key" {
+		t.Errorf("Destination.APIKey = %s; want test-dest-key", cfg.Delivery.APIKey)
 	}
 }
 
@@ -275,23 +275,23 @@ func TestValidateConfig_ProductionMode(t *testing.T) {
 				c.Storage.Bucket = "test-bucket"
 				c.Storage.AccessKeyID = "test-key"
 				c.Storage.SecretAccessKey = "test-secret"
-				c.Destination.URL = ""
+				c.Delivery.URL = ""
 			},
 			expectError: true,
 			errorMsg:    "destination URL must be configured",
 		},
 		{
-			name: "missing destination API key",
+			name: "missing delivery API key",
 			modifyFunc: func(c *Config) {
 				c.SMTP.Domain = "mail.example.com"
 				c.Storage.Bucket = "test-bucket"
 				c.Storage.AccessKeyID = "test-key"
 				c.Storage.SecretAccessKey = "test-secret"
-				c.Destination.URL = "https://test.com"
-				c.Destination.APIKey = ""
+				c.Delivery.URL = "https://test.com"
+				c.Delivery.APIKey = ""
 			},
 			expectError: true,
-			errorMsg:    "destination API key must be configured",
+			errorMsg:    "delivery API key must be configured",
 		},
 		{
 			name: "valid production config",
@@ -300,8 +300,8 @@ func TestValidateConfig_ProductionMode(t *testing.T) {
 				c.Storage.Bucket = "test-bucket"
 				c.Storage.AccessKeyID = "test-key"
 				c.Storage.SecretAccessKey = "test-secret"
-				c.Destination.URL = "https://test.com"
-				c.Destination.APIKey = "test-api-key"
+				c.Delivery.URL = "https://test.com"
+				c.Delivery.APIKey = "test-api-key"
 			},
 			expectError: false,
 		},
@@ -366,8 +366,8 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("S3.Region = %s; want us-east-1", cfg.Storage.Region)
 	}
 
-	if cfg.Destination.MaxRetryAttempts != 3 {
-		t.Errorf("Destination.MaxRetryAttempts = %d; want 3", cfg.Destination.MaxRetryAttempts)
+	if cfg.Delivery.MaxRetryAttempts != 3 {
+		t.Errorf("Destination.MaxRetryAttempts = %d; want 3", cfg.Delivery.MaxRetryAttempts)
 	}
 
 	if !cfg.Blacklists.Enabled {
@@ -425,7 +425,7 @@ func TestSaveExample(t *testing.T) {
 
 	// Verify it contains expected sections
 	content := string(data)
-	expectedSections := []string{"[smtp]", "[storage]", "[destination]", "[tls]", "[blacklists]", "[stats]"}
+	expectedSections := []string{"[smtp]", "[storage]", "[delivery]", "[tls]", "[blacklists]", "[stats]"}
 	for _, section := range expectedSections {
 		if !contains(content, section) {
 			t.Errorf("example file missing section: %s", section)

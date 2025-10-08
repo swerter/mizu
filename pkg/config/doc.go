@@ -21,9 +21,9 @@
 //	selector = "arc"
 //	private_key_path = "/etc/mizu/arc-private.pem"
 //
-//	[destination]
+//	[delivery]
 //	url = "https://backend.example.com/email"
-//	api_key = "${DESTINATION_API_KEY}"  # From environment
+//	api_key = "${DELIVERY_API_KEY}"  # From environment
 //
 //	[storage]
 //	backend = "s3"  # or "filesystem"
@@ -37,7 +37,7 @@
 //
 // Sensitive values can be provided via environment variables:
 //
-//	DESTINATION_API_KEY: API key for HTTP backend
+//	DELIVERY_API_KEY: API key for HTTP backend
 //	S3_ACCESS_KEY_ID: AWS access key ID
 //	S3_SECRET_ACCESS_KEY: AWS secret access key
 //	HEALTH_PASSWORD: Password for health endpoint

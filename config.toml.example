@@ -11,10 +11,19 @@ timeout_seconds = 10                   # Connection timeout for SMTP operations
 min_tls_version = "1.2"                # Minimum TLS version required
 check_x_spam_flag = true               # Reject emails with X-Spam-Flag: YES header
 dmarc_quarantine_as_junk = true        # Treat DMARC quarantine policy as junk
+arc_enabled = true                     # Enable ARC (Authenticated Received Chain) validation
 require_sender_mx = true               # Require sender domain to have valid MX records
 shutdown_timeout_seconds = 60          # Graceful shutdown timeout
 max_connections = 100                  # Maximum concurrent connections
 max_connections_per_ip = 10            # Maximum connections per IP address
+
+# ARC (Authenticated Received Chain) signing configuration
+# ARC preserves email authentication results through forwarding chains
+[smtp.arc_sign]
+enabled = false                        # Enable ARC signing
+domain = ""                            # Domain for ARC signature (e.g., "example.com")
+selector = "arc"                       # ARC selector (used in DNS lookup: {selector}._domainkey.{domain})
+private_key_path = "/etc/mizu/arc-private.pem"  # Path to ARC private key (PEM format)
 
 # Rate limiting configuration for SMTP connections and emails
 [smtp.rate_limit]
@@ -44,8 +53,13 @@ timeout_seconds = 5                    # DNS query timeout
 cache_ttl_seconds = 300                # Positive cache TTL (5 minutes)
 cache_negative_ttl = 60                # Negative cache TTL (1 minute)
 
-# S3 storage for TLS certificates and distributed state
-[s3]
+# Storage backend configuration for TLS certificates and distributed state
+# Two backends supported: "s3" (production) or "filesystem" (single-node)
+[storage]
+backend = "s3"                         # Backend type: "s3" or "filesystem"
+filesystem_path = "/var/lib/mizu/storage"  # Path for filesystem backend (only used if backend="filesystem")
+
+# S3 storage configuration (only used if backend="s3")
 endpoint = "s3.amazonaws.com"          # S3-compatible endpoint
 bucket = "email-mx-certs"              # S3 bucket name
 prefix = "certs/"                      # Prefix for stored objects
@@ -53,21 +67,83 @@ access_key_id = "your-s3-access-key-id"
 secret_access_key = "your-s3-secret-access-key"
 region = "us-east-1"                   # AWS region
 
-# Destination configuration for forwarding processed emails
-[destination]
+# Delivery configuration for forwarding processed emails
+[delivery]
 url = "https://your-worker.example.com/email"  # Webhook URL for email delivery
 api_key = "your-api-key-here"                  # API key for authentication
 max_retry_attempts = 3                         # Maximum retry attempts on failure
 http_timeout_seconds = 30                      # HTTP request timeout
 
-# Circuit breaker prevents cascading failures when destination is down
-[destination.circuit_breaker]
+# Circuit breaker prevents cascading failures when delivery endpoint is down
+[delivery.circuit_breaker]
 enabled = true                         # Enable circuit breaker
 failure_threshold = 5                  # Failures before opening circuit
 success_threshold = 2                  # Successes needed to close circuit
 timeout_seconds = 30                   # Request timeout
 half_open_max_calls = 1                # Max concurrent calls when half-open
 reset_timeout_seconds = 60             # Time before attempting to close circuit
+
+# Forwarding configuration for relaying emails to another SMTP endpoint
+# This is separate from the primary destination and used with routing
+[forwarding]
+enabled = false                        # Enable forwarding capability
+url = "https://forward-worker.example.com/relay"  # Forwarding webhook URL
+api_key = ""                           # API key for forwarding endpoint
+max_retry_attempts = 5                 # Maximum retry attempts for forwarding
+http_timeout_seconds = 30              # HTTP timeout for forwarding requests
+
+# Circuit breaker for forwarding endpoint
+[forwarding.circuit_breaker]
+enabled = true                         # Enable circuit breaker for forwarding
+failure_threshold = 5                  # Failures before opening circuit
+success_threshold = 2                  # Successes needed to close circuit
+timeout_seconds = 30                   # Request timeout
+half_open_max_calls = 1                # Max concurrent calls when half-open
+reset_timeout_seconds = 60             # Time before attempting to close circuit
+
+# Routing configuration for dynamic email routing and aliasing
+# Allows querying an external service to determine how to handle each email
+[routing]
+enabled = false                        # Enable routing lookup
+endpoint = "https://routing.example.workers.dev/resolve"  # Routing service URL
+api_key = ""                           # API key for routing service
+timeout_ms = 100                       # Request timeout in milliseconds
+retry_attempts = 2                     # Number of retries on failure
+cache_ttl_seconds = 300                # Cache TTL for successful lookups (5 minutes)
+cache_negative_ttl_seconds = 60        # Cache TTL for failed lookups (1 minute)
+cache_max_entries = 50000              # Maximum cache entries
+fallback_on_error = "tempfail"         # Behavior on routing error: "tempfail", "accept", "reject"
+validate_during_rcpt = true            # Validate routing during RCPT TO (vs. after DATA)
+
+# Circuit breaker for routing endpoint
+[routing.circuit_breaker]
+enabled = true                         # Enable circuit breaker for routing
+failure_threshold = 10                 # Failures before opening circuit (higher for routing)
+success_threshold = 3                  # Successes needed to close circuit
+timeout_seconds = 5                    # Request timeout
+half_open_max_calls = 2                # Max concurrent calls when half-open
+reset_timeout_seconds = 30             # Time before attempting to close circuit
+
+# Async delivery queue (used with routing for non-blocking email acceptance)
+# Uses persistent queue with BadgerDB for production-grade reliability
+[queue]
+enabled = false                        # Enable async queue (requires routing.enabled=true)
+data_dir = "./data/queue"              # Directory for persistent queue storage
+workers = 10                           # Number of concurrent worker goroutines
+max_retry_hours = 48                   # Maximum hours to retry before giving up (~39 attempts over 48h)
+shutdown_timeout_seconds = 30          # Max time to wait for graceful shutdown
+
+# Retry Schedule:
+# Age Range        | Retry Interval | Attempts
+# -----------------|----------------|----------
+# 0-1 min          | immediate      | 1
+# 1-5 min          | 1 min          | 4
+# 5-30 min         | 5 min          | 5
+# 30 min-2 hours   | 15 min         | 6
+# 2-6 hours        | 30 min         | 8
+# 6-24 hours       | 2 hours        | 9
+# 24-48 hours      | 4 hours        | 6
+# Total: ~39 attempts over 48 hours (configurable via max_retry_hours)
 
 # TLS certificate management via Let's Encrypt
 [tls]

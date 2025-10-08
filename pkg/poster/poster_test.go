@@ -237,3 +237,78 @@ func TestPostEmailToDestinationWithContext_TraceIDHeader(t *testing.T) {
 		t.Errorf("Expected X-Trace-ID header to be '%s', but got: %s", testTraceID, traceIDHeader)
 	}
 }
+
+// TestPostEmailToDestinationWithContext_NoAPIKeyForCustomEndpoint verifies that when apiKey is empty,
+// no X-API-Key header is sent (for custom endpoints that use URL-based auth)
+func TestPostEmailToDestinationWithContext_NoAPIKeyForCustomEndpoint(t *testing.T) {
+	// Track received headers
+	var receivedHeaders http.Header
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		io.ReadAll(r.Body) // Drain body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	logger := zap.NewNop()
+	client := server.Client()
+
+	// Test 1: With API key
+	err := PostEmailToDestinationWithContext(
+		context.Background(),
+		"Subject: Test\r\n\r\nBody",
+		server.URL,
+		"test-api-key",
+		0,
+		false,
+		"from@example.com",
+		[]string{"to@example.com"},
+		"trace-123",
+		nil,
+		client,
+		logger,
+	)
+
+	if err != nil {
+		t.Fatalf("Failed with API key: %v", err)
+	}
+
+	if receivedHeaders.Get("X-API-Key") != "test-api-key" {
+		t.Errorf("Expected X-API-Key header with value 'test-api-key', got: %s", receivedHeaders.Get("X-API-Key"))
+	}
+
+	// Test 2: Without API key (custom endpoint)
+	receivedHeaders = nil
+	err = PostEmailToDestinationWithContext(
+		context.Background(),
+		"Subject: Test\r\n\r\nBody",
+		server.URL,
+		"", // Empty API key for custom endpoint
+		0,
+		false,
+		"from@example.com",
+		[]string{"to@example.com"},
+		"trace-123",
+		nil,
+		client,
+		logger,
+	)
+
+	if err != nil {
+		t.Fatalf("Failed without API key: %v", err)
+	}
+
+	if receivedHeaders.Get("X-API-Key") != "" {
+		t.Errorf("Expected no X-API-Key header for custom endpoint, but got: %s", receivedHeaders.Get("X-API-Key"))
+	}
+
+	// Verify other headers are still present
+	if receivedHeaders.Get("Content-Type") != "message/rfc822" {
+		t.Errorf("Expected Content-Type header")
+	}
+
+	if receivedHeaders.Get("X-Trace-ID") != "trace-123" {
+		t.Errorf("Expected X-Trace-ID header")
+	}
+}

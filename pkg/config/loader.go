@@ -38,8 +38,8 @@ func LoadConfig(args []string) (*Config, error) {
 	fs.StringVar(&cfg.Storage.SecretAccessKey, "s3.secret-access-key", cfg.Storage.SecretAccessKey, "S3 secret access key (prefer env var for security)")
 
 	// Destination flags
-	fs.StringVar(&cfg.Destination.URL, "destination.url", cfg.Destination.URL, "Destination URL")
-	fs.StringVar(&cfg.Destination.APIKey, "destination.api-key", cfg.Destination.APIKey, "Destination API key, given in X-API-Key")
+	fs.StringVar(&cfg.Delivery.URL, "destination.url", cfg.Delivery.URL, "Destination URL")
+	fs.StringVar(&cfg.Delivery.APIKey, "destination.api-key", cfg.Delivery.APIKey, "Destination API key, given in X-API-Key")
 
 	// Health check flags
 	fs.BoolVar(&cfg.Health.Enabled, "health.enabled", cfg.Health.Enabled, "Enable health check HTTP endpoint")
@@ -135,12 +135,12 @@ func loadEnvVars(cfg *Config) {
 		cfg.Storage.Endpoint = v
 	}
 
-	// Destination credentials
-	if v := os.Getenv("DESTINATION_URL"); v != "" {
-		cfg.Destination.URL = v
+	// Delivery credentials
+	if v := os.Getenv("DELIVERY_URL"); v != "" {
+		cfg.Delivery.URL = v
 	}
-	if v := os.Getenv("DESTINATION_API_KEY"); v != "" {
-		cfg.Destination.APIKey = v
+	if v := os.Getenv("DELIVERY_API_KEY"); v != "" {
+		cfg.Delivery.APIKey = v
 	}
 }
 
@@ -172,12 +172,12 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("S3 secret access key must be configured (via config file, flag, or S3_SECRET_ACCESS_KEY env var)")
 	}
 
-	if cfg.Destination.URL == "" {
+	if cfg.Delivery.URL == "" {
 		return fmt.Errorf("destination URL must be configured")
 	}
 
-	if cfg.Destination.APIKey == "" {
-		return fmt.Errorf("destination API key must be configured (via config file, flag, or DESTINATION_API_KEY env var)")
+	if cfg.Delivery.APIKey == "" {
+		return fmt.Errorf("delivery API key must be configured (via config file, flag, or DELIVERY_API_KEY env var)")
 	}
 
 	return nil
@@ -189,8 +189,8 @@ func SaveExample(filename string) error {
 	cfg := &defaultCfg
 	cfg.SMTP.Domain = "mail.example.com"
 	cfg.TLS.Email = "admin@example.com"
-	cfg.Destination.URL = "https://your-worker.example.com/email"
-	cfg.Destination.APIKey = "your-api-key-here"
+	cfg.Delivery.URL = "https://your-worker.example.com/email"
+	cfg.Delivery.APIKey = "your-api-key-here"
 	cfg.Storage.AccessKeyID = "your-s3-access-key-id"
 	cfg.Storage.SecretAccessKey = "your-s3-secret-access-key"
 
