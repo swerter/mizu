@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 func TestNewFilesystemBackend(t *testing.T) {
@@ -19,7 +19,7 @@ func TestNewFilesystemBackend(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	backend, err := NewFilesystemBackend(tmpDir, logger)
 	if err != nil {
 		t.Fatalf("NewFilesystemBackend failed: %v", err)
@@ -56,7 +56,7 @@ func TestFilesystemBackend_PutGetObject(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	// Put object
@@ -93,7 +93,7 @@ func TestFilesystemBackend_PutObject_ConditionalPut(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	// First put with IfNoneMatch: "*" - should succeed
@@ -123,7 +123,7 @@ func TestFilesystemBackend_StatObject(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	// Put object
@@ -162,7 +162,7 @@ func TestFilesystemBackend_StatObject_NotFound(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	_, err = backend.StatObject(ctx, "nonexistent/key.txt")
@@ -180,7 +180,7 @@ func TestFilesystemBackend_RemoveObject(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	// Put object
@@ -218,7 +218,7 @@ func TestFilesystemBackend_RemoveObject_NotFound(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	// Remove non-existent object should not error
@@ -237,7 +237,7 @@ func TestFilesystemBackend_ListObjects_Recursive(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	// Create multiple objects
@@ -277,7 +277,7 @@ func TestFilesystemBackend_ListObjects_NonRecursive(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	// Create multiple objects
@@ -316,7 +316,7 @@ func TestFilesystemBackend_ListObjects_Empty(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	// List objects in nonexistent directory
@@ -339,7 +339,7 @@ func TestFilesystemBackend_BucketExists(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	exists, err := backend.BucketExists(ctx)
@@ -356,7 +356,7 @@ func TestFilesystemBackend_BucketExists(t *testing.T) {
 func TestFilesystemBackend_BucketExists_NotExists(t *testing.T) {
 	tmpDir := filepath.Join(os.TempDir(), "nonexistent-storage-dir")
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	exists, err := backend.BucketExists(ctx)
@@ -374,7 +374,7 @@ func TestFilesystemBackend_MakeBucket(t *testing.T) {
 	tmpDir := filepath.Join(os.TempDir(), "storage-test-makebucket")
 	defer os.RemoveAll(tmpDir)
 
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 
 	// Bucket shouldn't exist yet
@@ -400,7 +400,7 @@ func TestFilesystemBackend_MakeBucket(t *testing.T) {
 
 func TestFilesystemBackend_GetFullPath(t *testing.T) {
 	tmpDir := "/tmp/storage-test"
-	backend, _ := NewFilesystemBackend(tmpDir, zap.NewNop())
+	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Test normal key
 	path := backend.getFullPath("test/key.txt")

@@ -14,7 +14,7 @@ import (
 	"migadu/mizu/pkg/poster"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // NonRetryableError is an error that should not be retried.
@@ -32,7 +32,7 @@ type Client struct {
 	apiKey         string
 	httpClient     *http.Client
 	circuitBreaker *poster.CircuitBreaker
-	logger         *zap.Logger
+	logger         *slog.Logger
 
 	// Caching
 	cache            *expirable.LRU[string, *ResolveResponse]
@@ -61,7 +61,7 @@ type ClientConfig struct {
 	CacheMaxEntries         int
 	FallbackOnError         string // "tempfail" or "reject"
 	CircuitBreaker          *poster.CircuitBreaker
-	Logger                  *zap.Logger
+	Logger                  *slog.Logger
 }
 
 // NewClient creates a new routing client
@@ -135,23 +135,23 @@ func (c *Client) Resolve(ctx context.Context, recipient, sender, clientIP, subje
 	// Check positive cache first
 	if cached, ok := c.cache.Get(cacheKey); ok {
 		c.logger.Debug("Routing cache hit (positive)",
-			zap.String("recipient", recipient),
-			zap.String("cache_key", cacheKey))
+			"recipient", recipient,
+			"cache_key", cacheKey)
 		return cached, nil
 	}
 
 	// Check negative cache
 	if cached, ok := c.negativeCache.Get(cacheKey); ok {
 		c.logger.Debug("Routing cache hit (negative)",
-			zap.String("recipient", recipient),
-			zap.String("cache_key", cacheKey))
+			"recipient", recipient,
+			"cache_key", cacheKey)
 		return cached, nil
 	}
 
 	// Cache miss - query the endpoint
 	c.logger.Debug("Routing cache miss - querying endpoint",
-		zap.String("recipient", recipient),
-		zap.String("endpoint", c.endpoint))
+		"recipient", recipient,
+		"endpoint", c.endpoint)
 
 	req := ResolveRequest{
 		Recipient: recipient,
@@ -163,8 +163,8 @@ func (c *Client) Resolve(ctx context.Context, recipient, sender, clientIP, subje
 	resp, err := c.queryEndpoint(ctx, req)
 	if err != nil {
 		c.logger.Warn("Routing lookup failed",
-			zap.String("recipient", recipient),
-			zap.Error(err))
+			"recipient", recipient,
+			"error", err)
 		return nil, err
 	}
 
@@ -202,9 +202,9 @@ func (c *Client) queryEndpoint(ctx context.Context, req ResolveRequest) (*Resolv
 
 		lastErr = err
 		c.logger.Debug("Routing query attempt failed",
-			zap.Int("attempt", attempt+1),
-			zap.Int("max_retries", c.maxRetries+1),
-			zap.Error(err))
+			"attempt", attempt+1,
+			"max_retries", c.maxRetries+1,
+			"error", err)
 	}
 
 	return nil, fmt.Errorf("routing lookup failed after %d attempts: %w", c.maxRetries+1, lastErr)
@@ -287,16 +287,16 @@ func (c *Client) cacheResult(key string, resp *ResolveResponse) {
 		// Cache negative responses in the negative cache
 		c.negativeCache.Add(key, resp)
 		c.logger.Debug("Cached routing result (negative)",
-			zap.String("key", key),
-			zap.Bool("accepted", resp.Accepted),
-			zap.Duration("ttl", c.cacheNegativeTTL))
+			"key", key,
+			"accepted", resp.Accepted,
+			"ttl", c.cacheNegativeTTL)
 	} else {
 		// Cache positive responses in the main cache
 		c.cache.Add(key, resp)
 		c.logger.Debug("Cached routing result (positive)",
-			zap.String("key", key),
-			zap.Bool("accepted", resp.Accepted),
-			zap.Duration("ttl", c.cacheTTL))
+			"key", key,
+			"accepted", resp.Accepted,
+			"ttl", c.cacheTTL)
 	}
 }
 

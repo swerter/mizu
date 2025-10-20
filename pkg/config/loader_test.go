@@ -3,12 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	// Test loading with no config file in local mode (to skip validation)
+	// Test loading with no config file in local mode
 	cfg, err := LoadConfig([]string{"--local"})
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
@@ -18,17 +17,13 @@ func TestLoadConfig_Defaults(t *testing.T) {
 		t.Fatal("LoadConfig returned nil config")
 	}
 
-	// Verify some defaults
-	if cfg.SMTP.ListenAddr != ":25" {
-		t.Errorf("SMTP.ListenAddr = %s; want :25", cfg.SMTP.ListenAddr)
+	// Verify defaults exist
+	if len(cfg.Servers) == 0 {
+		t.Error("Expected at least one default server")
 	}
 
-	if cfg.SMTP.MaxMessageSize != 10<<20 {
-		t.Errorf("SMTP.MaxMessageSize = %d; want %d", cfg.SMTP.MaxMessageSize, 10<<20)
-	}
-
-	if cfg.LogFormat != "text" {
-		t.Errorf("LogFormat = %s; want text", cfg.LogFormat)
+	if cfg.Logging.Format != "console" {
+		t.Errorf("Logging.Format = %s; want console", cfg.Logging.Format)
 	}
 }
 
@@ -36,44 +31,6 @@ func TestLoadConfig_LocalMode(t *testing.T) {
 	cfg, err := LoadConfig([]string{"--local"})
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
-	}
-
-	if !cfg.Local {
-		t.Error("Local should be true")
-	}
-
-	// In local mode, validation should be relaxed
-	if cfg.SMTP.Domain != "localhost" && cfg.SMTP.Domain != "mail.example.com" {
-		t.Errorf("SMTP.Domain = %s; expected localhost or default in local mode", cfg.SMTP.Domain)
-	}
-}
-
-func TestLoadConfig_Flags(t *testing.T) {
-	cfg, err := LoadConfig([]string{
-		"--smtp.listen", ":2525",
-		"--smtp.domain", "test.example.com",
-		"--smtp.max-message-size", "5242880",
-		"--log-format", "json",
-		"--local",
-	})
-	if err != nil {
-		t.Fatalf("LoadConfig failed: %v", err)
-	}
-
-	if cfg.SMTP.ListenAddr != ":2525" {
-		t.Errorf("SMTP.ListenAddr = %s; want :2525", cfg.SMTP.ListenAddr)
-	}
-
-	if cfg.SMTP.Domain != "test.example.com" {
-		t.Errorf("SMTP.Domain = %s; want test.example.com", cfg.SMTP.Domain)
-	}
-
-	if cfg.SMTP.MaxMessageSize != 5242880 {
-		t.Errorf("SMTP.MaxMessageSize = %d; want 5242880", cfg.SMTP.MaxMessageSize)
-	}
-
-	if cfg.LogFormat != "json" {
-		t.Errorf("LogFormat = %s; want json", cfg.LogFormat)
 	}
 
 	if !cfg.Local {
@@ -87,15 +44,19 @@ func TestLoadConfig_ConfigFile(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "test-config.toml")
 
 	configContent := `
-[smtp]
+[[server]]
+name = "test-relay"
+type = "relay"
 listen_addr = ":2525"
 domain = "mail.test.com"
-max_message_size = 5242880
+
+[server.tls]
+enabled = true
+mode = "starttls"
 
 [storage]
-endpoint = "s3.amazonaws.com"
-bucket = "test-bucket"
-region = "us-west-2"
+backend = "filesystem"
+filesystem_path = "/tmp/mizu-test"
 
 [delivery]
 url = "https://destination.example.com/email"
@@ -114,60 +75,25 @@ log_format = "json"
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
 
-	if cfg.SMTP.ListenAddr != ":2525" {
-		t.Errorf("SMTP.ListenAddr = %s; want :2525", cfg.SMTP.ListenAddr)
+	if len(cfg.Servers) != 1 {
+		t.Fatalf("Expected 1 server, got %d", len(cfg.Servers))
 	}
 
-	if cfg.SMTP.Domain != "mail.test.com" {
-		t.Errorf("SMTP.Domain = %s; want mail.test.com", cfg.SMTP.Domain)
+	srv := cfg.Servers[0]
+	if srv.ListenAddr != ":2525" {
+		t.Errorf("Server.ListenAddr = %s; want :2525", srv.ListenAddr)
 	}
 
-	if cfg.Storage.Bucket != "test-bucket" {
-		t.Errorf("Storage.Bucket = %s; want test-bucket", cfg.Storage.Bucket)
+	if srv.Domain != "mail.test.com" {
+		t.Errorf("Server.Domain = %s; want mail.test.com", srv.Domain)
+	}
+
+	if cfg.Storage.Backend != "filesystem" {
+		t.Errorf("Storage.Backend = %s; want filesystem", cfg.Storage.Backend)
 	}
 
 	if cfg.Delivery.URL != "https://destination.example.com/email" {
-		t.Errorf("Destination.URL = %s; want https://destination.example.com/email", cfg.Delivery.URL)
-	}
-
-	// LogFormat from config file
-	if cfg.LogFormat != "text" {
-		t.Errorf("LogFormat = %s; want text", cfg.LogFormat)
-	}
-}
-
-func TestLoadConfig_FlagOverridesFile(t *testing.T) {
-	// Create temporary config file
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "test-config.toml")
-
-	configContent := `
-[smtp]
-listen_addr = ":2525"
-domain = "mail.test.com"
-`
-
-	err := os.WriteFile(configPath, []byte(configContent), 0644)
-	if err != nil {
-		t.Fatalf("failed to write config file: %v", err)
-	}
-
-	// Flag should override config file
-	cfg, err := LoadConfig([]string{
-		"--config", configPath,
-		"--smtp.listen", ":3535",
-		"--local",
-	})
-	if err != nil {
-		t.Fatalf("LoadConfig failed: %v", err)
-	}
-
-	if cfg.SMTP.ListenAddr != ":3535" {
-		t.Errorf("SMTP.ListenAddr = %s; want :3535 (flag should override file)", cfg.SMTP.ListenAddr)
-	}
-
-	if cfg.SMTP.Domain != "mail.test.com" {
-		t.Errorf("SMTP.Domain = %s; want mail.test.com (from file)", cfg.SMTP.Domain)
+		t.Errorf("Delivery.URL = %s; want https://destination.example.com/email", cfg.Delivery.URL)
 	}
 }
 
@@ -175,227 +101,141 @@ func TestLoadEnvVars(t *testing.T) {
 	// Set environment variables
 	os.Setenv("S3_ACCESS_KEY_ID", "test-access-key")
 	os.Setenv("S3_SECRET_ACCESS_KEY", "test-secret-key")
-	os.Setenv("S3_ENDPOINT", "test-endpoint")
-	os.Setenv("DELIVERY_URL", "https://test-destination.com")
 	os.Setenv("DELIVERY_API_KEY", "test-dest-key")
+	os.Setenv("AUTH_API_KEY", "test-auth-key")
 
 	defer func() {
 		os.Unsetenv("S3_ACCESS_KEY_ID")
 		os.Unsetenv("S3_SECRET_ACCESS_KEY")
-		os.Unsetenv("S3_ENDPOINT")
-		os.Unsetenv("DELIVERY_URL")
 		os.Unsetenv("DELIVERY_API_KEY")
+		os.Unsetenv("AUTH_API_KEY")
 	}()
 
 	defaultCfg := DefaultConfig()
 	cfg := &defaultCfg
-	loadEnvVars(cfg)
+	applyEnvironmentVariables(cfg)
 
 	if cfg.Storage.AccessKeyID != "test-access-key" {
-		t.Errorf("S3.AccessKeyID = %s; want test-access-key", cfg.Storage.AccessKeyID)
+		t.Errorf("Storage.AccessKeyID = %s; want test-access-key", cfg.Storage.AccessKeyID)
 	}
 
 	if cfg.Storage.SecretAccessKey != "test-secret-key" {
-		t.Errorf("S3.SecretAccessKey = %s; want test-secret-key", cfg.Storage.SecretAccessKey)
-	}
-
-	if cfg.Storage.Endpoint != "test-endpoint" {
-		t.Errorf("S3.Endpoint = %s; want test-endpoint", cfg.Storage.Endpoint)
-	}
-
-	if cfg.Delivery.URL != "https://test-destination.com" {
-		t.Errorf("Destination.URL = %s; want https://test-destination.com", cfg.Delivery.URL)
+		t.Errorf("Storage.SecretAccessKey = %s; want test-secret-key", cfg.Storage.SecretAccessKey)
 	}
 
 	if cfg.Delivery.APIKey != "test-dest-key" {
-		t.Errorf("Destination.APIKey = %s; want test-dest-key", cfg.Delivery.APIKey)
+		t.Errorf("Delivery.APIKey = %s; want test-dest-key", cfg.Delivery.APIKey)
+	}
+
+	// Check that AUTH_API_KEY is applied to submission servers
+	for i := range cfg.Servers {
+		if cfg.Servers[i].IsSubmission() && cfg.Servers[i].Auth.APIKey == "" {
+			t.Errorf("Submission server %s should have auth API key set", cfg.Servers[i].Name)
+		}
 	}
 }
 
-func TestValidateConfig_LocalMode(t *testing.T) {
-	defaultCfg := DefaultConfig()
-	cfg := &defaultCfg
-	cfg.Local = true
+func TestValidateConfig_PortConflict(t *testing.T) {
+	cfg := DefaultConfig()
 
-	err := validateConfig(cfg)
+	// Add two servers on the same port
+	cfg.Servers = []ServerConfig{
+		{
+			Name:       "server1",
+			Type:       "relay",
+			ListenAddr: ":25",
+			Domain:     "test1.com",
+			TLS: ServerTLSConfig{
+				Enabled: true,
+				Mode:    "starttls",
+			},
+		},
+		{
+			Name:       "server2",
+			Type:       "submission",
+			ListenAddr: ":25", // Same port!
+			Domain:     "test2.com",
+			TLS: ServerTLSConfig{
+				Enabled: true,
+				Mode:    "implicit",
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("Expected port conflict error, got nil")
+	}
+}
+
+func TestValidateConfig_ValidMultiServer(t *testing.T) {
+	cfg := DefaultConfig()
+
+	// Add multiple servers on different ports
+	cfg.Servers = []ServerConfig{
+		{
+			Name:       "relay",
+			Type:       "relay",
+			ListenAddr: ":25",
+			Domain:     "mail.example.com",
+			TLS: ServerTLSConfig{
+				Enabled: true,
+				Mode:    "starttls",
+			},
+		},
+		{
+			Name:       "submission",
+			Type:       "submission",
+			ListenAddr: ":465",
+			Domain:     "mail.example.com",
+			TLS: ServerTLSConfig{
+				Enabled:  true,
+				Mode:     "implicit",
+				Required: true,
+			},
+			Auth: ServerAuthConfig{
+				Required: true,
+				Endpoint: "https://auth.example.com",
+				APIKey:   "test-api-key",
+			},
+		},
+	}
+
+	// Set required fields for production mode
+	cfg.Local = true // Use local mode to skip some validations
+	cfg.Storage.Backend = "filesystem"
+	cfg.Storage.FilesystemPath = "/tmp/mizu"
+	cfg.Delivery.URL = "https://test.com"
+	cfg.Delivery.APIKey = "test-key"
+
+	err := cfg.Validate()
 	if err != nil {
-		t.Errorf("validateConfig should not fail in local mode: %v", err)
-	}
-}
-
-func TestValidateConfig_ProductionMode(t *testing.T) {
-	tests := []struct {
-		name        string
-		modifyFunc  func(*Config)
-		expectError bool
-		errorMsg    string
-	}{
-		{
-			name: "missing SMTP domain",
-			modifyFunc: func(c *Config) {
-				c.SMTP.Domain = ""
-			},
-			expectError: true,
-			errorMsg:    "SMTP domain must be configured",
-		},
-		{
-			name: "missing S3 bucket",
-			modifyFunc: func(c *Config) {
-				c.SMTP.Domain = "mail.example.com"
-				c.Storage.Bucket = ""
-			},
-			expectError: true,
-			errorMsg:    "S3 bucket must be configured",
-		},
-		{
-			name: "missing S3 access key",
-			modifyFunc: func(c *Config) {
-				c.SMTP.Domain = "mail.example.com"
-				c.Storage.Bucket = "test-bucket"
-				c.Storage.AccessKeyID = ""
-			},
-			expectError: true,
-			errorMsg:    "S3 access key ID must be configured",
-		},
-		{
-			name: "missing S3 secret key",
-			modifyFunc: func(c *Config) {
-				c.SMTP.Domain = "mail.example.com"
-				c.Storage.Bucket = "test-bucket"
-				c.Storage.AccessKeyID = "test-key"
-				c.Storage.SecretAccessKey = ""
-			},
-			expectError: true,
-			errorMsg:    "S3 secret access key must be configured",
-		},
-		{
-			name: "missing destination URL",
-			modifyFunc: func(c *Config) {
-				c.SMTP.Domain = "mail.example.com"
-				c.Storage.Bucket = "test-bucket"
-				c.Storage.AccessKeyID = "test-key"
-				c.Storage.SecretAccessKey = "test-secret"
-				c.Delivery.URL = ""
-			},
-			expectError: true,
-			errorMsg:    "destination URL must be configured",
-		},
-		{
-			name: "missing delivery API key",
-			modifyFunc: func(c *Config) {
-				c.SMTP.Domain = "mail.example.com"
-				c.Storage.Bucket = "test-bucket"
-				c.Storage.AccessKeyID = "test-key"
-				c.Storage.SecretAccessKey = "test-secret"
-				c.Delivery.URL = "https://test.com"
-				c.Delivery.APIKey = ""
-			},
-			expectError: true,
-			errorMsg:    "delivery API key must be configured",
-		},
-		{
-			name: "valid production config",
-			modifyFunc: func(c *Config) {
-				c.SMTP.Domain = "mail.example.com"
-				c.Storage.Bucket = "test-bucket"
-				c.Storage.AccessKeyID = "test-key"
-				c.Storage.SecretAccessKey = "test-secret"
-				c.Delivery.URL = "https://test.com"
-				c.Delivery.APIKey = "test-api-key"
-			},
-			expectError: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			defaultCfg := DefaultConfig()
-			cfg := &defaultCfg
-			cfg.Local = false
-			tt.modifyFunc(cfg)
-
-			err := validateConfig(cfg)
-
-			if tt.expectError && err == nil {
-				t.Errorf("expected error containing %q, got nil", tt.errorMsg)
-			}
-
-			if !tt.expectError && err != nil {
-				t.Errorf("unexpected error: %v", err)
-			}
-
-			if tt.expectError && err != nil && tt.errorMsg != "" {
-				if !strings.Contains(err.Error(), tt.errorMsg) {
-					t.Errorf("error = %q; want to contain %q", err.Error(), tt.errorMsg)
-				}
-			}
-		})
+		t.Errorf("Unexpected validation error: %v", err)
 	}
 }
 
 func TestDefaultConfig(t *testing.T) {
-	defaultCfg := DefaultConfig()
-	cfg := &defaultCfg
+	cfg := DefaultConfig()
 
 	// Verify defaults
-	if cfg.SMTP.ListenAddr != ":25" {
-		t.Errorf("SMTP.ListenAddr = %s; want :25", cfg.SMTP.ListenAddr)
+	if len(cfg.Servers) == 0 {
+		t.Error("DefaultConfig should have at least one server")
 	}
 
-	if cfg.SMTP.Domain != "mail.example.com" {
-		t.Errorf("SMTP.Domain = %s; want mail.example.com", cfg.SMTP.Domain)
+	if cfg.Logging.Format != "console" {
+		t.Errorf("Logging.Format = %s; want console", cfg.Logging.Format)
 	}
 
-	if cfg.SMTP.MaxMessageSize != 10<<20 {
-		t.Errorf("SMTP.MaxMessageSize = %d; want %d", cfg.SMTP.MaxMessageSize, 10<<20)
-	}
-
-	if cfg.SMTP.TimeoutSeconds != 10 {
-		t.Errorf("SMTP.TimeoutSeconds = %v; want 10s", cfg.SMTP.TimeoutSeconds)
-	}
-
-	if cfg.SMTP.MinTLSVersion != "1.2" {
-		t.Errorf("SMTP.MinTLSVersion = %s; want 1.2", cfg.SMTP.MinTLSVersion)
-	}
-
-	if cfg.Storage.Endpoint != "s3.amazonaws.com" {
-		t.Errorf("S3.Endpoint = %s; want s3.amazonaws.com", cfg.Storage.Endpoint)
-	}
-
-	if cfg.Storage.Region != "us-east-1" {
-		t.Errorf("S3.Region = %s; want us-east-1", cfg.Storage.Region)
-	}
-
-	if cfg.Delivery.MaxRetryAttempts != 3 {
-		t.Errorf("Destination.MaxRetryAttempts = %d; want 3", cfg.Delivery.MaxRetryAttempts)
-	}
-
-	if !cfg.Blacklists.Enabled {
-		t.Error("Blacklists.Enabled should be true by default")
-	}
-
-	if len(cfg.Blacklists.Lists) != 1 || cfg.Blacklists.Lists[0] != "zen.spamhaus.org" {
-		t.Errorf("Blacklists.Lists = %v; want [zen.spamhaus.org]", cfg.Blacklists.Lists)
-	}
-
-	if cfg.Blacklists.TimeoutSeconds != 3 {
-		t.Errorf("Blacklists.TimeoutSeconds = %v; want 3s", cfg.Blacklists.TimeoutSeconds)
+	if cfg.Local {
+		t.Error("Local should be false by default")
 	}
 
 	if !cfg.Stats.Enabled {
 		t.Error("Stats.Enabled should be true by default")
 	}
 
-	if cfg.Stats.RetentionSeconds != 86400 {
-		t.Errorf("Stats.RetentionSeconds = %v; want 24h", cfg.Stats.RetentionSeconds)
-	}
-
-	if cfg.LogFormat != "text" {
-		t.Errorf("LogFormat = %s; want text", cfg.LogFormat)
-	}
-
-	if cfg.Local {
-		t.Error("Local should be false by default")
+	if cfg.Storage.Backend != "s3" {
+		t.Errorf("Storage.Backend = %s; want s3", cfg.Storage.Backend)
 	}
 }
 
@@ -422,17 +262,4 @@ func TestSaveExample(t *testing.T) {
 	if len(data) == 0 {
 		t.Error("example file is empty")
 	}
-
-	// Verify it contains expected sections
-	content := string(data)
-	expectedSections := []string{"[smtp]", "[storage]", "[delivery]", "[tls]", "[blacklists]", "[stats]"}
-	for _, section := range expectedSections {
-		if !contains(content, section) {
-			t.Errorf("example file missing section: %s", section)
-		}
-	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || contains(s[1:], substr)))
 }

@@ -2,9 +2,9 @@ package logging
 
 import (
 	"fmt"
+	"log/slog"
 	"runtime/debug"
-
-	"go.uber.org/zap"
+	"sync"
 )
 
 // RecoverPanic is a helper function to recover from panics in goroutines and log them.
@@ -16,32 +16,32 @@ import (
 //	    defer logging.RecoverPanic(logger, "worker-name")
 //	    // ... goroutine work ...
 //	}()
-func RecoverPanic(logger *zap.Logger, componentName string) {
+func RecoverPanic(logger *slog.Logger, componentName string) {
 	if r := recover(); r != nil {
 		logger.Error("panic recovered in goroutine",
-			zap.String("component", componentName),
-			zap.Any("panic", r),
-			zap.String("stack", string(debug.Stack())),
+			"component", componentName,
+			"panic", r,
+			"stack", string(debug.Stack()),
 		)
 	}
 }
 
 // RecoverPanicWithCallback is like RecoverPanic but also calls a callback function
 // after logging the panic. This can be used to trigger alerts or restart logic.
-func RecoverPanicWithCallback(logger *zap.Logger, componentName string, callback func(panicValue any)) {
+func RecoverPanicWithCallback(logger *slog.Logger, componentName string, callback func(panicValue any)) {
 	if r := recover(); r != nil {
 		logger.Error("panic recovered in goroutine",
-			zap.String("component", componentName),
-			zap.Any("panic", r),
-			zap.String("stack", string(debug.Stack())),
+			"component", componentName,
+			"panic", r,
+			"stack", string(debug.Stack()),
 		)
 		if callback != nil {
 			// Run callback in a separate recovery block to prevent callback panics
 			defer func() {
 				if r2 := recover(); r2 != nil {
 					logger.Error("panic in recovery callback",
-						zap.String("component", componentName),
-						zap.Any("callback_panic", r2),
+						"component", componentName,
+						"callback_panic", r2,
 					)
 				}
 			}()
@@ -52,14 +52,14 @@ func RecoverPanicWithCallback(logger *zap.Logger, componentName string, callback
 
 // SafeGo runs a function in a new goroutine with panic recovery.
 // If the goroutine panics, the panic is logged with a stack trace.
-func SafeGo(logger *zap.Logger, name string, fn func()) {
+func SafeGo(logger *slog.Logger, name string, fn func()) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Error("panic in goroutine",
-					zap.String("goroutine", name),
-					zap.Any("panic", r),
-					zap.Stack("stack"),
+					"goroutine", name,
+					"panic", r,
+					"stack", string(debug.Stack()),
 				)
 			}
 		}()
@@ -68,23 +68,41 @@ func SafeGo(logger *zap.Logger, name string, fn func()) {
 }
 
 // SafeGoWithCallback starts a goroutine with panic recovery and callback.
-func SafeGoWithCallback(logger *zap.Logger, componentName string, fn func(), panicCallback func(panicValue any)) {
+func SafeGoWithCallback(logger *slog.Logger, componentName string, fn func(), panicCallback func(panicValue any)) {
 	go func() {
 		defer RecoverPanicWithCallback(logger, componentName, panicCallback)
 		fn()
 	}()
 }
 
+// SafeGoWithWg runs a function in a new goroutine with panic recovery and WaitGroup tracking.
+// If the goroutine panics, the panic is logged and wg.Done() is still called to prevent deadlock.
+func SafeGoWithWg(logger *slog.Logger, name string, wg *sync.WaitGroup, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("panic in goroutine",
+					"goroutine", name,
+					"panic", r,
+					"stack", string(debug.Stack()),
+				)
+			}
+			wg.Done()
+		}()
+		fn()
+	}()
+}
+
 // WrapHandler wraps an HTTP handler with panic recovery.
 // Returns a new handler that recovers from panics and returns 500 Internal Server Error.
-func WrapHandler(logger *zap.Logger, handlerName string, next func(w any, r any)) func(w any, r any) {
+func WrapHandler(logger *slog.Logger, handlerName string, next func(w any, r any)) func(w any, r any) {
 	return func(w any, r any) {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Error("panic in HTTP handler",
-					zap.String("handler", handlerName),
-					zap.Any("panic", r),
-					zap.String("stack", string(debug.Stack())),
+					"handler", handlerName,
+					"panic", r,
+					"stack", string(debug.Stack()),
 				)
 				// Try to write error response if possible
 				// Note: This requires type assertion in real usage

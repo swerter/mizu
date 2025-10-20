@@ -12,8 +12,8 @@ import (
 	"github.com/emersion/go-msgauth/authres"
 	"github.com/emersion/go-msgauth/dkim"
 	"github.com/emersion/go-msgauth/dmarc"
-	"go.uber.org/zap"
 	"golang.org/x/net/publicsuffix"
+	"log/slog"
 )
 
 // dmarcLookup is a function variable that can be replaced in tests for mocking.
@@ -59,8 +59,13 @@ func defaultLookupTXTWithTimeout(domain string) ([]string, error) {
 	}
 	resultChan := make(chan result, 1)
 
-	// Perform lookup in a goroutine
+	// Perform lookup in a goroutine with panic recovery
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultChan <- result{records: nil, err: fmt.Errorf("panic in DNS lookup: %v", r)}
+			}
+		}()
 		records, err := net.LookupTXT(domain)
 		resultChan <- result{records: records, err: err}
 	}()
@@ -76,9 +81,9 @@ func defaultLookupTXTWithTimeout(domain string) ([]string, error) {
 
 // CheckDMARC performs DMARC validation on an email
 // It validates DKIM signatures and checks DMARC policy compliance
-func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quarantineAsJunk bool, logger *zap.Logger) (*DMARCResult, error) {
+func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quarantinePolicyAction string, logger *slog.Logger) (*DMARCResult, error) {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	// Parse the email message to extract headers
 	msg, err := mail.ReadMessage(strings.NewReader(rawEmail))
@@ -127,7 +132,7 @@ func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quar
 	record, err := dmarcLookup(fromDomain)
 	noDMARCRecord := false
 	if err != nil {
-		logger.Debug("DMARC lookup failed", zap.String("domain", fromDomain), zap.Error(err))
+		logger.Debug("DMARC lookup failed", "domain", fromDomain, "error", err)
 		// No DMARC record - continue processing to check SPF/DKIM
 		noDMARCRecord = true
 		result.NoDMARCRecord = true
@@ -144,44 +149,48 @@ func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quar
 	}
 	verifications, err := dkim.VerifyWithOptions(reader, verifyOpts)
 	if err != nil && err != io.EOF {
-		logger.Warn("DKIM verification error", zap.Error(err), zap.String("from_domain", fromDomain))
+		logger.Warn("DKIM verification error", "error", err, "from_domain", fromDomain)
 		result.FailureReasons = append(result.FailureReasons, fmt.Sprintf("DKIM verification error: %v", err))
 	}
 
 	// Log summary of DKIM signatures found
 	if len(verifications) > 0 {
 		logger.Debug("DKIM signatures found",
-			zap.String("from_domain", fromDomain),
-			zap.Int("signature_count", len(verifications)))
+			"from_domain", fromDomain,
+			"signature_count", len(verifications))
 	}
 
 	// Check DKIM results and alignment
 	for idx, v := range verifications {
-		// Log detailed signature information for debugging
-		sigFields := []zap.Field{
-			zap.Int("signature_index", idx),
-			zap.String("signing_domain", v.Domain),
-			zap.String("identifier", v.Identifier),
-			zap.Time("signature_time", v.Time),
-			zap.Strings("signed_headers", v.HeaderKeys),
-		}
-		if !v.Expiration.IsZero() {
-			sigFields = append(sigFields, zap.Time("expiration", v.Expiration))
-		}
-
 		if v.Err == nil {
-			logger.Debug("Processing DKIM signature", sigFields...)
+			// Log detailed signature information for debugging
+			if !v.Expiration.IsZero() {
+				logger.Debug("Processing DKIM signature",
+					"signature_index", idx,
+					"signing_domain", v.Domain,
+					"identifier", v.Identifier,
+					"signature_time", v.Time,
+					"signed_headers", v.HeaderKeys,
+					"expiration", v.Expiration)
+			} else {
+				logger.Debug("Processing DKIM signature",
+					"signature_index", idx,
+					"signing_domain", v.Domain,
+					"identifier", v.Identifier,
+					"signature_time", v.Time,
+					"signed_headers", v.HeaderKeys)
+			}
 
 			// Check signature age to prevent replay attacks
 			if !v.Time.IsZero() {
 				signatureAge := time.Since(v.Time)
 				if signatureAge > MaxDKIMSignatureAge {
 					logger.Warn("DKIM signature too old",
-						zap.String("domain", v.Domain),
-						zap.String("identifier", v.Identifier),
-						zap.Duration("age", signatureAge),
-						zap.Duration("max_age", MaxDKIMSignatureAge),
-						zap.Time("signature_time", v.Time))
+						"domain", v.Domain,
+						"identifier", v.Identifier,
+						"age", signatureAge,
+						"max_age", MaxDKIMSignatureAge,
+						"signature_time", v.Time)
 					result.FailureReasons = append(result.FailureReasons,
 						fmt.Sprintf("DKIM signature too old: %v (max: %v)", signatureAge.Round(time.Hour), MaxDKIMSignatureAge))
 					continue // Skip this signature, try others
@@ -189,10 +198,10 @@ func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quar
 				if signatureAge < 0 {
 					// Signature timestamp is in the future
 					logger.Warn("DKIM signature timestamp in future",
-						zap.String("domain", v.Domain),
-						zap.String("identifier", v.Identifier),
-						zap.Time("signature_time", v.Time),
-						zap.Duration("time_offset", -signatureAge))
+						"domain", v.Domain,
+						"identifier", v.Identifier,
+						"signature_time", v.Time,
+						"time_offset", -signatureAge)
 					result.FailureReasons = append(result.FailureReasons,
 						"DKIM signature timestamp is in the future")
 					continue
@@ -202,10 +211,10 @@ func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quar
 			// Check signature expiration
 			if !v.Expiration.IsZero() && time.Now().After(v.Expiration) {
 				logger.Warn("DKIM signature expired",
-					zap.String("domain", v.Domain),
-					zap.String("identifier", v.Identifier),
-					zap.Time("expiration", v.Expiration),
-					zap.Duration("expired_since", time.Since(v.Expiration)))
+					"domain", v.Domain,
+					"identifier", v.Identifier,
+					"expiration", v.Expiration,
+					"expired_since", time.Since(v.Expiration))
 				result.FailureReasons = append(result.FailureReasons,
 					fmt.Sprintf("DKIM signature expired at %v", v.Expiration.Format(time.RFC3339)))
 				continue
@@ -229,35 +238,35 @@ func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quar
 			if aligned {
 				result.DKIMAligned = true
 				logger.Info("DKIM signature passed and aligned",
-					zap.String("from_domain", fromDomain),
-					zap.String("signing_domain", signingDomain),
-					zap.String("identifier", v.Identifier),
-					zap.String("alignment_mode", alignmentMode),
-					zap.Time("signature_time", v.Time),
-					zap.Duration("signature_age", time.Since(v.Time)),
-					zap.Strings("signed_headers", v.HeaderKeys))
+					"from_domain", fromDomain,
+					"signing_domain", signingDomain,
+					"identifier", v.Identifier,
+					"alignment_mode", alignmentMode,
+					"signature_time", v.Time,
+					"signature_age", time.Since(v.Time),
+					"signed_headers", v.HeaderKeys)
 				break
 			} else {
 				logger.Debug("DKIM signature valid but not aligned",
-					zap.String("from_domain", fromDomain),
-					zap.String("signing_domain", signingDomain),
-					zap.String("identifier", v.Identifier),
-					zap.String("alignment_mode", alignmentMode),
-					zap.String("reason", "domain mismatch"))
+					"from_domain", fromDomain,
+					"signing_domain", signingDomain,
+					"identifier", v.Identifier,
+					"alignment_mode", alignmentMode,
+					"reason", "domain mismatch")
 			}
 		} else {
 			// DKIM verification failed
 			logger.Warn("DKIM signature verification failed",
-				zap.String("signing_domain", v.Domain),
-				zap.String("identifier", v.Identifier),
-				zap.Error(v.Err),
-				zap.Strings("signed_headers", v.HeaderKeys))
+				"signing_domain", v.Domain,
+				"identifier", v.Identifier,
+				"error", v.Err,
+				"signed_headers", v.HeaderKeys)
 			result.FailureReasons = append(result.FailureReasons, fmt.Sprintf("DKIM failed: %v", v.Err))
 		}
 	}
 
 	if len(verifications) == 0 {
-		logger.Debug("No DKIM signatures found", zap.String("domain", fromDomain))
+		logger.Debug("No DKIM signatures found", "domain", fromDomain)
 		result.FailureReasons = append(result.FailureReasons, "no DKIM signatures found")
 	}
 
@@ -269,9 +278,9 @@ func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quar
 			isStrict := !noDMARCRecord && record.SPFAlignment == dmarc.AlignmentStrict
 			if isAligned(fromDomain, spfDomain, isStrict) {
 				result.SPFAligned = true
-				logger.Debug("SPF passed and aligned", zap.String("domain", fromDomain), zap.String("envelope_domain", spfDomain))
+				logger.Debug("SPF passed and aligned", "domain", fromDomain, "envelope_domain", spfDomain)
 			} else {
-				logger.Debug("SPF passed but not aligned", zap.String("domain", fromDomain), zap.String("envelope_domain", spfDomain))
+				logger.Debug("SPF passed but not aligned", "domain", fromDomain, "envelope_domain", spfDomain)
 			}
 		} else {
 			result.FailureReasons = append(result.FailureReasons, "SPF passed but domain was empty")
@@ -290,7 +299,7 @@ func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quar
 			result.ShouldBeJunk = true
 			result.FailureReasons = append(result.FailureReasons,
 				"No DMARC record and neither SPF nor DKIM aligned - marking as junk")
-			logger.Debug("Marking as junk - no DMARC record", zap.String("domain", fromDomain))
+			logger.Debug("Marking as junk - no DMARC record", "domain", fromDomain)
 		} else {
 			// Even with no DMARC, if SPF or DKIM passes, we let it through
 			result.Pass = true
@@ -303,23 +312,25 @@ func CheckDMARC(ctx context.Context, rawEmail string, spfResult *SPFResult, quar
 				result.FailureReasons = append(result.FailureReasons,
 					"DMARC policy is 'reject' and neither SPF nor DKIM aligned")
 			case "quarantine":
-				if quarantineAsJunk {
+				// Apply quarantine policy action
+				if quarantinePolicyAction == "junk" {
 					result.ShouldBeJunk = true
 					result.FailureReasons = append(result.FailureReasons,
 						"DMARC policy is 'quarantine' and authentication failed - marking as junk")
 				}
+				// "none" or "reject" actions are handled by the caller
 			}
 		}
 	}
 
 	logger.Debug("DMARC validation result",
-		zap.String("domain", fromDomain),
-		zap.String("policy", result.Policy),
-		zap.Bool("spf_aligned", result.SPFAligned),
-		zap.Bool("dkim_aligned", result.DKIMAligned),
-		zap.Bool("pass", result.Pass),
-		zap.Bool("no_dmarc", result.NoDMARCRecord),
-		zap.Bool("should_be_junk", result.ShouldBeJunk))
+		"domain", fromDomain,
+		"policy", result.Policy,
+		"spf_aligned", result.SPFAligned,
+		"dkim_aligned", result.DKIMAligned,
+		"pass", result.Pass,
+		"no_dmarc", result.NoDMARCRecord,
+		"should_be_junk", result.ShouldBeJunk)
 
 	return result, nil
 }

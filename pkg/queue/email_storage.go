@@ -7,18 +7,18 @@ import (
 	"os"
 	"path/filepath"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // EmailStorage handles large email content storage on filesystem
 // This is more efficient than storing large blobs in BadgerDB
 type EmailStorage struct {
 	baseDir string
-	logger  *zap.Logger
+	logger  *slog.Logger
 }
 
 // NewEmailStorage creates a new email content storage
-func NewEmailStorage(baseDir string, logger *zap.Logger) (*EmailStorage, error) {
+func NewEmailStorage(baseDir string, logger *slog.Logger) (*EmailStorage, error) {
 	if baseDir == "" {
 		return nil, fmt.Errorf("base directory is required")
 	}
@@ -57,9 +57,9 @@ func (es *EmailStorage) Save(jobID string, emailContent []byte) (string, error) 
 	// Check if file already exists (deduplication)
 	if _, err := os.Stat(filePath); err == nil {
 		es.logger.Debug("Email content already exists (deduplicated)",
-			zap.String("job_id", jobID),
-			zap.String("hash", hashStr),
-			zap.Int("size_bytes", len(emailContent)))
+			"job_id", jobID,
+			"hash", hashStr,
+			"size_bytes", len(emailContent))
 		return hashStr, nil
 	}
 
@@ -83,9 +83,9 @@ func (es *EmailStorage) Save(jobID string, emailContent []byte) (string, error) 
 	}
 
 	es.logger.Debug("Email content saved to filesystem",
-		zap.String("job_id", jobID),
-		zap.String("hash", hashStr),
-		zap.Int("size_bytes", len(emailContent)))
+		"job_id", jobID,
+		"hash", hashStr,
+		"size_bytes", len(emailContent))
 
 	return hashStr, nil
 }
@@ -162,8 +162,8 @@ func (es *EmailStorage) CleanupOrphaned(activeKeys map[string]bool) (int, error)
 		files, err := os.ReadDir(shardPath)
 		if err != nil {
 			es.logger.Warn("Failed to read shard directory",
-				zap.String("shard", shardDir.Name()),
-				zap.Error(err))
+				"shard", shardDir.Name(),
+				"error", err)
 			continue
 		}
 
@@ -185,12 +185,12 @@ func (es *EmailStorage) CleanupOrphaned(activeKeys map[string]bool) (int, error)
 				filePath := filepath.Join(shardPath, filename)
 				if err := os.Remove(filePath); err != nil {
 					es.logger.Warn("Failed to remove orphaned email",
-						zap.String("file", filePath),
-						zap.Error(err))
+						"file", filePath,
+						"error", err)
 				} else {
 					cleaned++
 					es.logger.Debug("Removed orphaned email file",
-						zap.String("storage_key", storageKey))
+						"storage_key", storageKey)
 				}
 			}
 		}

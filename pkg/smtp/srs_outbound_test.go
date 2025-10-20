@@ -1,6 +1,8 @@
 package smtp
 
 import (
+	"io"
+
 	"testing"
 
 	"migadu/mizu/pkg/config"
@@ -8,12 +10,16 @@ import (
 	"migadu/mizu/pkg/routing"
 	"migadu/mizu/pkg/srs"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // testConfig returns a minimal config for testing createDeliveryJobs
 func testConfig() *config.Config {
 	return &config.Config{
+		Local: true,
+		Servers: []config.ServerConfig{
+			testServerConfig(),
+		},
 		Delivery: config.DeliveryConfig{
 			URL: "https://backend.example.com/deliver",
 		},
@@ -31,12 +37,13 @@ func TestSRS_OutboundEncoding(t *testing.T) {
 
 	// Create a session with SRS rewriter
 	session := &Session{
-		from:        "alice@example.com",
-		to:          []string{"user@yourdomain.com"},
-		traceID:     "test-trace-123",
-		Logger:      zap.NewNop(),
-		srsRewriter: rewriter,
-		config:      testConfig(),
+		from:         "alice@example.com",
+		to:           []string{"user@yourdomain.com"},
+		traceID:      "test-trace-123",
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		srsRewriter:  rewriter,
+		serverConfig: &config.DefaultConfig().Servers[0],
+		globalConfig: testConfig(),
 	}
 
 	// Create routing response with forwarding
@@ -101,12 +108,13 @@ func TestSRS_OutboundDeliveryNoEncoding(t *testing.T) {
 
 	// Create a session with SRS rewriter
 	session := &Session{
-		from:        "alice@example.com",
-		to:          []string{"user@yourdomain.com"},
-		traceID:     "test-trace-123",
-		Logger:      zap.NewNop(),
-		srsRewriter: rewriter,
-		config:      testConfig(),
+		from:         "alice@example.com",
+		to:           []string{"user@yourdomain.com"},
+		traceID:      "test-trace-123",
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		srsRewriter:  rewriter,
+		serverConfig: &config.DefaultConfig().Servers[0],
+		globalConfig: testConfig(),
 	}
 
 	// Create routing response with DELIVERY (not forwarding)
@@ -160,12 +168,13 @@ func TestSRS_OutboundBothDeliveryAndForwarding(t *testing.T) {
 
 	// Create a session with SRS rewriter
 	session := &Session{
-		from:        "sender@example.com",
-		to:          []string{"user@yourdomain.com"},
-		traceID:     "test-trace-456",
-		Logger:      zap.NewNop(),
-		srsRewriter: rewriter,
-		config:      testConfig(),
+		from:         "sender@example.com",
+		to:           []string{"user@yourdomain.com"},
+		traceID:      "test-trace-456",
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		srsRewriter:  rewriter,
+		serverConfig: &config.DefaultConfig().Servers[0],
+		globalConfig: testConfig(),
 	}
 
 	// Create routing response with BOTH delivery and forwarding
@@ -241,12 +250,13 @@ func TestSRS_OutboundBothDeliveryAndForwarding(t *testing.T) {
 func TestSRS_OutboundWithoutRewriter(t *testing.T) {
 	// Create a session WITHOUT SRS rewriter
 	session := &Session{
-		from:        "alice@example.com",
-		to:          []string{"user@yourdomain.com"},
-		traceID:     "test-trace-789",
-		Logger:      zap.NewNop(),
-		srsRewriter: nil, // No SRS rewriter
-		config:      testConfig(),
+		from:         "alice@example.com",
+		to:           []string{"user@yourdomain.com"},
+		traceID:      "test-trace-789",
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		srsRewriter:  nil, // No SRS rewriter
+		serverConfig: &config.DefaultConfig().Servers[0],
+		globalConfig: testConfig(),
 	}
 
 	// Create routing response with forwarding
@@ -302,12 +312,13 @@ func TestSRS_OutboundAlreadyEncoded(t *testing.T) {
 
 	// Create a session with SRS rewriter and SRS0 as sender
 	session := &Session{
-		from:        srs0Address, // Already SRS-encoded
-		to:          []string{"user@yourdomain.com"},
-		traceID:     "test-trace-srs1",
-		Logger:      zap.NewNop(),
-		srsRewriter: rewriter,
-		config:      testConfig(),
+		from:         srs0Address, // Already SRS-encoded
+		to:           []string{"user@yourdomain.com"},
+		traceID:      "test-trace-srs1",
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		srsRewriter:  rewriter,
+		serverConfig: &config.DefaultConfig().Servers[0],
+		globalConfig: testConfig(),
 	}
 
 	// Create routing response with forwarding (re-forwarding)

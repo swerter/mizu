@@ -1,15 +1,17 @@
 package stats
 
 import (
+	"io"
+
 	"fmt"
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 func TestLRUEviction_IPs(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with limit of 10 IPs
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 10, 0, logger)
@@ -58,7 +60,7 @@ func TestLRUEviction_IPs(t *testing.T) {
 }
 
 func TestLRUEviction_Domains(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with limit of 5 domains
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 0, 5, logger)
@@ -109,7 +111,7 @@ func TestLRUEviction_Domains(t *testing.T) {
 }
 
 func TestLRUEviction_NoLimit(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with no limits (0 = unlimited)
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 0, 0, logger)
@@ -140,7 +142,7 @@ func TestLRUEviction_NoLimit(t *testing.T) {
 }
 
 func TestLRUEviction_UpdatesLastSeen(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with limit of 3 IPs
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 3, 0, logger)
@@ -182,7 +184,7 @@ func TestLRUEviction_UpdatesLastSeen(t *testing.T) {
 }
 
 func TestEvictLRUIPs_EmptyMap(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 10, 0, logger)
 
 	m.ipMu.Lock()
@@ -195,7 +197,7 @@ func TestEvictLRUIPs_EmptyMap(t *testing.T) {
 }
 
 func TestEvictLRUDomains_NegativeCount(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 0, 10, logger)
 	m.Start()
 	defer m.Stop()
@@ -222,7 +224,7 @@ func TestEvictLRUDomains_NegativeCount(t *testing.T) {
 
 // TestLRUEviction_MixedActivity tests that active IPs are preserved
 func TestLRUEviction_MixedActivity(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with limit of 5 IPs
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 5, 0, logger)
@@ -267,7 +269,7 @@ func TestLRUEviction_MixedActivity(t *testing.T) {
 
 // TestLRUEviction_ConcurrentUpdates tests eviction with concurrent updates
 func TestLRUEviction_ConcurrentUpdates(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with limit of 10 IPs
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 10, 0, logger)
@@ -301,7 +303,7 @@ func TestLRUEviction_ConcurrentUpdates(t *testing.T) {
 
 // TestLRUEviction_BothLimits tests when both IP and domain limits are enforced
 func TestLRUEviction_BothLimits(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with limits for both IPs and domains
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 5, 5, logger)
@@ -343,7 +345,7 @@ func TestLRUEviction_BothLimits(t *testing.T) {
 
 // TestLRUEviction_ExactLimit tests behavior when count equals limit
 func TestLRUEviction_ExactLimit(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with limit of 10 IPs
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 10, 0, logger)
@@ -374,7 +376,7 @@ func TestLRUEviction_ExactLimit(t *testing.T) {
 
 // TestLRUEviction_WithExpiredEntries tests eviction combined with expiration
 func TestLRUEviction_WithExpiredEntries(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with short retention (500ms) and limit of 5
 	m := NewManager(true, 500*time.Millisecond, "test", false, 1*time.Minute, nil, 5, 0, logger)
@@ -418,7 +420,7 @@ func TestLRUEviction_WithExpiredEntries(t *testing.T) {
 
 // TestLRUEviction_LargeScale tests eviction with a large number of entries
 func TestLRUEviction_LargeScale(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with limit of 100 IPs
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 100, 100, logger)
@@ -458,7 +460,7 @@ func TestLRUEviction_LargeScale(t *testing.T) {
 
 // TestLRUEviction_ReputationPreserved tests that evicted IPs lose reputation
 func TestLRUEviction_ReputationPreserved(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create manager with limit of 3 IPs
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 3, 0, logger)

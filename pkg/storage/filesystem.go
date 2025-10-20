@@ -11,19 +11,19 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // FilesystemBackend implements the Backend interface using local filesystem
 type FilesystemBackend struct {
 	basePath string
-	logger   *zap.Logger
+	logger   *slog.Logger
 }
 
 // NewFilesystemBackend creates a new filesystem storage backend
-func NewFilesystemBackend(basePath string, logger *zap.Logger) (*FilesystemBackend, error) {
+func NewFilesystemBackend(basePath string, logger *slog.Logger) (*FilesystemBackend, error) {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	// Expand ~ to home directory if present
@@ -41,7 +41,7 @@ func NewFilesystemBackend(basePath string, logger *zap.Logger) (*FilesystemBacke
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	logger.Info("Initializing filesystem storage backend", zap.String("path", absPath))
+	logger.Info("Initializing filesystem storage backend", "path", absPath)
 
 	return &FilesystemBackend{
 		basePath: absPath,
@@ -64,7 +64,7 @@ func (f *FilesystemBackend) PutObject(ctx context.Context, key string, reader io
 	// Check for conditional put (IfNoneMatch: "*" means only create if not exists)
 	if opts.IfNoneMatch == "*" {
 		if _, err := os.Stat(fullPath); err == nil {
-			f.logger.Debug("Conditional put failed - file already exists", zap.String("key", key))
+			f.logger.Debug("Conditional put failed - file already exists", "key", key)
 			return &ConditionalPutError{Key: key}
 		}
 	}
@@ -100,8 +100,8 @@ func (f *FilesystemBackend) PutObject(ctx context.Context, key string, reader io
 	}
 
 	f.logger.Debug("Stored object to filesystem",
-		zap.String("key", key),
-		zap.Int64("size", written))
+		"key", key,
+		"size", written)
 
 	return nil
 }
@@ -113,13 +113,13 @@ func (f *FilesystemBackend) GetObject(ctx context.Context, key string) (io.ReadC
 	file, err := os.Open(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			f.logger.Debug("Object not found", zap.String("key", key))
+			f.logger.Debug("Object not found", "key", key)
 			return nil, os.ErrNotExist
 		}
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 
-	f.logger.Debug("Retrieved object from filesystem", zap.String("key", key))
+	f.logger.Debug("Retrieved object from filesystem", "key", key)
 	return file, nil
 }
 
@@ -153,13 +153,13 @@ func (f *FilesystemBackend) RemoveObject(ctx context.Context, key string) error 
 	err := os.Remove(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			f.logger.Debug("Object already removed", zap.String("key", key))
+			f.logger.Debug("Object already removed", "key", key)
 			return nil // Consider already removed as success
 		}
 		return fmt.Errorf("failed to remove file: %w", err)
 	}
 
-	f.logger.Debug("Removed object from filesystem", zap.String("key", key))
+	f.logger.Debug("Removed object from filesystem", "key", key)
 	return nil
 }
 
@@ -175,7 +175,7 @@ func (f *FilesystemBackend) ListObjects(ctx context.Context, prefix string, recu
 
 	err := filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			f.logger.Warn("Error walking path", zap.String("path", path), zap.Error(err))
+			f.logger.Warn("Error walking path", "path", path, "error", err)
 			return nil // Continue on error
 		}
 
@@ -191,7 +191,7 @@ func (f *FilesystemBackend) ListObjects(ctx context.Context, prefix string, recu
 		// Get relative key from base path
 		relPath, err := filepath.Rel(f.basePath, path)
 		if err != nil {
-			f.logger.Warn("Failed to get relative path", zap.String("path", path), zap.Error(err))
+			f.logger.Warn("Failed to get relative path", "path", path, "error", err)
 			return nil
 		}
 
@@ -213,9 +213,9 @@ func (f *FilesystemBackend) ListObjects(ctx context.Context, prefix string, recu
 	}
 
 	f.logger.Debug("Listed objects from filesystem",
-		zap.String("prefix", prefix),
-		zap.Bool("recursive", recursive),
-		zap.Int("count", len(objects)))
+		"prefix", prefix,
+		"recursive", recursive,
+		"count", len(objects))
 
 	return objects, nil
 }
@@ -244,7 +244,7 @@ func (f *FilesystemBackend) MakeBucket(ctx context.Context) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	f.logger.Info("Created storage directory", zap.String("path", f.basePath))
+	f.logger.Info("Created storage directory", "path", f.basePath)
 	return nil
 }
 

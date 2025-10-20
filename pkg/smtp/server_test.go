@@ -1,12 +1,14 @@
 package smtp
 
 import (
+	"io"
+
 	"testing"
 
 	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/stats"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 func TestExtractDomainFromEmail(t *testing.T) {
@@ -32,20 +34,31 @@ func TestTLSVersionString(t *testing.T) {
 }
 
 func TestBackend_Configuration(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	defaultCfg := config.DefaultConfig()
 	cfg := &defaultCfg
 	cfg.Local = true
 	statsMgr := stats.NewManager(true, 0, "test", false, 0, nil, 0, 0, logger)
 
+	// Get first server config
+	if len(cfg.Servers) == 0 {
+		t.Fatal("No servers in default config")
+	}
+	serverCfg := &cfg.Servers[0]
+
 	backend := &Backend{
-		Config:       cfg,
+		ServerConfig: serverCfg,
+		GlobalConfig: cfg,
 		StatsManager: statsMgr,
 		Logger:       logger,
 	}
 
-	if backend.Config != cfg {
-		t.Error("Config not set correctly")
+	if backend.ServerConfig != serverCfg {
+		t.Error("ServerConfig not set correctly")
+	}
+
+	if backend.GlobalConfig != cfg {
+		t.Error("GlobalConfig not set correctly")
 	}
 
 	if backend.StatsManager == nil {

@@ -1,11 +1,13 @@
 package poster
 
 import (
+	"io"
+
 	"errors"
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 func TestCircuitBreaker_InitialState(t *testing.T) {
@@ -13,7 +15,7 @@ func TestCircuitBreaker_InitialState(t *testing.T) {
 		FailureThreshold: 3,
 		SuccessThreshold: 2,
 		Timeout:          1 * time.Second,
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	if cb.GetState() != StateClosed {
 		t.Errorf("Expected initial state to be Closed, got %v", cb.GetState())
@@ -25,7 +27,7 @@ func TestCircuitBreaker_OpenAfterFailureThreshold(t *testing.T) {
 		FailureThreshold: 3,
 		SuccessThreshold: 2,
 		Timeout:          100 * time.Millisecond,
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// First 2 failures should keep it closed
 	for i := 0; i < 2; i++ {
@@ -66,7 +68,7 @@ func TestCircuitBreaker_TransitionToHalfOpen(t *testing.T) {
 		FailureThreshold: 2,
 		SuccessThreshold: 2,
 		Timeout:          100 * time.Millisecond,
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// Open the circuit
 	for i := 0; i < 2; i++ {
@@ -103,7 +105,7 @@ func TestCircuitBreaker_CloseAfterSuccessThreshold(t *testing.T) {
 		SuccessThreshold: 2,
 		Timeout:          100 * time.Millisecond,
 		HalfOpenMaxCalls: 2,
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// Open the circuit
 	for i := 0; i < 2; i++ {
@@ -146,7 +148,7 @@ func TestCircuitBreaker_HalfOpenFailureReopens(t *testing.T) {
 		FailureThreshold: 2,
 		SuccessThreshold: 2,
 		Timeout:          100 * time.Millisecond,
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// Open the circuit
 	for i := 0; i < 2; i++ {
@@ -176,7 +178,7 @@ func TestCircuitBreaker_SuccessResetsConsecutiveFailures(t *testing.T) {
 		FailureThreshold: 3,
 		SuccessThreshold: 2,
 		Timeout:          100 * time.Millisecond,
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// 2 failures
 	for i := 0; i < 2; i++ {
@@ -210,7 +212,7 @@ func TestCircuitBreaker_GetStats(t *testing.T) {
 		FailureThreshold: 3,
 		SuccessThreshold: 2,
 		Timeout:          1 * time.Second,
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	stats := cb.GetStats()
 
@@ -246,7 +248,7 @@ func TestCircuitBreaker_Reset(t *testing.T) {
 		FailureThreshold: 2,
 		SuccessThreshold: 2,
 		Timeout:          100 * time.Millisecond,
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// Open the circuit
 	for i := 0; i < 2; i++ {
@@ -280,7 +282,7 @@ func TestCircuitBreaker_HalfOpenMaxCalls(t *testing.T) {
 		SuccessThreshold: 3, // Need 3 successes to close
 		Timeout:          100 * time.Millisecond,
 		HalfOpenMaxCalls: 1, // Only allow 1 concurrent call in half-open
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// Open the circuit
 	for i := 0; i < 2; i++ {
@@ -337,7 +339,7 @@ func TestCircuitBreaker_HalfOpenMaxCalls(t *testing.T) {
 }
 
 func TestCircuitBreaker_Defaults(t *testing.T) {
-	cb := NewCircuitBreaker(CircuitBreakerConfig{}, zap.NewNop(), nil)
+	cb := NewCircuitBreaker(CircuitBreakerConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	if cb.failureThreshold != 5 {
 		t.Errorf("Expected default failure_threshold 5, got %d", cb.failureThreshold)
@@ -364,7 +366,7 @@ func TestCircuitBreaker_ResetTimeoutInClosed(t *testing.T) {
 	cb := NewCircuitBreaker(CircuitBreakerConfig{
 		FailureThreshold: 5,
 		ResetTimeout:     100 * time.Millisecond,
-	}, zap.NewNop(), nil)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// Add 2 failures
 	for i := 0; i < 2; i++ {

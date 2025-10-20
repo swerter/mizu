@@ -1,12 +1,14 @@
 package queue
 
 import (
+	"io"
+
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TestEmailStorage_SaveAndLoad tests basic save/load functionality
@@ -17,7 +19,7 @@ func TestEmailStorage_SaveAndLoad(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -60,7 +62,7 @@ func TestEmailStorage_Delete(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -100,7 +102,7 @@ func TestEmailStorage_Deduplication(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -145,7 +147,7 @@ func TestEmailStorage_Sharding(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -188,7 +190,7 @@ func TestEmailStorage_InvalidStorageKey(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -226,7 +228,7 @@ func TestEmailStorage_CleanupOrphaned(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -281,7 +283,7 @@ func TestEmailStorage_CleanupOrphaned_EmptyActiveSet(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -323,7 +325,7 @@ func TestEmailStorage_GetStats(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -388,7 +390,7 @@ func TestEmailStorage_ConcurrentSave(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -443,7 +445,7 @@ func TestEmailStorage_LargeEmail(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -495,7 +497,7 @@ func TestEmailStorage_DirectoryCreation(t *testing.T) {
 	// Create storage in nested directory that doesn't exist yet
 	nestedDir := filepath.Join(tmpDir, "nested", "deep", "storage")
 
-	storage, err := NewEmailStorage(nestedDir, zap.NewNop())
+	storage, err := NewEmailStorage(nestedDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage in nested dir: %v", err)
 	}
@@ -525,7 +527,7 @@ func TestEmailStorage_DoubleDelete(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	storage, err := NewEmailStorage(tmpDir, zap.NewNop())
+	storage, err := NewEmailStorage(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}

@@ -7,20 +7,20 @@ import (
 	"os"
 
 	"github.com/minio/minio-go/v7"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // S3Backend implements the Backend interface using S3/MinIO
 type S3Backend struct {
 	client *minio.Client
 	bucket string
-	logger *zap.Logger
+	logger *slog.Logger
 }
 
 // NewS3Backend creates a new S3 storage backend
-func NewS3Backend(client *minio.Client, bucket string, logger *zap.Logger) *S3Backend {
+func NewS3Backend(client *minio.Client, bucket string, logger *slog.Logger) *S3Backend {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	return &S3Backend{
@@ -54,13 +54,13 @@ func (s *S3Backend) PutObject(ctx context.Context, key string, reader io.Reader,
 		// Check for conditional put failure
 		errResponse := minio.ToErrorResponse(err)
 		if errResponse.Code == "PreconditionFailed" {
-			s.logger.Debug("Conditional put failed - object already exists", zap.String("key", key))
+			s.logger.Debug("Conditional put failed - object already exists", "key", key)
 			return &ConditionalPutError{Key: key}
 		}
 		return fmt.Errorf("failed to put object to S3: %w", err)
 	}
 
-	s.logger.Debug("Stored object to S3", zap.String("key", key), zap.Int64("size", size))
+	s.logger.Debug("Stored object to S3", "key", key, "size", size)
 	return nil
 }
 
@@ -70,13 +70,13 @@ func (s *S3Backend) GetObject(ctx context.Context, key string) (io.ReadCloser, e
 	if err != nil {
 		errResponse := minio.ToErrorResponse(err)
 		if errResponse.Code == "NoSuchKey" {
-			s.logger.Debug("Object not found in S3", zap.String("key", key))
+			s.logger.Debug("Object not found in S3", "key", key)
 			return nil, os.ErrNotExist
 		}
 		return nil, fmt.Errorf("failed to get object from S3: %w", err)
 	}
 
-	s.logger.Debug("Retrieved object from S3", zap.String("key", key))
+	s.logger.Debug("Retrieved object from S3", "key", key)
 	return obj, nil
 }
 
@@ -105,13 +105,13 @@ func (s *S3Backend) RemoveObject(ctx context.Context, key string) error {
 	if err != nil {
 		errResponse := minio.ToErrorResponse(err)
 		if errResponse.Code == "NoSuchKey" {
-			s.logger.Debug("Object already removed from S3", zap.String("key", key))
+			s.logger.Debug("Object already removed from S3", "key", key)
 			return nil // Consider already removed as success
 		}
 		return fmt.Errorf("failed to remove object from S3: %w", err)
 	}
 
-	s.logger.Debug("Removed object from S3", zap.String("key", key))
+	s.logger.Debug("Removed object from S3", "key", key)
 	return nil
 }
 
@@ -126,7 +126,7 @@ func (s *S3Backend) ListObjects(ctx context.Context, prefix string, recursive bo
 
 	for object := range objectCh {
 		if object.Err != nil {
-			s.logger.Error("Error listing objects from S3", zap.Error(object.Err))
+			s.logger.Error("Error listing objects from S3", "error", object.Err)
 			return nil, object.Err
 		}
 
@@ -139,9 +139,9 @@ func (s *S3Backend) ListObjects(ctx context.Context, prefix string, recursive bo
 	}
 
 	s.logger.Debug("Listed objects from S3",
-		zap.String("prefix", prefix),
-		zap.Bool("recursive", recursive),
-		zap.Int("count", len(objects)))
+		"prefix", prefix,
+		"recursive", recursive,
+		"count", len(objects))
 
 	return objects, nil
 }
@@ -162,12 +162,12 @@ func (s *S3Backend) MakeBucket(ctx context.Context) error {
 		// Check if bucket already exists
 		exists, existsErr := s.client.BucketExists(ctx, s.bucket)
 		if existsErr == nil && exists {
-			s.logger.Info("S3 bucket already exists", zap.String("bucket", s.bucket))
+			s.logger.Info("S3 bucket already exists", "bucket", s.bucket)
 			return nil
 		}
 		return fmt.Errorf("failed to create S3 bucket: %w", err)
 	}
 
-	s.logger.Info("Created S3 bucket", zap.String("bucket", s.bucket))
+	s.logger.Info("Created S3 bucket", "bucket", s.bucket)
 	return nil
 }

@@ -2,14 +2,14 @@ package smtp
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 
-	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/srs"
 	"migadu/mizu/pkg/stats"
 
 	"github.com/emersion/go-smtp"
-	"go.uber.org/zap"
 )
 
 // TestSRS_IncomingDecoding verifies that incoming SRS addresses are decoded
@@ -29,11 +29,9 @@ func TestSRS_IncomingDecoding(t *testing.T) {
 	t.Logf("SRS address: %s", srsAddress)
 
 	// Create a session to test RCPT TO handling
-	cfg := &config.Config{
-		Local: true, // Skip SPF/DKIM validation
-	}
+	cfg := testConfig()
 
-	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer statsManager.Stop()
 
 	session := &Session{
@@ -42,9 +40,10 @@ func TestSRS_IncomingDecoding(t *testing.T) {
 		helo:         "test.example.com",
 		from:         "bounce@destination.com", // Simulating a bounce
 		to:           make([]string, 0),
-		config:       cfg,
+		serverConfig: &cfg.Servers[0],
+		globalConfig: cfg,
 		statsManager: statsManager,
-		Logger:       zap.NewNop(),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:   "192.0.2.1:12345",
 		commandState: stateMail, // After MAIL FROM
 		srsRewriter:  rewriter,  // Add SRS rewriter
@@ -72,11 +71,9 @@ func TestSRS_IncomingDecoding(t *testing.T) {
 func TestSRS_InvalidSRSAddress(t *testing.T) {
 	rewriter := srs.NewRewriter("test-secret", "relay.mizu.com")
 
-	cfg := &config.Config{
-		Local: true,
-	}
+	cfg := testConfig()
 
-	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer statsManager.Stop()
 
 	session := &Session{
@@ -84,9 +81,10 @@ func TestSRS_InvalidSRSAddress(t *testing.T) {
 		helo:         "test.example.com",
 		from:         "sender@example.com",
 		to:           make([]string, 0),
-		config:       cfg,
+		serverConfig: &cfg.Servers[0],
+		globalConfig: cfg,
 		statsManager: statsManager,
-		Logger:       zap.NewNop(),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:   "192.0.2.1:12345",
 		commandState: stateMail,
 		srsRewriter:  rewriter,
@@ -120,11 +118,9 @@ func TestSRS_InvalidSRSAddress(t *testing.T) {
 func TestSRS_NonSRSAddress(t *testing.T) {
 	rewriter := srs.NewRewriter("test-secret", "relay.mizu.com")
 
-	cfg := &config.Config{
-		Local: true,
-	}
+	cfg := testConfig()
 
-	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer statsManager.Stop()
 
 	session := &Session{
@@ -132,9 +128,10 @@ func TestSRS_NonSRSAddress(t *testing.T) {
 		helo:         "test.example.com",
 		from:         "sender@example.com",
 		to:           make([]string, 0),
-		config:       cfg,
+		serverConfig: &cfg.Servers[0],
+		globalConfig: cfg,
 		statsManager: statsManager,
-		Logger:       zap.NewNop(),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:   "192.0.2.1:12345",
 		commandState: stateMail,
 		srsRewriter:  rewriter,
@@ -162,11 +159,9 @@ func TestSRS_NonSRSAddress(t *testing.T) {
 
 // TestSRS_WithoutRewriter verifies that sessions without SRS rewriter work normally
 func TestSRS_WithoutRewriter(t *testing.T) {
-	cfg := &config.Config{
-		Local: true,
-	}
+	cfg := testConfig()
 
-	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer statsManager.Stop()
 
 	session := &Session{
@@ -174,9 +169,10 @@ func TestSRS_WithoutRewriter(t *testing.T) {
 		helo:         "test.example.com",
 		from:         "sender@example.com",
 		to:           make([]string, 0),
-		config:       cfg,
+		serverConfig: &cfg.Servers[0],
+		globalConfig: cfg,
 		statsManager: statsManager,
-		Logger:       zap.NewNop(),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:   "192.0.2.1:12345",
 		commandState: stateMail,
 		srsRewriter:  nil, // No SRS rewriter
@@ -224,11 +220,9 @@ func TestSRS_DoubleEncoded(t *testing.T) {
 	t.Logf("SRS1:     %s", srs1)
 
 	// Create session
-	cfg := &config.Config{
-		Local: true,
-	}
+	cfg := testConfig()
 
-	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer statsManager.Stop()
 
 	session := &Session{
@@ -236,9 +230,10 @@ func TestSRS_DoubleEncoded(t *testing.T) {
 		helo:         "test.example.com",
 		from:         "bounce@destination.com",
 		to:           make([]string, 0),
-		config:       cfg,
+		serverConfig: &cfg.Servers[0],
+		globalConfig: cfg,
 		statsManager: statsManager,
-		Logger:       zap.NewNop(),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:   "192.0.2.1:12345",
 		commandState: stateMail,
 		srsRewriter:  rewriter,

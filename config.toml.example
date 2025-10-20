@@ -1,228 +1,491 @@
-# General server configuration
-log_format = "text"  # Options: "text" or "json"
-local = false        # Enable local development mode (disables certain production checks)
+# Mizu SMTP Server Configuration
+# https://github.com/migadu/mizu
 
-# SMTP server configuration for receiving emails
-[smtp]
-listen_addr = ":25"                    # Address and port to listen on
-domain = "mail.example.com"            # Server's primary domain name
-max_message_size = 10485760            # Maximum email size in bytes (10MB)
-timeout_seconds = 10                   # Connection timeout for SMTP operations
-min_tls_version = "1.2"                # Minimum TLS version required
-check_x_spam_flag = true               # Reject emails with X-Spam-Flag: YES header
-dmarc_quarantine_as_junk = true        # Treat DMARC quarantine policy as junk
-arc_enabled = true                     # Enable ARC (Authenticated Received Chain) validation
-require_sender_mx = true               # Require sender domain to have valid MX records
-shutdown_timeout_seconds = 60          # Graceful shutdown timeout
-max_connections = 100                  # Maximum concurrent connections
-max_connections_per_ip = 10            # Maximum connections per IP address
+# =============================================================================
+# Global Settings
+# =============================================================================
 
-# ARC (Authenticated Received Chain) signing configuration
-# ARC preserves email authentication results through forwarding chains
-[smtp.arc_sign]
-enabled = false                        # Enable ARC signing
-domain = ""                            # Domain for ARC signature (e.g., "example.com")
-selector = "arc"                       # ARC selector (used in DNS lookup: {selector}._domainkey.{domain})
-private_key_path = "/etc/mizu/arc-private.pem"  # Path to ARC private key (PEM format)
+# Local development mode (disables TLS, dumps emails to terminal)
+local = false
 
-# Rate limiting configuration for SMTP connections and emails
-[smtp.rate_limit]
-enabled = true                         # Enable rate limiting
-gossip_enabled = false                 # Enable gossip protocol for distributed rate limiting
-gossip_interval_seconds = 5            # Interval for gossip synchronization
+# =============================================================================
+# Logging Configuration
+# =============================================================================
 
-# Rate limit dimensions define multi-dimensional rate limiting rules
-[[smtp.rate_limit.dimensions]]
-name = "per_ip"                        # Dimension name for tracking
-keys = ["IP"]                          # Available keys: IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN
-limit = 60                             # Maximum requests allowed
-window_seconds = 60                    # Time window for rate limit
+[logging]
+level = "info"                       # Log level: debug, info, warn, error
+format = "console"                   # Output format: console (human-readable) or json (structured)
 
-# Distributed tracking for multi-node deployments
-[smtp.distributed]
-enabled = false                        # Enable distributed tracking across nodes
-global_max_per_ip = 0                  # Global max emails per IP (0 = unlimited)
-gossip_interval_seconds = 5            # Interval for gossip synchronization
-s3_sync_interval_seconds = 30          # Interval for S3 state synchronization
-recipient_cache_ttl_seconds = 900      # Cache TTL for recipient tracking (15 minutes)
+# =============================================================================
+# Default Values (inherited by all servers unless overridden)
+# =============================================================================
 
-# DNS resolution settings for MX, SPF, DKIM, and DMARC lookups
+[defaults]
+domain = "mail.example.com"
+max_message_size = 10485760          # 10MB
+timeout_seconds = 10
+shutdown_timeout_seconds = 60
+max_connections = 100
+
+# =============================================================================
+# SMTP Server Instances (can define multiple)
+# =============================================================================
+
+# MX Server (Port 25) - Receives mail from other mail servers
+[[server]]
+name = "mx-primary"
+type = "relay"                       # Server type: "relay" (MX) or "submission" (MSA)
+listen_addr = ":25"
+domain = "mail.example.com"          # Overrides defaults.domain if set
+
+# Message Processing
+max_message_size = 10485760          # 10MB maximum message size
+
+# Timeouts
+timeout_seconds = 10
+shutdown_timeout_seconds = 60
+
+# Connection Limits
+[server.limits]
+max_connections = 100                # Total connections for this server
+max_connections_per_ip = 10          # Per-IP connection limit (for DoS protection)
+
+# TLS Configuration
+[server.tls]
+enabled = true                       # Enable TLS for this server
+mode = "starttls"                    # TLS mode: "starttls" or "implicit"
+required = false                     # Enforce TLS (false for compatibility with old servers)
+min_tls_version = "1.2"              # Minimum TLS version: "1.2" or "1.3"
+
+# DNS Checks
+[server.dns_checks]
+require_rdns = true                  # Require reverse DNS for sender IP
+require_sender_mx = true             # Require sender domain to have MX records
+
+# Junk/Spam Detection
+[server.junk]
+reject_null_sender = true                  # Reject bounce messages (<>)
+check_headers = ["X-Spam-Flag", "X-Junk"]  # Headers that mark email as junk
+apply_action = "header"                    # Action when junk detected: "header", "reject", "warn", "subject"
+subject_pattern = "[spam] %s"              # Subject pattern for "subject" action (original subject replaces %s)
+header = "X-Spam"                          # Header to add for "header" action
+
+# SPF Validation
+[server.spf]
+enabled = true                       # Enable SPF validation
+
+# DKIM Validation/Signing
+[server.dkim]
+enabled = true                       # Enable DKIM (validation or signing)
+mode = "check"                       # Mode: "check" (validate incoming) or "sign" (sign outgoing)
+# For mode="sign", also configure:
+# domain = "example.com"
+# selector = "default"
+# private_key_path = "/etc/mizu/dkim-private.pem"
+
+# DMARC Validation
+[server.dmarc]
+enabled = true                       # Enable DMARC validation
+reject_policy_action = "reject"      # Action for policy=reject: "none", "reject", "junk"
+quarantine_policy_action = "junk"    # Action for policy=quarantine: "none", "reject", "junk"
+
+# ARC Validation/Signing
+[server.arc]
+enabled = true                       # Enable ARC (validation or signing)
+mode = "check"                       # Mode: "check" (validate incoming) or "sign" (sign for forwarding)
+# For mode="sign", also configure:
+# domain = "example.com"
+# selector = "arc"
+# private_key_path = "/etc/mizu/arc-private.pem"
+
+# DNS Blacklist Checking
+[server.dnsbl]
+enabled = true                       # Enable DNS blacklist (RBL) checking
+lists = [                            # DNS blacklist servers to check
+    "zen.spamhaus.org",
+    "bl.spamcop.net",
+    "b.barracudacentral.org"
+]
+timeout_seconds = 3                  # Timeout for blacklist queries
+check_helo_resolves = true           # Check if HELO hostname resolves
+action = "reject"                    # Action when blacklisted: "reject", "junk", "none"
+
+# Rate Limiting
+[server.rate_limit]
+gossip_enabled = false               # Share rate limits across cluster (requires cluster.enabled)
+gossip_interval_seconds = 5
+
+[[server.rate_limit.dimensions]]
+name = "per_ip"
+keys = ["IP"]
+limit = 60                           # Max 60 messages per IP per minute
+window_seconds = 60
+
+# Distributed Connection Tracking (optional, requires cluster)
+[server.distributed]
+enabled = false
+global_max_per_ip = 50               # Global limit across all cluster nodes
+gossip_interval_seconds = 5
+s3_sync_interval_seconds = 30
+recipient_cache_ttl_seconds = 900
+
+# =============================================================================
+# Submission Server (Port 465) - Accepts mail from authenticated users
+# =============================================================================
+
+[[server]]
+name = "submission-tls"
+type = "submission"
+listen_addr = ":465"
+domain = "submit.example.com"
+
+# Timeouts
+timeout_seconds = 10
+shutdown_timeout_seconds = 60
+
+# Message Processing
+max_message_size = 52428800          # 50MB (larger for user submissions)
+
+# Submission-Specific Settings
+[server.submission]
+allow_null_sender = false            # Allow bounce messages with null sender (<>)
+fix_missing_headers = true           # Add missing Message-ID and Date headers
+
+# Connection Limits
+[server.limits]
+max_connections = 50                 # Total connections for this server
+max_connections_per_user = 5         # Limit per authenticated user
+
+# TLS Configuration - Port 465 uses implicit TLS
+[server.tls]
+enabled = true
+mode = "implicit"                    # Port 465 uses implicit TLS (always on)
+required = true                      # Always enforce TLS for submission
+min_tls_version = "1.2"
+deferred_handshake = true            # Defer TLS handshake to prevent head-of-line blocking (implicit TLS only)
+handshake_timeout_secs = 10          # Timeout for TLS handshake (0 = no timeout)
+
+# DNS Checks - Disabled for submission (users are authenticated)
+[server.dns_checks]
+require_rdns = false
+require_sender_mx = false
+
+# Junk/Spam Detection
+[server.junk]
+reject_null_sender = false
+check_headers = []                   # Don't check headers for authenticated users
+apply_action = "warn"
+
+# Authentication Configuration
+[server.auth]
+required = true                                    # Require authentication for this server
+endpoint = "https://auth.example.com/api/validate" # HTTPS endpoint (https:// required)
+api_key = "${AUTH_API_KEY}"                        # API key (sent as Bearer token)
+
+# SPF - Disabled for submission (users are authenticated)
+[server.spf]
+enabled = false
+
+# DKIM Signing for outbound mail
+[server.dkim]
+enabled = true
+mode = "sign"                        # Sign outgoing emails
+domain = "example.com"
+selector = "default"
+private_key_path = "/etc/mizu/dkim-private.pem"
+
+# DMARC - Disabled for submission
+[server.dmarc]
+enabled = false
+
+# ARC Signing - Disabled for submission
+[server.arc]
+enabled = false
+
+# DNSBL - Disabled for submission (users are authenticated)
+[server.dnsbl]
+enabled = false
+
+# Per-User Rate Limiting
+[server.rate_limit]
+gossip_enabled = false
+
+[[server.rate_limit.dimensions]]
+name = "per_user_hourly"
+keys = ["AUTHENTICATED_USER"]
+limit = 100                          # 100 emails per hour per user
+window_seconds = 3600
+
+[[server.rate_limit.dimensions]]
+name = "per_user_daily"
+keys = ["AUTHENTICATED_USER"]
+limit = 1000                         # 1000 emails per day per user
+window_seconds = 86400
+
+# =============================================================================
+# Submission Server (Port 587) - STARTTLS variant
+# =============================================================================
+
+[[server]]
+name = "submission-starttls"
+type = "submission"
+listen_addr = ":587"
+
+# Timeouts
+timeout_seconds = 10
+shutdown_timeout_seconds = 60
+
+# Message Processing
+max_message_size = 52428800          # 50MB
+
+# Submission-Specific Settings
+[server.submission]
+allow_null_sender = false
+fix_missing_headers = true
+
+# Connection Limits
+[server.limits]
+max_connections = 50
+max_connections_per_user = 5
+
+# TLS Configuration - Port 587 uses STARTTLS
+[server.tls]
+enabled = true
+mode = "starttls"                    # STARTTLS on port 587
+required = true                      # Require STARTTLS before AUTH
+min_tls_version = "1.2"
+
+# DNS Checks - Disabled for submission
+[server.dns_checks]
+require_rdns = false
+require_sender_mx = false
+
+# Junk/Spam Detection
+[server.junk]
+reject_null_sender = false
+check_headers = []
+apply_action = "warn"
+
+# Authentication Configuration
+[server.auth]
+required = true
+endpoint = "https://auth.example.com/api/validate"
+api_key = "${AUTH_API_KEY}"
+
+# SPF - Disabled
+[server.spf]
+enabled = false
+
+# DKIM Signing
+[server.dkim]
+enabled = true
+mode = "sign"
+domain = "example.com"
+selector = "default"
+private_key_path = "/etc/mizu/dkim-private.pem"
+
+# DMARC - Disabled
+[server.dmarc]
+enabled = false
+
+# ARC - Disabled
+[server.arc]
+enabled = false
+
+# DNSBL - Disabled
+[server.dnsbl]
+enabled = false
+
+# Per-User Rate Limiting
+[server.rate_limit]
+gossip_enabled = false
+
+[[server.rate_limit.dimensions]]
+name = "per_user_hourly"
+keys = ["AUTHENTICATED_USER"]
+limit = 100
+window_seconds = 3600
+
+[[server.rate_limit.dimensions]]
+name = "per_user_daily"
+keys = ["AUTHENTICATED_USER"]
+limit = 1000
+window_seconds = 86400
+
+# =============================================================================
+# DNS Configuration (shared across all servers)
+# =============================================================================
+
 [dns]
-resolvers = []                         # Custom DNS resolvers (empty = use system default)
-timeout_seconds = 5                    # DNS query timeout
-cache_ttl_seconds = 300                # Positive cache TTL (5 minutes)
-cache_negative_ttl = 60                # Negative cache TTL (1 minute)
+# Custom DNS resolvers (empty = use system DNS)
+resolvers = []
+# Example with Cloudflare:
+# resolvers = ["1.1.1.1:53", "1.0.0.1:53"]
 
-# Storage backend configuration for TLS certificates and distributed state
-# Two backends supported: "s3" (production) or "filesystem" (single-node)
+timeout_seconds = 5
+cache_ttl_seconds = 300              # Cache DNS results for 5 minutes
+cache_negative_ttl = 60              # Cache negative results for 1 minute
+
+# =============================================================================
+# Storage Configuration (for TLS certificates and stats sync)
+# =============================================================================
+
 [storage]
-backend = "s3"                         # Backend type: "s3" or "filesystem"
-filesystem_path = "/var/lib/mizu/storage"  # Path for filesystem backend (only used if backend="filesystem")
+# Backend: "s3" (production) or "filesystem" (single-node)
+backend = "s3"
 
-# S3 storage configuration (only used if backend="s3")
-endpoint = "s3.amazonaws.com"          # S3-compatible endpoint
-bucket = "email-mx-certs"              # S3 bucket name
-prefix = "certs/"                      # Prefix for stored objects
-access_key_id = "your-s3-access-key-id"
-secret_access_key = "your-s3-secret-access-key"
-region = "us-east-1"                   # AWS region
+# Filesystem backend (single-node only)
+filesystem_path = "/var/lib/mizu/storage"
 
-# Delivery configuration for forwarding processed emails
+# S3 backend settings
+endpoint = "s3.amazonaws.com"
+bucket = "mizu-storage"
+prefix = "certs/"
+access_key_id = "${S3_ACCESS_KEY_ID}"           # Set via environment variable
+secret_access_key = "${S3_SECRET_ACCESS_KEY}"   # Set via environment variable
+region = "us-east-1"
+
+# =============================================================================
+# Email Delivery Configuration
+# =============================================================================
+
 [delivery]
-url = "https://your-worker.example.com/email"  # Webhook URL for email delivery
-api_key = "your-api-key-here"                  # API key for authentication
-max_retry_attempts = 3                         # Maximum retry attempts on failure
-http_timeout_seconds = 30                      # HTTP request timeout
+# HTTP endpoint to POST emails to
+url = "https://your-worker.example.com/email"
+api_key = "${DELIVERY_API_KEY}"      # Set via environment variable (sent as Bearer token)
 
-# Circuit breaker prevents cascading failures when delivery endpoint is down
+max_retry_attempts = 3               # Retry up to 3 times on failure
+http_timeout_seconds = 30            # HTTP request timeout
+
+# Circuit Breaker for destination endpoint
 [delivery.circuit_breaker]
-enabled = true                         # Enable circuit breaker
-failure_threshold = 5                  # Failures before opening circuit
-success_threshold = 2                  # Successes needed to close circuit
-timeout_seconds = 30                   # Request timeout
-half_open_max_calls = 1                # Max concurrent calls when half-open
-reset_timeout_seconds = 60             # Time before attempting to close circuit
+failure_threshold = 5                # Open circuit after 5 consecutive failures
+success_threshold = 2                # Close circuit after 2 consecutive successes
+timeout_seconds = 30                 # Circuit opens for 30 seconds
+half_open_max_calls = 1              # Allow 1 call in half-open state
+reset_timeout_seconds = 60           # Reset failure count after 60 seconds
 
-# Forwarding configuration for relaying emails to another SMTP endpoint
-# This is separate from the primary destination and used with routing
+# =============================================================================
+# Email Forwarding (optional, used with routing)
+# =============================================================================
+
 [forwarding]
-enabled = false                        # Enable forwarding capability
-url = "https://forward-worker.example.com/relay"  # Forwarding webhook URL
-api_key = ""                           # API key for forwarding endpoint
-max_retry_attempts = 5                 # Maximum retry attempts for forwarding
-http_timeout_seconds = 30              # HTTP timeout for forwarding requests
+enabled = false
+url = "https://forward-worker.example.com/relay"
+api_key = "${FORWARDING_API_KEY}"    # Sent as Bearer token
+max_retry_attempts = 5
+http_timeout_seconds = 30
 
-# Circuit breaker for forwarding endpoint
+# Circuit Breaker
 [forwarding.circuit_breaker]
-enabled = true                         # Enable circuit breaker for forwarding
-failure_threshold = 5                  # Failures before opening circuit
-success_threshold = 2                  # Successes needed to close circuit
-timeout_seconds = 30                   # Request timeout
-half_open_max_calls = 1                # Max concurrent calls when half-open
-reset_timeout_seconds = 60             # Time before attempting to close circuit
+failure_threshold = 5
+success_threshold = 2
+timeout_seconds = 30
+half_open_max_calls = 1
+reset_timeout_seconds = 60
 
-# SRS (Sender Rewriting Scheme) for forwarding
-# SRS rewrites the envelope sender when forwarding emails to prevent SPF failures
-# at the final destination. When enabled, forwarded messages use addresses like:
-# SRS0=hash=timestamp=example.com=alice@relay.mizu.com
-#
-# This allows:
-# 1. SPF checks to pass at the final destination (uses your domain)
-# 2. Bounces to be routed back through your server to the original sender
-# 3. Preservation of the original sender in the OriginalFrom field for logging
-#
-# IMPORTANT: The SRS domain should be a domain you control and have proper
-# SPF/DNS records configured for. Bounces will be sent to this domain.
+# Sender Rewriting Scheme (SRS) for forwarding
 [forwarding.srs]
-enabled = false                        # Enable SRS rewriting for forwarded emails
-domain = "relay.mizu.com"              # Domain for SRS addresses (must be your domain)
-secret = ""                            # Secret key for SRS HMAC (or use SRS_SECRET env var)
-                                        # Generate with: openssl rand -base64 32
+enabled = false
+domain = "bounce.example.com"
+secret = "${SRS_SECRET}"             # Set via environment variable
 
-# Routing configuration for dynamic email routing and aliasing
-# Allows querying an external service to determine how to handle each email
+# =============================================================================
+# Routing / Aliasing System (optional)
+# =============================================================================
+
 [routing]
-enabled = false                        # Enable routing lookup
-endpoint = "https://routing.example.workers.dev/resolve"  # Routing service URL
-api_key = ""                           # API key for routing service
-timeout_ms = 100                       # Request timeout in milliseconds
-retry_attempts = 2                     # Number of retries on failure
-cache_ttl_seconds = 300                # Cache TTL for successful lookups (5 minutes)
-cache_negative_ttl_seconds = 60        # Cache TTL for failed lookups (1 minute)
-cache_max_entries = 50000              # Maximum cache entries
-fallback_on_error = "tempfail"         # Behavior on routing error: "tempfail", "accept", "reject"
-validate_during_rcpt = true            # Validate routing during RCPT TO (vs. after DATA)
+enabled = false
+endpoint = "https://routing.example.workers.dev/resolve"
+api_key = "${ROUTING_API_KEY}"       # Sent as Bearer token
+timeout_ms = 100
+retry_attempts = 2
 
-# Circuit breaker for routing endpoint
+# Routing Cache
+cache_ttl_seconds = 300              # Cache routing results for 5 minutes
+cache_negative_ttl_seconds = 60      # Cache negative results for 1 minute
+cache_max_entries = 50000            # Max entries in cache
+
+fallback_on_error = "tempfail"       # "tempfail" or "accept"
+validate_during_rcpt = true          # Validate during RCPT TO (recommended)
+
+# Circuit Breaker
 [routing.circuit_breaker]
-enabled = true                         # Enable circuit breaker for routing
-failure_threshold = 10                 # Failures before opening circuit (higher for routing)
-success_threshold = 3                  # Successes needed to close circuit
-timeout_seconds = 5                    # Request timeout
-half_open_max_calls = 2                # Max concurrent calls when half-open
-reset_timeout_seconds = 30             # Time before attempting to close circuit
+failure_threshold = 10
+success_threshold = 3
+timeout_seconds = 5
+half_open_max_calls = 2
+reset_timeout_seconds = 30
 
-# Async delivery queue (used with routing for non-blocking email acceptance)
-# Uses persistent queue with BadgerDB for production-grade reliability
+# =============================================================================
+# Async Delivery Queue (optional, used with routing)
+# =============================================================================
+
 [queue]
-enabled = false                        # Enable async queue (requires routing.enabled=true)
-data_dir = "./data/queue"              # Directory for persistent queue storage
-workers = 10                           # Number of concurrent worker goroutines
-max_retry_hours = 48                   # Maximum hours to retry before giving up (~39 attempts over 48h)
-shutdown_timeout_seconds = 30          # Max time to wait for graceful shutdown
+enabled = false
+data_dir = "./data/queue"
+workers = 10                         # Number of delivery workers
+max_retry_hours = 48                 # Retry for up to 48 hours
+shutdown_timeout_seconds = 30
 
-# Priority-based job processing (optional, default: false)
-# When enabled, jobs are processed by priority instead of strict FIFO order
-# Priority is set by the routing endpoint in the "priority" field (0-100, higher = more urgent)
-# Use cases: prioritize transactional emails over marketing, VIP senders, time-sensitive alerts
-priority_mode = false                  # Enable priority-based processing (default: FIFO/time-based)
+# =============================================================================
+# TLS Certificate Management
+# =============================================================================
 
-# Retry Schedule (time-based exponential backoff):
-# Age Range        | Retry Interval | Attempts
-# -----------------|----------------|----------
-# 0-1 min          | immediate      | 1
-# 1-5 min          | 1 min          | 4
-# 5-30 min         | 5 min          | 5
-# 30 min-2 hours   | 15 min         | 6
-# 2-6 hours        | 30 min         | 8
-# 6-24 hours       | 2 hours        | 9
-# 24-48 hours      | 4 hours        | 6
-# Total: ~39 attempts over 48 hours (configurable via max_retry_hours)
-#
-# Priority Recommendations (when priority_mode=true):
-#   0-4   = Low priority (bulk emails, newsletters, notifications)
-#   5-9   = Normal priority (standard user emails) - DEFAULT
-#   10-14 = High priority (transactional, password resets)
-#   15-19 = Urgent (security alerts, time-sensitive)
-#   20+   = Critical (system alerts, emergency notifications)
-#
-# Note: Priority only affects processing order of due jobs (NextRetry <= now)
-#       Jobs still retry according to the schedule above regardless of priority
-
-# TLS certificate management via Let's Encrypt
 [tls]
-email = "admin@example.com"            # Email for Let's Encrypt notifications
-domains = []                           # Domains to obtain certificates for
-use_production = true                  # Use Let's Encrypt production (false = staging)
-use_local_ca = false                   # Use local CA for development
-certmagic_verbose = false              # Enable verbose CertMagic logging
-enable_autocert = false                # Enable automatic certificate provisioning
+email = "admin@example.com"          # Email for Let's Encrypt notifications
+domains = ["mail.example.com", "submit.example.com"]  # Domains to get certs for
+use_production = true                # Use Let's Encrypt production (false = staging)
+use_local_ca = false                 # Use local CA (for development)
+certmagic_verbose = false            # Enable verbose certmagic logging
+enable_autocert = false              # Enable autocert with leader election (requires cluster)
 
-# DNS-based blacklist checking for spam prevention
-[blacklists]
-enabled = true                         # Enable blacklist checking
-lists = ["zen.spamhaus.org"]           # DNSBL servers to query
-timeout_seconds = 3                    # Blacklist query timeout
-check_helo_resolves = false            # Verify HELO/EHLO hostname resolves
+# =============================================================================
+# Health Check HTTP Server
+# =============================================================================
 
-# Health check and admin API endpoint
 [health]
-enabled = true                         # Enable health check endpoint
-listen_addr = ":8080"                  # Address for health, stats, and admin API
-username = ""                          # HTTP Basic Auth username (empty = no auth)
-password = ""                          # HTTP Basic Auth password
+listen_addr = ":8080"
+username = "admin"
+password = "${HEALTH_PASSWORD}"      # Set via environment variable
 
-# Prometheus metrics endpoint for monitoring
+# =============================================================================
+# Prometheus Metrics
+# =============================================================================
+
 [metrics]
-enabled = true                         # Enable metrics endpoint
-path = "/metrics"                      # Metrics endpoint path
-username = ""                          # HTTP Basic Auth username (empty = no auth)
-password = ""                          # HTTP Basic Auth password
+path = "/metrics"
+username = ""                        # Optional HTTP Basic Auth
+password = ""
 
-# Statistics tracking for emails, IPs, and domains
+# =============================================================================
+# Statistics & Reputation Tracking
+# =============================================================================
+
 [stats]
-enabled = true                         # Enable statistics collection
-retention_seconds = 86400              # Stats retention period (24 hours)
-sync_enabled = false                   # Enable S3 synchronization for stats
-sync_interval_seconds = 60             # Interval for S3 stats sync
-max_ip_entries = 100000                # Maximum IP entries to track
-max_domain_entries = 50000             # Maximum domain entries to track
+retention_seconds = 86400            # Keep stats for 24 hours
+max_ip_entries = 100000              # Max IPs to track
+max_domain_entries = 50000           # Max domains to track
 
-# Cluster configuration for multi-node deployments using gossip
+# Cross-cluster stats synchronization
+sync_enabled = false                 # Requires cluster.enabled
+sync_interval_seconds = 60           # Sync every minute
+
+# =============================================================================
+# Cluster Configuration (for distributed operation)
+# =============================================================================
+
 [cluster]
-enabled = false                        # Enable cluster mode
-node_name = ""                         # Unique node identifier (auto-generated if empty)
-bind_addr = "0.0.0.0"                  # Address to bind gossip protocol
-bind_port = 7946                       # Port for gossip protocol
-peers = []                             # List of peer addresses to join
-secret_key = ""                        # Encryption key for cluster communication
+enabled = false
+node_name = "mizu-01"                # Unique node name
+bind_addr = "0.0.0.0"                # Address to bind gossip protocol
+bind_port = 7946                     # Port for memberlist gossip
+
+# Seed nodes for cluster discovery
+peers = [
+    "mizu-02.example.com:7946",
+    "mizu-03.example.com:7946"
+]
+
+# Encryption key for cluster communication (32 bytes, base64 encoded)
+secret_key = "${CLUSTER_SECRET_KEY}" # Set via environment variable

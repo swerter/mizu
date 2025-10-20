@@ -1,6 +1,8 @@
 package smtp
 
 import (
+	"io"
+
 	"encoding/json"
 	"migadu/mizu/pkg/cluster"
 	"net"
@@ -10,7 +12,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/memberlist"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // mockCluster is a test implementation of ClusterManager
@@ -57,7 +59,7 @@ func (m *mockCluster) simulateIncomingGossip(data []byte) {
 
 // TestDistributedTracker_LocalAndGlobalLimits tests that both local and global limits are enforced
 func TestDistributedTracker_LocalAndGlobalLimits(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Local tracker: max 5 per IP, max 10 total
 	local := NewConnectionTracker(10, 5)
@@ -118,7 +120,7 @@ func TestDistributedTracker_LocalAndGlobalLimits(t *testing.T) {
 
 // TestDistributedTracker_StalePerrsIgnored tests that stale peer data is ignored
 func TestDistributedTracker_StalePeersIgnored(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	mockCluster := newMockCluster()
@@ -166,7 +168,7 @@ func TestDistributedTracker_StalePeersIgnored(t *testing.T) {
 
 // TestDistributedTracker_GossipHandler tests memberlist gossip handling
 func TestDistributedTracker_GossipHandler(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	mockCluster := newMockCluster()
@@ -221,7 +223,7 @@ func TestDistributedTracker_GossipHandler(t *testing.T) {
 
 // TestDistributedTracker_GetGlobalStats tests global statistics aggregation
 func TestDistributedTracker_GetGlobalStats(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	mockCluster := newMockCluster()
@@ -293,7 +295,7 @@ func TestDistributedTracker_GetGlobalStats(t *testing.T) {
 
 // TestDistributedTracker_ConcurrentAccess tests thread safety
 func TestDistributedTracker_ConcurrentAccess(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(1000, 50)
 	mockCluster := newMockCluster()
@@ -371,7 +373,7 @@ func TestDistributedTracker_ConcurrentAccess(t *testing.T) {
 
 // TestDistributedTracker_ReleaseRollback tests rollback on global limit failure
 func TestDistributedTracker_ReleaseRollback(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	mockCluster := newMockCluster()
@@ -428,7 +430,7 @@ func TestDistributedTracker_ReleaseRollback(t *testing.T) {
 
 // TestDistributedTracker_HealthCheck tests the health checker interface
 func TestDistributedTracker_HealthCheck(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	mockCluster := newMockCluster()
@@ -482,7 +484,7 @@ func TestDistributedTracker_HealthCheck(t *testing.T) {
 
 // TestDistributedTracker_NoGlobalLimit tests behavior when global limit is 0 (disabled)
 func TestDistributedTracker_NoGlobalLimit(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 5)
 	mockCluster := newMockCluster()
@@ -531,7 +533,7 @@ func TestDistributedTracker_NoGlobalLimit(t *testing.T) {
 
 // TestDistributedTracker_ProactivePeerCleanup tests that peers are removed on leave events
 func TestDistributedTracker_ProactivePeerCleanup(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockCluster := newMockCluster()
 
 	local := NewConnectionTracker(100, 10)
@@ -589,7 +591,7 @@ func TestDistributedTracker_ProactivePeerCleanup(t *testing.T) {
 
 // TestDistributedTracker_EventNotifications tests event notification handlers
 func TestDistributedTracker_EventNotifications(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockCluster := newMockCluster()
 
 	local := NewConnectionTracker(100, 10)

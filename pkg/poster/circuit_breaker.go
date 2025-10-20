@@ -1,6 +1,8 @@
 package poster
 
 import (
+	"io"
+
 	"errors"
 	"sync"
 	"time"
@@ -8,7 +10,7 @@ import (
 	"migadu/mizu/pkg/health"
 	"migadu/mizu/pkg/metrics"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 var (
@@ -47,7 +49,7 @@ type CircuitBreaker struct {
 	halfOpenCalls    int
 
 	// Logging and metrics
-	logger  *zap.Logger
+	logger  *slog.Logger
 	metrics *metrics.Metrics
 }
 
@@ -62,9 +64,9 @@ type CircuitBreakerConfig struct {
 }
 
 // NewCircuitBreaker creates a new circuit breaker with the given configuration
-func NewCircuitBreaker(config CircuitBreakerConfig, logger *zap.Logger, metrics *metrics.Metrics) *CircuitBreaker {
+func NewCircuitBreaker(config CircuitBreakerConfig, logger *slog.Logger, metrics *metrics.Metrics) *CircuitBreaker {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	// Set defaults if not provided
@@ -184,7 +186,7 @@ func (cb *CircuitBreaker) recordResult(err error) {
 		case StateClosed:
 			// Check if we should open the circuit
 			if cb.consecutiveFails >= cb.failureThreshold {
-				cb.logger.Warn("Circuit breaker transitioning from Closed to Open", zap.Int("failures", cb.consecutiveFails))
+				cb.logger.Warn("Circuit breaker transitioning from Closed to Open", "failures", cb.consecutiveFails)
 				cb.state = StateOpen
 				cb.lastStateChange = now
 				cb.updateMetricsState()
@@ -217,7 +219,7 @@ func (cb *CircuitBreaker) recordResult(err error) {
 			}
 			// Check if we have enough successes to close the circuit
 			if cb.successCount >= cb.successThreshold {
-				cb.logger.Info("Circuit breaker transitioning from Half-Open to Closed", zap.Int("successes", cb.successCount))
+				cb.logger.Info("Circuit breaker transitioning from Half-Open to Closed", "successes", cb.successCount)
 				cb.state = StateClosed
 				cb.lastStateChange = now
 				cb.failureCount = 0

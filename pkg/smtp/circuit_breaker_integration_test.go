@@ -3,6 +3,8 @@ package smtp
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -14,7 +16,6 @@ import (
 	"migadu/mizu/pkg/stats"
 
 	"github.com/emersion/go-smtp"
-	"go.uber.org/zap"
 )
 
 // TestCircuitBreakerIntegration_OpenReturns451 verifies that when the circuit breaker
@@ -32,28 +33,25 @@ func TestCircuitBreakerIntegration_OpenReturns451(t *testing.T) {
 
 	// Configure circuit breaker with low thresholds for testing
 	cbConfig := poster.CircuitBreakerConfig{
-		Enabled:          true,
 		FailureThreshold: 3, // Open after 3 failures
 		SuccessThreshold: 2,
 		Timeout:          2 * time.Second, // Stay open for 2s before half-open
 		HalfOpenMaxCalls: 1,
 	}
-	cb := poster.NewCircuitBreaker(cbConfig, zap.NewNop(), nil)
+	cb := poster.NewCircuitBreaker(cbConfig, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	// Create HTTP client for delivery
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 
-	cfg := &config.Config{
-		Local: true, // Skip SPF/DKIM validation
-		Delivery: config.DeliveryConfig{
-			URL:                failingServer.URL,
-			APIKey:             "test-key",
-			MaxRetryAttempts:   1, // Don't retry within the request
-			HTTPTimeoutSeconds: 5,
-		},
+	cfg := testConfig()
+	cfg.Delivery = config.DeliveryConfig{
+		URL:                failingServer.URL,
+		APIKey:             "test-key",
+		MaxRetryAttempts:   1, // Don't retry within the request
+		HTTPTimeoutSeconds: 5,
 	}
 
-	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer statsManager.Stop()
 
 	// Step 1: Make 3 failed delivery attempts to open the circuit
@@ -64,11 +62,12 @@ func TestCircuitBreakerIntegration_OpenReturns451(t *testing.T) {
 			helo:           "test.example.com",
 			from:           "sender@example.com",
 			to:             []string{"recipient@example.com"},
-			config:         cfg,
+			serverConfig:   &cfg.Servers[0],
+			globalConfig:   cfg,
 			statsManager:   statsManager,
 			circuitBreaker: cb,
 			httpClient:     httpClient,
-			Logger:         zap.NewNop(),
+			Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 			remoteAddr:     "192.0.2.1:12345",
 			traceID:        fmt.Sprintf("trace-%d", i),
 		}
@@ -105,11 +104,12 @@ func TestCircuitBreakerIntegration_OpenReturns451(t *testing.T) {
 		helo:           "test.example.com",
 		from:           "sender@example.com",
 		to:             []string{"recipient@example.com"},
-		config:         cfg,
+		serverConfig:   &cfg.Servers[0],
+		globalConfig:   cfg,
 		statsManager:   statsManager,
 		circuitBreaker: cb,
 		httpClient:     httpClient,
-		Logger:         zap.NewNop(),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:     "192.0.2.2:12345",
 		traceID:        "trace-open",
 	}
@@ -162,11 +162,12 @@ func TestCircuitBreakerIntegration_OpenReturns451(t *testing.T) {
 		helo:           "test.example.com",
 		from:           "sender@example.com",
 		to:             []string{"recipient@example.com"},
-		config:         cfg,
+		serverConfig:   &cfg.Servers[0],
+		globalConfig:   cfg,
 		statsManager:   statsManager,
 		circuitBreaker: cb,
 		httpClient:     httpClient,
-		Logger:         zap.NewNop(),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:     "192.0.2.3:12345",
 		traceID:        "trace-recovery-1",
 	}
@@ -205,25 +206,22 @@ func TestCircuitBreakerIntegration_PermanentFailureReturns550(t *testing.T) {
 	defer badRequestServer.Close()
 
 	cbConfig := poster.CircuitBreakerConfig{
-		Enabled:          true,
 		FailureThreshold: 5,
 		SuccessThreshold: 2,
 		Timeout:          30 * time.Second,
 	}
-	cb := poster.NewCircuitBreaker(cbConfig, zap.NewNop(), nil)
+	cb := poster.NewCircuitBreaker(cbConfig, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 
-	cfg := &config.Config{
-		Local: true,
-		Delivery: config.DeliveryConfig{
-			URL:                badRequestServer.URL,
-			APIKey:             "test-key",
-			MaxRetryAttempts:   1,
-			HTTPTimeoutSeconds: 5,
-		},
+	cfg := testConfig()
+	cfg.Delivery = config.DeliveryConfig{
+		URL:                badRequestServer.URL,
+		APIKey:             "test-key",
+		MaxRetryAttempts:   1,
+		HTTPTimeoutSeconds: 5,
 	}
 
-	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer statsManager.Stop()
 
 	session := &Session{
@@ -231,11 +229,12 @@ func TestCircuitBreakerIntegration_PermanentFailureReturns550(t *testing.T) {
 		helo:           "test.example.com",
 		from:           "sender@example.com",
 		to:             []string{"recipient@example.com"},
-		config:         cfg,
+		serverConfig:   &cfg.Servers[0],
+		globalConfig:   cfg,
 		statsManager:   statsManager,
 		circuitBreaker: cb,
 		httpClient:     httpClient,
-		Logger:         zap.NewNop(),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:     "192.0.2.1:12345",
 		traceID:        "trace-permanent",
 	}
@@ -280,25 +279,22 @@ func TestCircuitBreakerIntegration_4xxErrorsDoNotTriggerCircuit(t *testing.T) {
 	defer notFoundServer.Close()
 
 	cbConfig := poster.CircuitBreakerConfig{
-		Enabled:          true,
 		FailureThreshold: 5,
 		SuccessThreshold: 2,
 		Timeout:          30 * time.Second,
 	}
-	cb := poster.NewCircuitBreaker(cbConfig, zap.NewNop(), nil)
+	cb := poster.NewCircuitBreaker(cbConfig, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 
-	cfg := &config.Config{
-		Local: true,
-		Delivery: config.DeliveryConfig{
-			URL:                notFoundServer.URL,
-			APIKey:             "test-key",
-			MaxRetryAttempts:   1,
-			HTTPTimeoutSeconds: 5,
-		},
+	cfg := testConfig()
+	cfg.Delivery = config.DeliveryConfig{
+		URL:                notFoundServer.URL,
+		APIKey:             "test-key",
+		MaxRetryAttempts:   1,
+		HTTPTimeoutSeconds: 5,
 	}
 
-	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer statsManager.Stop()
 
 	session := &Session{
@@ -306,11 +302,12 @@ func TestCircuitBreakerIntegration_4xxErrorsDoNotTriggerCircuit(t *testing.T) {
 		helo:           "test.example.com",
 		from:           "sender@example.com",
 		to:             []string{"unknown@example.com"},
-		config:         cfg,
+		serverConfig:   &cfg.Servers[0],
+		globalConfig:   cfg,
 		statsManager:   statsManager,
 		circuitBreaker: cb,
 		httpClient:     httpClient,
-		Logger:         zap.NewNop(),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:     "192.0.2.1:12345",
 		traceID:        "trace-404",
 		distTracker:    nil, // No distributed tracker (404 falls through to generic error)

@@ -49,7 +49,7 @@ func main() {
 
 	// Load credentials from config file
 	if configFile != "" {
-		if cfg, err := config.LoadConfigFromFile(configFile); err == nil {
+		if cfg, err := config.LoadFromFile(configFile); err == nil {
 			username = cfg.Health.Username
 			password = cfg.Health.Password
 		}

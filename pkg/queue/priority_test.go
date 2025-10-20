@@ -1,6 +1,8 @@
 package queue
 
 import (
+	"io"
+
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -8,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TestPersistentQueue_PriorityProcessing tests that jobs are processed by priority
@@ -46,7 +48,7 @@ func TestPersistentQueue_PriorityProcessing(t *testing.T) {
 		&http.Client{Timeout: 5 * time.Second},
 		nil, // No circuit breaker
 		nil, // No circuit breaker
-		zap.NewNop(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil, // No metrics
 	)
 	if err != nil {

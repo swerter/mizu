@@ -1,6 +1,8 @@
 package health
 
 import (
+	"io"
+
 	"context"
 	"encoding/json"
 	"net/http"
@@ -9,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // Mock checker for testing
@@ -49,7 +51,7 @@ func (m *mockCacheFlusher) FlushCache() map[string]int {
 }
 
 func TestNewServer(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server := NewServer(":8080", logger)
 
 	if server == nil {
@@ -76,7 +78,7 @@ func TestNewServer_NilLogger(t *testing.T) {
 }
 
 func TestServer_SetStatsProvider(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	provider := &mockStatsProvider{
 		stats: map[string]interface{}{"test": "data"},
 	}
@@ -90,7 +92,7 @@ func TestServer_SetStatsProvider(t *testing.T) {
 }
 
 func TestServer_SetCacheFlusher(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	flusher := &mockCacheFlusher{}
 
 	server.SetCacheFlusher(flusher)
@@ -102,7 +104,7 @@ func TestServer_SetCacheFlusher(t *testing.T) {
 }
 
 func TestServer_SetBasicAuth(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	server.SetBasicAuth("admin", "secret")
 	if server.username != "admin" {
@@ -116,7 +118,7 @@ func TestServer_SetBasicAuth(t *testing.T) {
 }
 
 func TestServer_SetMetricsConfig(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	server.SetMetricsConfig(true, "/custom-metrics", "metrics-user", "metrics-pass")
 	if !server.metricsEnabled {
@@ -142,7 +144,7 @@ func TestServer_HealthHandler_AllHealthy(t *testing.T) {
 		status: ComponentStatus{Status: "healthy"},
 	}
 
-	server := NewServer(":8080", zap.NewNop(), checker1, checker2)
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)), checker1, checker2)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -173,7 +175,7 @@ func TestServer_HealthHandler_OneUnhealthy(t *testing.T) {
 		status: ComponentStatus{Status: "unhealthy"},
 	}
 
-	server := NewServer(":8080", zap.NewNop(), checker1, checker2)
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)), checker1, checker2)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -195,7 +197,7 @@ func TestServer_HealthHandler_OneUnhealthy(t *testing.T) {
 }
 
 func TestServer_StatsHandler_NoProvider(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest("GET", "/api/stats", nil)
 	w := httptest.NewRecorder()
@@ -218,7 +220,7 @@ func TestServer_StatsHandler_NoProvider(t *testing.T) {
 }
 
 func TestServer_StatsHandler_WithProvider(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	provider := &mockStatsProvider{
 		stats: map[string]interface{}{
 			"custom": "value",
@@ -247,7 +249,7 @@ func TestServer_StatsHandler_WithProvider(t *testing.T) {
 }
 
 func TestServer_StatsHandler_WrongMethod(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest("POST", "/api/stats", nil)
 	w := httptest.NewRecorder()
@@ -262,7 +264,7 @@ func TestServer_StatsHandler_WrongMethod(t *testing.T) {
 }
 
 func TestServer_FlushCacheHandler_NoFlusher(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest("POST", "/api/flush-cache", nil)
 	w := httptest.NewRecorder()
@@ -284,7 +286,7 @@ func TestServer_FlushCacheHandler_NoFlusher(t *testing.T) {
 }
 
 func TestServer_FlushCacheHandler_WithFlusher(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	flusher := &mockCacheFlusher{}
 	server.SetCacheFlusher(flusher)
 
@@ -312,7 +314,7 @@ func TestServer_FlushCacheHandler_WithFlusher(t *testing.T) {
 }
 
 func TestServer_FlushCacheHandler_WrongMethod(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	req := httptest.NewRequest("GET", "/api/flush-cache", nil)
 	w := httptest.NewRecorder()
@@ -327,7 +329,7 @@ func TestServer_FlushCacheHandler_WrongMethod(t *testing.T) {
 }
 
 func TestServer_BasicAuthMiddleware_NoAuth(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// No auth configured
 
 	called := false
@@ -352,7 +354,7 @@ func TestServer_BasicAuthMiddleware_NoAuth(t *testing.T) {
 }
 
 func TestServer_BasicAuthMiddleware_WithAuth_Valid(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	server.SetBasicAuth("admin", "secret")
 
 	called := false
@@ -378,7 +380,7 @@ func TestServer_BasicAuthMiddleware_WithAuth_Valid(t *testing.T) {
 }
 
 func TestServer_BasicAuthMiddleware_WithAuth_Invalid(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	server.SetBasicAuth("admin", "secret")
 
 	called := false
@@ -404,7 +406,7 @@ func TestServer_BasicAuthMiddleware_WithAuth_Invalid(t *testing.T) {
 }
 
 func TestServer_BasicAuthMiddleware_NoCredentials(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	server.SetBasicAuth("admin", "secret")
 
 	called := false
@@ -503,7 +505,7 @@ func TestCheckDestination_Name(t *testing.T) {
 }
 
 func TestServer_RegisterHandler(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	server.Start()
 	defer server.Stop(context.Background())
 
@@ -524,7 +526,7 @@ func TestServer_RegisterHandler(t *testing.T) {
 }
 
 func TestServer_Stop(t *testing.T) {
-	server := NewServer(":0", zap.NewNop()) // Use port 0 for random available port
+	server := NewServer(":0", slog.New(slog.NewTextHandler(io.Discard, nil))) // Use port 0 for random available port
 	server.Start()
 
 	// Wait for server to start
@@ -574,7 +576,7 @@ func TestComponentStatus_JSON(t *testing.T) {
 }
 
 func TestServer_MetricsHandler(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	server.SetMetricsConfig(true, "/metrics", "", "")
 
 	handler := server.metricsHandler()
@@ -596,7 +598,7 @@ func TestServer_MetricsHandler(t *testing.T) {
 }
 
 func TestServer_SetACMEHandler(t *testing.T) {
-	server := NewServer(":8080", zap.NewNop())
+	server := NewServer(":8080", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	acmeHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

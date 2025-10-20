@@ -16,7 +16,7 @@ import (
 
 	"github.com/hashicorp/memberlist"
 	"github.com/minio/minio-go/v7"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // ClusterManager interface allows for testing and abstraction
@@ -32,7 +32,7 @@ type ClusterManager interface {
 type DistributedTracker struct {
 	local    *ConnectionTracker // Local connection tracking (fast path)
 	hostname string             // This server's hostname
-	logger   *zap.Logger
+	logger   *slog.Logger
 
 	// Vector clock for conflict resolution
 	vectorClock *cluster.VectorClock
@@ -109,7 +109,7 @@ func NewDistributedTracker(
 	s3Client *minio.Client,
 	s3Bucket, s3Prefix string,
 	config DistributedConfig,
-	logger *zap.Logger,
+	logger *slog.Logger,
 ) *DistributedTracker {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -154,7 +154,7 @@ func (dt *DistributedTracker) GetState() []byte {
 	snapshot := dt.createSnapshot()
 	data, err := json.Marshal(snapshot)
 	if err != nil {
-		dt.logger.Error("Failed to marshal state snapshot", zap.Error(err))
+		dt.logger.Error("Failed to marshal state snapshot", "error", err)
 		return nil
 	}
 	return data
@@ -165,7 +165,7 @@ func (dt *DistributedTracker) GetState() []byte {
 func (dt *DistributedTracker) MergeState(data []byte) {
 	var snapshot ConnectionSnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
-		dt.logger.Error("Failed to unmarshal remote state snapshot", zap.Error(err))
+		dt.logger.Error("Failed to unmarshal remote state snapshot", "error", err)
 		return
 	}
 
@@ -184,10 +184,10 @@ func (dt *DistributedTracker) MergeState(data []byte) {
 		clockStr = snapshot.VectorClock.String()
 	}
 	dt.logger.Info("Merged remote state from peer",
-		zap.String("peer", snapshot.Hostname),
-		zap.Int("total_connections", snapshot.TotalCount),
-		zap.Int("unique_ips", len(snapshot.Connections)),
-		zap.String("vector_clock", clockStr))
+		"peer", snapshot.Hostname,
+		"total_connections", snapshot.TotalCount,
+		"unique_ips", len(snapshot.Connections),
+		"vector_clock", clockStr)
 }
 
 // Start begins the gossip and sync loops
@@ -198,12 +198,12 @@ func (dt *DistributedTracker) Start() {
 	}
 
 	dt.logger.Info("Starting distributed connection tracker",
-		zap.String("hostname", dt.hostname),
-		zap.Int("cluster_members", clusterMembers),
-		zap.Duration("gossip_interval", dt.gossipInterval),
-		zap.Duration("s3_sync_interval", dt.s3SyncInterval),
-		zap.Int("global_max_per_ip", dt.globalMaxPerIP),
-		zap.Duration("recipient_cache_ttl", dt.recipientCacheTTL))
+		"hostname", dt.hostname,
+		"cluster_members", clusterMembers,
+		"gossip_interval", dt.gossipInterval,
+		"s3_sync_interval", dt.s3SyncInterval,
+		"global_max_per_ip", dt.globalMaxPerIP,
+		"recipient_cache_ttl", dt.recipientCacheTTL)
 
 	// Start memberlist gossip loop
 	if dt.cluster != nil {
@@ -267,9 +267,9 @@ func (dt *DistributedTracker) cleanupExpiredRecipients() {
 
 	if removed > 0 {
 		dt.logger.Debug("Cleaned up expired recipient cache entries",
-			zap.Int("removed", removed),
-			zap.Int("not_found_remaining", len(dt.recipientNotFound)),
-			zap.Int("blocked_remaining", len(dt.recipientBlocked)))
+			"removed", removed,
+			"not_found_remaining", len(dt.recipientNotFound),
+			"blocked_remaining", len(dt.recipientBlocked))
 	}
 }
 
@@ -308,8 +308,8 @@ func (dt *DistributedTracker) cleanupStalePeers() {
 
 	if removed > 0 {
 		dt.logger.Debug("Cleaned up stale peer connections",
-			zap.Int("removed", removed),
-			zap.Int("remaining_peers", len(dt.peerConnections)))
+			"removed", removed,
+			"remaining_peers", len(dt.peerConnections))
 	}
 }
 
@@ -322,8 +322,8 @@ func (dt *DistributedTracker) CacheRecipientNotFound(email string) {
 	dt.recipientNotFound[email] = expiry
 
 	dt.logger.Debug("Cached recipient as not found",
-		zap.String("email", email),
-		zap.Time("expiry", expiry))
+		"email", email,
+		"expiry", expiry)
 }
 
 // CacheRecipientBlocked adds a recipient to the "blocked" cache (403 responses)
@@ -335,8 +335,8 @@ func (dt *DistributedTracker) CacheRecipientBlocked(email string) {
 	dt.recipientBlocked[email] = expiry
 
 	dt.logger.Debug("Cached recipient as blocked",
-		zap.String("email", email),
-		zap.Time("expiry", expiry))
+		"email", email,
+		"expiry", expiry)
 }
 
 // IsRecipientCached checks if a recipient is in the cache and returns the status
@@ -450,12 +450,12 @@ func (dt *DistributedTracker) broadcastToCluster() {
 
 	data, err := json.Marshal(snapshot)
 	if err != nil {
-		dt.logger.Error("Failed to marshal connection snapshot", zap.Error(err))
+		dt.logger.Error("Failed to marshal connection snapshot", "error", err)
 		return
 	}
 
 	if err := dt.cluster.BroadcastConnectionState(data); err != nil {
-		dt.logger.Debug("Failed to broadcast connection state", zap.Error(err))
+		dt.logger.Debug("Failed to broadcast connection state", "error", err)
 	}
 }
 
@@ -502,7 +502,7 @@ func (dt *DistributedTracker) createSnapshot() *ConnectionSnapshot {
 func (dt *DistributedTracker) handleGossipMessage(data []byte) {
 	var snapshot ConnectionSnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
-		dt.logger.Warn("Failed to unmarshal connection snapshot from gossip", zap.Error(err))
+		dt.logger.Warn("Failed to unmarshal connection snapshot from gossip", "error", err)
 		return
 	}
 
@@ -523,18 +523,18 @@ func (dt *DistributedTracker) handleGossipMessage(data []byte) {
 			conflictType = "stale"
 			shouldMerge = false
 			dt.logger.Debug("Rejecting stale snapshot",
-				zap.String("peer", snapshot.Hostname),
-				zap.String("local_clock", existingPeer.VectorClock.String()),
-				zap.String("remote_clock", snapshot.VectorClock.String()))
+				"peer", snapshot.Hostname,
+				"local_clock", existingPeer.VectorClock.String(),
+				"remote_clock", snapshot.VectorClock.String())
 		case 0:
 			// Concurrent updates - use timestamp as tiebreaker
 			conflictType = "concurrent"
 			shouldMerge = snapshot.Timestamp.After(existingPeer.Timestamp)
 			dt.logger.Debug("Concurrent snapshot detected, using timestamp tiebreaker",
-				zap.String("peer", snapshot.Hostname),
-				zap.Bool("accepting", shouldMerge),
-				zap.Time("local_time", existingPeer.Timestamp),
-				zap.Time("remote_time", snapshot.Timestamp))
+				"peer", snapshot.Hostname,
+				"accepting", shouldMerge,
+				"local_time", existingPeer.Timestamp,
+				"remote_time", snapshot.Timestamp)
 		}
 	}
 
@@ -570,11 +570,11 @@ func (dt *DistributedTracker) handleGossipMessage(data []byte) {
 			clockStr = snapshot.VectorClock.String()
 		}
 		dt.logger.Debug("Received connection state from peer via memberlist",
-			zap.String("peer", snapshot.Hostname),
-			zap.Int("total_connections", snapshot.TotalCount),
-			zap.Int("unique_ips", len(snapshot.Connections)),
-			zap.String("conflict_type", conflictType),
-			zap.String("vector_clock", clockStr))
+			"peer", snapshot.Hostname,
+			"total_connections", snapshot.TotalCount,
+			"unique_ips", len(snapshot.Connections),
+			"conflict_type", conflictType,
+			"vector_clock", clockStr)
 	} else {
 		dt.peerMu.Unlock()
 	}
@@ -612,9 +612,9 @@ func (dt *DistributedTracker) mergeRecipientCache(peerCache *RecipientCacheSnaps
 
 	if merged > 0 {
 		dt.logger.Debug("Merged recipient cache from peer",
-			zap.Int("entries_merged", merged),
-			zap.Int("total_not_found", len(dt.recipientNotFound)),
-			zap.Int("total_blocked", len(dt.recipientBlocked)))
+			"entries_merged", merged,
+			"total_not_found", len(dt.recipientNotFound),
+			"total_blocked", len(dt.recipientBlocked))
 	}
 }
 
@@ -645,12 +645,12 @@ func (dt *DistributedTracker) syncWithS3() {
 
 	// Export our state
 	if err := dt.exportToS3(); err != nil {
-		dt.logger.Error("Failed to export to S3", zap.Error(err))
+		dt.logger.Error("Failed to export to S3", "error", err)
 	}
 
 	// Import peer states
 	if err := dt.importFromS3(); err != nil {
-		dt.logger.Error("Failed to import from S3", zap.Error(err))
+		dt.logger.Error("Failed to import from S3", "error", err)
 	}
 }
 
@@ -695,8 +695,8 @@ func (dt *DistributedTracker) exportToS3() error {
 	}
 
 	dt.logger.Debug("Exported connection state to S3",
-		zap.String("object", objectName),
-		zap.Int("size", buf.Len()))
+		"object", objectName,
+		"size", buf.Len())
 
 	return nil
 }
@@ -721,7 +721,7 @@ func (dt *DistributedTracker) importFromS3() error {
 
 	for object := range objectCh {
 		if object.Err != nil {
-			dt.logger.Error("Error listing S3 objects", zap.Error(object.Err))
+			dt.logger.Error("Error listing S3 objects", "error", object.Err)
 			continue
 		}
 
@@ -734,8 +734,8 @@ func (dt *DistributedTracker) importFromS3() error {
 		// Download and process peer state
 		if err := dt.downloadPeerState(object.Key); err != nil {
 			dt.logger.Debug("Failed to download peer state",
-				zap.String("key", object.Key),
-				zap.Error(err))
+				"key", object.Key,
+				"error", err)
 		}
 	}
 
@@ -828,8 +828,8 @@ func parseAddr(addr string) (string, string, error) {
 // NotifyJoin is called when a node joins the cluster
 func (dt *DistributedTracker) NotifyJoin(node *memberlist.Node) {
 	dt.logger.Info("Peer joined - expecting state sync",
-		zap.String("peer", node.Name),
-		zap.String("addr", node.Address()))
+		"peer", node.Name,
+		"addr", node.Address())
 }
 
 // NotifyLeave is called when a node leaves the cluster gracefully
@@ -840,8 +840,8 @@ func (dt *DistributedTracker) NotifyLeave(node *memberlist.Node) {
 	if _, exists := dt.peerConnections[nodeName]; exists {
 		delete(dt.peerConnections, nodeName)
 		dt.logger.Info("Proactively removed peer state on leave event",
-			zap.String("peer", nodeName),
-			zap.String("addr", node.Address()))
+			"peer", nodeName,
+			"addr", node.Address())
 	}
 	dt.peerMu.Unlock()
 }
@@ -849,8 +849,8 @@ func (dt *DistributedTracker) NotifyLeave(node *memberlist.Node) {
 // NotifyUpdate is called when a node's metadata is updated
 func (dt *DistributedTracker) NotifyUpdate(node *memberlist.Node) {
 	dt.logger.Debug("Peer updated",
-		zap.String("peer", node.Name),
-		zap.String("addr", node.Address()))
+		"peer", node.Name,
+		"addr", node.Address())
 }
 
 // Name returns the name of this health checker
@@ -918,8 +918,8 @@ func (dt *DistributedTracker) FlushCache() map[string]int {
 	dt.recipientBlocked = make(map[string]time.Time)
 
 	dt.logger.Info("Recipient cache flushed via API",
-		zap.Int("not_found_flushed", flushedCounts["recipient_not_found"]),
-		zap.Int("blocked_flushed", flushedCounts["recipient_blocked"]))
+		"not_found_flushed", flushedCounts["recipient_not_found"],
+		"blocked_flushed", flushedCounts["recipient_blocked"])
 
 	return flushedCounts
 }

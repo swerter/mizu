@@ -1,13 +1,15 @@
 package queue
 
 import (
+	"io"
+
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TestStorage_SaveAndLoadJob tests basic job persistence
@@ -20,7 +22,7 @@ func TestStorage_SaveAndLoadJob(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -81,7 +83,7 @@ func TestStorage_SaveJob_UpdateScheduleEntry(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -135,7 +137,7 @@ func TestStorage_DeleteJob(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -195,7 +197,7 @@ func TestStorage_GetDueJobs(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -287,7 +289,7 @@ func TestStorage_GetDueJobs_Limit(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -332,7 +334,7 @@ func TestStorage_MoveToDLQ(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -397,7 +399,7 @@ func TestStorage_GetStats(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -451,7 +453,7 @@ func TestStorage_LargeEmail(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -460,7 +462,7 @@ func TestStorage_LargeEmail(t *testing.T) {
 
 	// Create email storage
 	emailStorageDir := filepath.Join(tmpDir, "emails")
-	emailStorage, err := NewEmailStorage(emailStorageDir, zap.NewNop())
+	emailStorage, err := NewEmailStorage(emailStorageDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create email storage: %v", err)
 	}
@@ -519,7 +521,7 @@ func TestStorage_ConcurrentAccess(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -573,7 +575,7 @@ func TestStorage_InvalidJobID(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -597,7 +599,7 @@ func TestStorage_DLQManagement(t *testing.T) {
 
 	storage, err := NewStorage(StorageConfig{
 		DataDir: tmpDir,
-		Logger:  zap.NewNop(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)

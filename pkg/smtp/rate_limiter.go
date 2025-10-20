@@ -1,6 +1,8 @@
 package smtp
 
 import (
+	"io"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 	"migadu/mizu/pkg/config"
 )
 
@@ -29,7 +31,7 @@ type RateLimiter struct {
 	windows        map[string]*connectionWindow // composite key -> connection window with local/peer counts
 	gossipEnabled  bool
 	gossipInterval time.Duration
-	logger         *zap.Logger
+	logger         *slog.Logger
 	cluster        RateLimiterCluster // Memberlist cluster for gossip
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -69,9 +71,9 @@ type SessionContext struct {
 }
 
 // NewRateLimiter creates a new multi-dimensional rate limiter with memberlist gossip
-func NewRateLimiter(rlConfig config.RateLimitConfig, cluster RateLimiterCluster, logger *zap.Logger) *RateLimiter {
+func NewRateLimiter(rlConfig config.RateLimitConfig, cluster RateLimiterCluster, logger *slog.Logger) *RateLimiter {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -158,13 +160,13 @@ func (rl *RateLimiter) CheckRateLimit(sessionCtx SessionContext) error {
 		if totalCount >= dim.limit {
 			rl.mu.Unlock()
 			rl.logger.Warn("Rate limit exceeded",
-				zap.String("dimension", dim.name),
-				zap.String("composite_key", compositeKey),
-				zap.Int("local_count", window.localCount),
-				zap.Int("peer_count", window.peerCount),
-				zap.Int("total", totalCount),
-				zap.Int("limit", dim.limit),
-				zap.Duration("window", dim.window))
+				"dimension", dim.name,
+				"composite_key", compositeKey,
+				"local_count", window.localCount,
+				"peer_count", window.peerCount,
+				"total", totalCount,
+				"limit", dim.limit,
+				"window", dim.window)
 			return fmt.Errorf("rate limit exceeded for %s: %d/%d connections in %v", dim.name, totalCount, dim.limit, dim.window)
 		}
 
@@ -222,7 +224,7 @@ func (rl *RateLimiter) buildCompositeKey(keys []string, sessionCtx SessionContex
 			parts = append(parts, fmt.Sprintf("TO_DOMAIN:%s", strings.ToLower(domain)))
 
 		default:
-			rl.logger.Warn("Unknown rate limit dimension key", zap.String("key", key))
+			rl.logger.Warn("Unknown rate limit dimension key", "key", key)
 			return "" // Unknown key type
 		}
 	}
@@ -296,12 +298,12 @@ func (rl *RateLimiter) sendGossip() {
 
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		rl.logger.Error("Failed to marshal rate limit data", zap.Error(err))
+		rl.logger.Error("Failed to marshal rate limit data", "error", err)
 		return
 	}
 
 	if err := rl.cluster.BroadcastRateLimit(jsonData); err != nil {
-		rl.logger.Debug("Failed to broadcast rate limit data", zap.Error(err))
+		rl.logger.Debug("Failed to broadcast rate limit data", "error", err)
 	}
 }
 
@@ -309,7 +311,7 @@ func (rl *RateLimiter) sendGossip() {
 func (rl *RateLimiter) handleGossipMessage(data []byte) {
 	var rateLimitData []RateLimitData
 	if err := json.Unmarshal(data, &rateLimitData); err != nil {
-		rl.logger.Warn("Failed to unmarshal rate limit gossip data", zap.Error(err))
+		rl.logger.Warn("Failed to unmarshal rate limit gossip data", "error", err)
 		return
 	}
 

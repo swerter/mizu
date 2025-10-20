@@ -1,13 +1,15 @@
 package blacklist
 
 import (
+	"io"
+
 	"context"
 	"errors"
 	"net"
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // mockResolver is a mock implementation of the resolver interface for testing.
@@ -102,7 +104,7 @@ func TestChecker_CheckIP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			checker := NewChecker(tt.lists, 50*time.Millisecond, zap.NewNop())
+			checker := NewChecker(tt.lists, 50*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			checker.resolver = &mockResolver{lookupIPAddrResults: tt.mockResults}
 
 			ip := net.ParseIP(tt.ip)

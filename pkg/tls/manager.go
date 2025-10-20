@@ -1,13 +1,15 @@
 package tls
 
 import (
+	"io"
+
 	"crypto/tls"
 	"net/http"
 
 	"github.com/minio/minio-go/v7"
-	"go.uber.org/zap"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
+	"log/slog"
 
 	"migadu/mizu/pkg/storage"
 )
@@ -15,7 +17,7 @@ import (
 // Manager handles automatic TLS certificate management using Let's Encrypt
 type Manager struct {
 	autocertManager *autocert.Manager
-	logger          *zap.Logger
+	logger          *slog.Logger
 }
 
 // Config holds configuration for TLS manager
@@ -32,13 +34,13 @@ type Config struct {
 
 // NewManager creates a new TLS manager with autocert and S3 storage
 // Returns nil if TLS is not enabled or cluster/leader function is not available
-func NewManager(cfg Config, logger *zap.Logger) (*Manager, error) {
+func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
 
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	// Require cluster leader function for distributed coordination
@@ -73,9 +75,9 @@ func NewManager(cfg Config, logger *zap.Logger) (*Manager, error) {
 	}
 
 	logger.Info("TLS manager initialized with autocert",
-		zap.Strings("domains", cfg.Domains),
-		zap.String("email", cfg.Email),
-		zap.Bool("staging", cfg.Staging))
+		"domains", cfg.Domains,
+		"email", cfg.Email,
+		"staging", cfg.Staging)
 
 	return &Manager{
 		autocertManager: m,

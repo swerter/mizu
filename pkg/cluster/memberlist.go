@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"io"
+
 	"encoding/json"
 	"fmt"
 	"net"
@@ -9,7 +11,9 @@ import (
 	"time"
 
 	"github.com/hashicorp/memberlist"
-	"go.uber.org/zap"
+	"log/slog"
+
+	"migadu/mizu/pkg/logging"
 )
 
 // MessageType identifies the type of gossip message
@@ -43,7 +47,7 @@ type EventDelegate interface {
 type Cluster struct {
 	ml                     *memberlist.Memberlist
 	broadcasts             *memberlist.TransmitLimitedQueue
-	logger                 *zap.Logger
+	logger                 *slog.Logger
 	connectionStateHandler func(data []byte)
 	rateLimitHandler       func(data []byte)
 	stateDelegate          StateDelegate
@@ -61,7 +65,7 @@ type Config struct {
 	BindPort      int      // Port to bind to for memberlist (default: 7946)
 	Peers         []string // Other cluster nodes to connect to (e.g., ["node1:7946", "node2:7946"])
 	SecretKey     []byte   // 32-byte encryption key for gossip protocol (AES-256)
-	Logger        *zap.Logger
+	Logger        *slog.Logger
 	StateDelegate StateDelegate
 	EventDelegate EventDelegate
 }
@@ -69,7 +73,7 @@ type Config struct {
 // NewCluster creates a new cluster instance with memberlist
 func NewCluster(cfg Config) (*Cluster, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = zap.NewNop()
+		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	cluster := &Cluster{
@@ -144,7 +148,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 	if len(cfg.Peers) > 0 {
 		_, err := ml.Join(cfg.Peers)
 		if err != nil {
-			cfg.Logger.Warn("Failed to join some peers", zap.Error(err))
+			cfg.Logger.Warn("Failed to join some peers", "error", err)
 			// Don't fail completely - we might be the first node
 		}
 	}
@@ -153,21 +157,21 @@ func NewCluster(cfg Config) (*Cluster, error) {
 	cluster.updateLeader()
 
 	// Start periodic leader check to handle failures (every second)
-	go func() {
+	logging.SafeGo(cfg.Logger, "cluster-leader-ticker", func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			cluster.updateLeader()
 		}
-	}()
+	})
 
 	cfg.Logger.Info("Cluster started",
-		zap.String("node_name", ml.LocalNode().Name),
-		zap.String("bind_addr", mlConfig.BindAddr),
-		zap.Int("bind_port", mlConfig.BindPort),
-		zap.Int("members", ml.NumMembers()),
-		zap.String("leader", cluster.GetLeader()),
-		zap.Bool("is_leader", cluster.IsLeader()))
+		"node_name", ml.LocalNode().Name,
+		"bind_addr", mlConfig.BindAddr,
+		"bind_port", mlConfig.BindPort,
+		"members", ml.NumMembers(),
+		"leader", cluster.GetLeader(),
+		"is_leader", cluster.IsLeader())
 
 	return cluster, nil
 }
@@ -301,9 +305,9 @@ func (c *Cluster) updateLeader() {
 		oldLeader := c.leader
 		c.leader = newLeader
 		c.logger.Info("cluster leader changed",
-			zap.String("old_leader", oldLeader),
-			zap.String("new_leader", c.leader),
-			zap.Bool("is_leader", c.leader == c.ml.LocalNode().Name))
+			"old_leader", oldLeader,
+			"new_leader", c.leader,
+			"is_leader", c.leader == c.ml.LocalNode().Name)
 	}
 }
 
@@ -319,7 +323,7 @@ func (c *Cluster) NodeMeta(limit int) []byte {
 func (c *Cluster) NotifyMsg(data []byte) {
 	var msg GossipMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
-		c.logger.Warn("Failed to unmarshal gossip message", zap.Error(err))
+		c.logger.Warn("Failed to unmarshal gossip message", "error", err)
 		return
 	}
 
@@ -333,7 +337,7 @@ func (c *Cluster) NotifyMsg(data []byte) {
 			c.rateLimitHandler(msg.Payload)
 		}
 	default:
-		c.logger.Warn("Unknown gossip message type", zap.Uint8("type", uint8(msg.Type)))
+		c.logger.Warn("Unknown gossip message type", "type", uint8(msg.Type))
 	}
 }
 
@@ -362,8 +366,8 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 // NotifyJoin is called when a node joins the cluster
 func (c *Cluster) NotifyJoin(node *memberlist.Node) {
 	c.logger.Info("Node joined cluster",
-		zap.String("node", node.Name),
-		zap.String("addr", node.Address()))
+		"node", node.Name,
+		"addr", node.Address())
 
 	// Re-evaluate leader asynchronously to avoid deadlock
 	// (memberlist holds a read lock when calling this)
@@ -377,8 +381,8 @@ func (c *Cluster) NotifyJoin(node *memberlist.Node) {
 // NotifyLeave is called when a node leaves the cluster gracefully
 func (c *Cluster) NotifyLeave(node *memberlist.Node) {
 	c.logger.Info("Node left cluster",
-		zap.String("node", node.Name),
-		zap.String("addr", node.Address()))
+		"node", node.Name,
+		"addr", node.Address())
 
 	// Re-evaluate leader asynchronously to avoid deadlock
 	// (memberlist holds a read lock when calling this)
@@ -392,8 +396,8 @@ func (c *Cluster) NotifyLeave(node *memberlist.Node) {
 // NotifyUpdate is called when a node's metadata is updated
 func (c *Cluster) NotifyUpdate(node *memberlist.Node) {
 	c.logger.Debug("Node updated",
-		zap.String("node", node.Name),
-		zap.String("addr", node.Address()))
+		"node", node.Name,
+		"addr", node.Address())
 
 	if c.eventDelegate != nil {
 		c.eventDelegate.NotifyUpdate(node)
@@ -424,7 +428,7 @@ func (b *broadcast) Finished() {
 
 // zapLogWriter adapts zap.Logger to io.Writer for memberlist
 type zapLogWriter struct {
-	logger *zap.Logger
+	logger *slog.Logger
 }
 
 func (w *zapLogWriter) Write(p []byte) (n int, err error) {

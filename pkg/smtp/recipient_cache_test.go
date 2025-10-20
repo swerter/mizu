@@ -1,18 +1,20 @@
 package smtp
 
 import (
+	"io"
+
 	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TestRecipientCache_NotFoundCaching tests that 404 responses are cached
 func TestRecipientCache_NotFoundCaching(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	dt := NewDistributedTracker(
@@ -55,7 +57,7 @@ func TestRecipientCache_NotFoundCaching(t *testing.T) {
 
 // TestRecipientCache_BlockedCaching tests that 403 responses are cached
 func TestRecipientCache_BlockedCaching(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	dt := NewDistributedTracker(
@@ -92,7 +94,7 @@ func TestRecipientCache_BlockedCaching(t *testing.T) {
 
 // TestRecipientCache_Expiry tests that cached entries expire
 func TestRecipientCache_Expiry(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	dt := NewDistributedTracker(
@@ -132,7 +134,7 @@ func TestRecipientCache_Expiry(t *testing.T) {
 
 // TestRecipientCache_GossipPropagation tests that cache entries are gossiped between servers
 func TestRecipientCache_GossipPropagation(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create server 1
 	local1 := NewConnectionTracker(100, 10)
@@ -214,7 +216,7 @@ func TestRecipientCache_GossipPropagation(t *testing.T) {
 
 // TestRecipientCache_MergeStrategy tests that the merge keeps the latest expiry
 func TestRecipientCache_MergeStrategy(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	dt := NewDistributedTracker(
@@ -268,7 +270,7 @@ func TestRecipientCache_MergeStrategy(t *testing.T) {
 
 // TestRecipientCache_HTTPEndToEnd tests the complete HTTP handler flow
 func TestRecipientCache_HTTPEndToEnd(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create server 1 with HTTP handler
 	local1 := NewConnectionTracker(100, 10)
@@ -331,7 +333,7 @@ func TestRecipientCache_HTTPEndToEnd(t *testing.T) {
 // TestRecipientCache_TwoServerIntegration is a comprehensive integration test
 // that simulates two SMTP servers gossiping recipient cache entries via memberlist
 func TestRecipientCache_TwoServerIntegration(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create two servers with mock clusters
 	servers := make([]*DistributedTracker, 2)
@@ -445,7 +447,7 @@ func TestRecipientCache_TwoServerIntegration(t *testing.T) {
 
 // TestRecipientCache_CleanupExpiredEntries tests the automatic cleanup
 func TestRecipientCache_CleanupExpiredEntries(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	dt := NewDistributedTracker(
@@ -506,7 +508,7 @@ func TestRecipientCache_CleanupExpiredEntries(t *testing.T) {
 
 // TestRecipientCache_ConcurrentAccess tests thread safety
 func TestRecipientCache_ConcurrentAccess(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	local := NewConnectionTracker(100, 10)
 	dt := NewDistributedTracker(

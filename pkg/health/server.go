@@ -1,6 +1,8 @@
 package health
 
 import (
+	"io"
+
 	"context"
 	"crypto/subtle"
 	"crypto/tls"
@@ -12,7 +14,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // Checker defines an interface for components that can report their health status.
@@ -48,7 +50,7 @@ type DLQProvider interface {
 // Server represents the health check HTTP server.
 type Server struct {
 	listenAddr      string
-	logger          *zap.Logger
+	logger          *slog.Logger
 	checkers        []Checker
 	statsProvider   StatsProvider
 	cacheFlusher    CacheFlusher
@@ -65,9 +67,9 @@ type Server struct {
 }
 
 // NewServer creates a new health check server.
-func NewServer(listenAddr string, logger *zap.Logger, checkers ...Checker) *Server {
+func NewServer(listenAddr string, logger *slog.Logger, checkers ...Checker) *Server {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	return &Server{
@@ -114,8 +116,8 @@ func (s *Server) SetMetricsConfig(enabled bool, path, username, password string)
 	s.metricsPassword = password
 	if enabled {
 		s.logger.Info("Prometheus metrics endpoint enabled",
-			zap.String("path", path),
-			zap.Bool("auth_enabled", username != ""))
+			"path", path,
+			"auth_enabled", username != "")
 	}
 }
 
@@ -144,9 +146,9 @@ func (s *Server) basicAuthMiddlewareWithCreds(next http.HandlerFunc, username, p
 			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Basic realm="%s"`, realm))
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			s.logger.Warn("Access denied - no credentials provided",
-				zap.String("remote_addr", r.RemoteAddr),
-				zap.String("path", r.URL.Path),
-				zap.String("realm", realm))
+				"remote_addr", r.RemoteAddr,
+				"path", r.URL.Path,
+				"realm", realm)
 			return
 		}
 
@@ -158,10 +160,10 @@ func (s *Server) basicAuthMiddlewareWithCreds(next http.HandlerFunc, username, p
 			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Basic realm="%s"`, realm))
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			s.logger.Warn("Access denied - invalid credentials",
-				zap.String("remote_addr", r.RemoteAddr),
-				zap.String("username", reqUsername),
-				zap.String("path", r.URL.Path),
-				zap.String("realm", realm))
+				"remote_addr", r.RemoteAddr,
+				"username", reqUsername,
+				"path", r.URL.Path,
+				"realm", realm)
 			return
 		}
 
@@ -185,9 +187,9 @@ func (s *Server) basicAuthMiddlewareWithCredsHandler(next http.Handler, username
 			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Basic realm="%s"`, realm))
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			s.logger.Warn("Access denied - no credentials provided",
-				zap.String("remote_addr", r.RemoteAddr),
-				zap.String("path", r.URL.Path),
-				zap.String("realm", realm))
+				"remote_addr", r.RemoteAddr,
+				"path", r.URL.Path,
+				"realm", realm)
 			return
 		}
 
@@ -199,10 +201,10 @@ func (s *Server) basicAuthMiddlewareWithCredsHandler(next http.Handler, username
 			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Basic realm="%s"`, realm))
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			s.logger.Warn("Access denied - invalid credentials",
-				zap.String("remote_addr", r.RemoteAddr),
-				zap.String("username", reqUsername),
-				zap.String("path", r.URL.Path),
-				zap.String("realm", realm))
+				"remote_addr", r.RemoteAddr,
+				"username", reqUsername,
+				"path", r.URL.Path,
+				"realm", realm)
 			return
 		}
 
@@ -242,7 +244,7 @@ func (s *Server) Start() {
 			metricsPath = "/metrics"
 		}
 		s.mux.Handle(metricsPath, s.metricsAuthMiddleware(s.metricsHandler()))
-		s.logger.Info("Metrics endpoint registered", zap.String("path", metricsPath))
+		s.logger.Info("Metrics endpoint registered", "path", metricsPath)
 	}
 
 	s.httpServer = &http.Server{
@@ -250,10 +252,10 @@ func (s *Server) Start() {
 		Handler: s.mux,
 	}
 
-	s.logger.Sugar().Infof("Starting health check server on %s", s.listenAddr)
+	s.logger.Info(fmt.Sprintf("Starting health check server on %s", s.listenAddr))
 	logging.SafeGo(s.logger, "health-server", func() {
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			s.logger.Error("Health check server error", zap.Error(err))
+			s.logger.Error("Health check server error", "error", err)
 		}
 	})
 }
@@ -263,7 +265,7 @@ func (s *Server) Stop(ctx context.Context) {
 	if s.httpServer != nil {
 		s.logger.Info("Stopping health check server")
 		if err := s.httpServer.Shutdown(ctx); err != nil {
-			s.logger.Error("Health check server shutdown error", zap.Error(err))
+			s.logger.Error("Health check server shutdown error", "error", err)
 		}
 	}
 }

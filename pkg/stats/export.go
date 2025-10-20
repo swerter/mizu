@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
-	"go.uber.org/zap"
 )
 
 // ExportToS3 exports the current stats to S3 as a compressed JSON file
@@ -51,11 +50,11 @@ func (m *Manager) ExportToS3(ctx context.Context, s3Client *minio.Client, bucket
 	}
 
 	m.logger.Debug("Exported stats to S3",
-		zap.String("hostname", hostname),
-		zap.String("object", objectName),
-		zap.Int("size", buf.Len()),
-		zap.Int("ips", len(export.IPs)),
-		zap.Int("domains", len(export.Domains)))
+		"hostname", hostname,
+		"object", objectName,
+		"size", buf.Len(),
+		"ips", len(export.IPs),
+		"domains", len(export.Domains))
 
 	return nil
 }
@@ -103,22 +102,22 @@ func (m *Manager) StartExportLoop(ctx context.Context, s3Client *minio.Client, b
 	}
 
 	m.logger.Info("Starting stats export loop",
-		zap.String("hostname", hostname),
-		zap.Duration("interval", interval))
+		"hostname", hostname,
+		"interval", interval)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	// Export immediately on start
 	if err := m.ExportToS3(ctx, s3Client, bucket, prefix, hostname); err != nil {
-		m.logger.Error("Failed to export stats", zap.Error(err))
+		m.logger.Error("Failed to export stats", "error", err)
 	}
 
 	for {
 		select {
 		case <-ticker.C:
 			if err := m.ExportToS3(ctx, s3Client, bucket, prefix, hostname); err != nil {
-				m.logger.Error("Failed to export stats", zap.Error(err))
+				m.logger.Error("Failed to export stats", "error", err)
 				// Continue running even if export fails
 			}
 		case <-ctx.Done():

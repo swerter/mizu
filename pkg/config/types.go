@@ -2,9 +2,11 @@ package config
 
 import "time"
 
-// Config holds all configuration for the SMTP relay server
+// Config holds all configuration for the SMTP server(s)
 type Config struct {
-	SMTP       SMTPConfig       `toml:"smtp"`
+	Servers    []ServerConfig   `toml:"server"`   // Multiple SMTP server instances
+	Defaults   DefaultsConfig   `toml:"defaults"` // Default values for all servers
+	Logging    LoggingConfig    `toml:"logging"`  // Logging configuration
 	DNS        DNSConfig        `toml:"dns"`
 	Storage    StorageConfig    `toml:"storage"`
 	Delivery   DeliveryConfig   `toml:"delivery"`
@@ -16,28 +18,185 @@ type Config struct {
 	Health     HealthConfig     `toml:"health"`
 	Metrics    MetricsConfig    `toml:"metrics"`
 	Stats      StatsConfig      `toml:"stats"`
-	Cluster    ClusterConfig    `toml:"cluster"`    // Global cluster/peering configuration
-	LogFormat  string           `toml:"log_format"` // "json" or "text"
-	Local      bool             `toml:"local"`      // Local development mode
+	Cluster    ClusterConfig    `toml:"cluster"` // Global cluster/peering configuration
+	Local      bool             `toml:"local"`   // Local development mode (disables TLS and validation)
 }
 
-// SMTPConfig holds SMTP server configuration
-type SMTPConfig struct {
-	ListenAddr             string                  `toml:"listen_addr"`
-	Domain                 string                  `toml:"domain"`
-	MaxMessageSize         int                     `toml:"max_message_size"`
-	TimeoutSeconds         int                     `toml:"timeout_seconds"`          // SMTP command timeout in seconds (default: 10)
-	MinTLSVersion          string                  `toml:"min_tls_version"`          // Minimum TLS version: "1.2" or "1.3" (TLS 1.0/1.1 not supported)
-	CheckXSpamFlag         bool                    `toml:"check_x_spam_flag"`        // Enable check for X-Spam-Flag header
-	DMARCQuarantineAsJunk  bool                    `toml:"dmarc_quarantine_as_junk"` // Treat DMARC quarantine policy as junk
-	ARCEnabled             bool                    `toml:"arc_enabled"`              // Enable ARC (Authenticated Received Chain) validation (default: true)
-	ARCSign                ARCSignConfig           `toml:"arc_sign"`                 // ARC signing configuration
-	RequireSenderMX        bool                    `toml:"require_sender_mx"`        // Require sender domain to have MX records (default: true)
-	ShutdownTimeoutSeconds int                     `toml:"shutdown_timeout_seconds"` // Maximum time to wait for graceful shutdown in seconds (default: 60)
-	MaxConnections         int                     `toml:"max_connections"`          // Maximum total concurrent connections (0 = unlimited, default: 100)
-	MaxConnectionsPerIP    int                     `toml:"max_connections_per_ip"`   // Maximum concurrent connections per IP (0 = unlimited, default: 10)
-	RateLimit              RateLimitConfig         `toml:"rate_limit"`               // Rate limiting configuration
-	Distributed            DistributedLimitsConfig `toml:"distributed"`              // Distributed connection tracking
+// DefaultsConfig provides default values that can be overridden per-server
+type DefaultsConfig struct {
+	Domain                 string `toml:"domain"`                   // Default domain for all servers
+	MaxMessageSize         int    `toml:"max_message_size"`         // Default max message size in bytes
+	TimeoutSeconds         int    `toml:"timeout_seconds"`          // Default SMTP command timeout
+	ShutdownTimeoutSeconds int    `toml:"shutdown_timeout_seconds"` // Default graceful shutdown timeout
+	MaxConnections         int    `toml:"max_connections"`          // Default max total connections per server
+}
+
+// ServerConfig defines a single SMTP server instance
+type ServerConfig struct {
+	// === Identity ===
+	Name string `toml:"name"` // Human-readable name (e.g., "mx-primary", "submission-tls")
+	Type string `toml:"type"` // "relay" (MX server) or "submission" (MSA server)
+
+	// === Network ===
+	ListenAddr string `toml:"listen_addr"` // Address to bind (e.g., ":25", ":465", ":587", "127.0.0.1:2525")
+	Domain     string `toml:"domain"`      // Server domain (overrides defaults.domain if set)
+
+	// === Message Processing ===
+	MaxMessageSize int `toml:"max_message_size"` // Maximum message size in bytes (overrides default)
+
+	// === Connection Limits ===
+	Limits ServerLimitsConfig `toml:"limits"` // Connection limits
+
+	// === TLS Configuration ===
+	TLS ServerTLSConfig `toml:"tls"` // TLS configuration (if section present, TLS is enabled)
+
+	// === Timeouts ===
+	TimeoutSeconds         int `toml:"timeout_seconds"`          // SMTP command timeout (overrides default)
+	ShutdownTimeoutSeconds int `toml:"shutdown_timeout_seconds"` // Graceful shutdown timeout (overrides default)
+
+	// === Nested Configuration Sections ===
+	Submission ServerSubmissionConfig `toml:"submission"` // Submission-specific settings (for type="submission")
+	Auth       ServerAuthConfig       `toml:"auth"`       // Authentication configuration (use auth.required=true to require auth)
+	DNSChecks  ServerDNSChecksConfig  `toml:"dns_checks"` // DNS validation checks (rDNS, MX)
+	Junk       ServerJunkConfig       `toml:"junk"`       // Junk/spam detection configuration
+	SPF        ServerSPFConfig        `toml:"spf"`        // SPF validation configuration
+	DKIM       ServerDKIMConfig       `toml:"dkim"`       // DKIM validation and signing configuration
+	DMARC      ServerDMARCConfig      `toml:"dmarc"`      // DMARC validation configuration
+	ARC        ServerARCConfig        `toml:"arc"`        // ARC validation and signing configuration
+	DNSBL      ServerDNSBLConfig      `toml:"dnsbl"`      // DNS blacklist checking configuration
+
+	// === Rate Limiting (per-server) ===
+	RateLimit   RateLimitConfig         `toml:"rate_limit"`  // Rate limiting configuration
+	Distributed DistributedLimitsConfig `toml:"distributed"` // Distributed connection tracking
+}
+
+// ServerLimitsConfig holds connection limits
+type ServerLimitsConfig struct {
+	MaxConnections        int `toml:"max_connections"`          // Total connections for this server
+	MaxConnectionsPerIP   int `toml:"max_connections_per_ip"`   // Per-IP connection limit (for DoS protection)
+	MaxConnectionsPerUser int `toml:"max_connections_per_user"` // Per-user connection limit (for submission servers)
+}
+
+// ServerSubmissionConfig holds settings specific to submission servers (type="submission")
+type ServerSubmissionConfig struct {
+	AllowNullSender   bool `toml:"allow_null_sender"`   // Allow bounce messages with null sender (<>)
+	FixMissingHeaders bool `toml:"fix_missing_headers"` // Add missing Message-ID and Date headers
+}
+
+// ServerAuthConfig holds authentication configuration for submission servers
+// Authentication is performed via HTTPS POST to the configured endpoint
+type ServerAuthConfig struct {
+	Required bool   `toml:"required"` // Require authentication (typically true for submission servers)
+	Endpoint string `toml:"endpoint"` // HTTPS endpoint for authentication (must use https://)
+	APIKey   string `toml:"api_key"`  // API key for authentication (sent as Bearer token, can use env var: ${AUTH_API_KEY})
+}
+
+// ServerSPFConfig holds SPF validation configuration
+type ServerSPFConfig struct {
+	Enabled bool `toml:"enabled"` // Enable SPF validation
+}
+
+// ServerDKIMConfig holds DKIM validation and signing configuration
+type ServerDKIMConfig struct {
+	Enabled        bool   `toml:"enabled"`          // Enable DKIM (validation or signing)
+	Mode           string `toml:"mode"`             // Mode: "check" (validate incoming) or "sign" (sign outgoing)
+	Domain         string `toml:"domain"`           // Domain for DKIM signature (d=) - required for mode=sign
+	Selector       string `toml:"selector"`         // DKIM selector (s=) - required for mode=sign
+	PrivateKeyPath string `toml:"private_key_path"` // Path to RSA private key (PEM format) - required for mode=sign
+}
+
+// ServerDMARCConfig holds DMARC validation configuration
+type ServerDMARCConfig struct {
+	Enabled                bool   `toml:"enabled"`                  // Enable DMARC validation
+	RejectPolicyAction     string `toml:"reject_policy_action"`     // Action for policy=reject: "none", "reject", "junk" (default: "reject")
+	QuarantinePolicyAction string `toml:"quarantine_policy_action"` // Action for policy=quarantine: "none", "reject", "junk" (default: "junk")
+}
+
+// ServerARCConfig holds ARC validation and signing configuration
+type ServerARCConfig struct {
+	Enabled        bool   `toml:"enabled"`          // Enable ARC (validation or signing)
+	Mode           string `toml:"mode"`             // Mode: "check" (validate incoming) or "sign" (sign outgoing/forward)
+	Domain         string `toml:"domain"`           // Domain for ARC signature - required for mode=sign
+	Selector       string `toml:"selector"`         // ARC selector - required for mode=sign
+	PrivateKeyPath string `toml:"private_key_path"` // Path to RSA private key for ARC - required for mode=sign
+}
+
+// ServerDNSBLConfig holds DNS blacklist checking configuration
+type ServerDNSBLConfig struct {
+	Enabled           bool     `toml:"enabled"`             // Enable DNS blacklist (RBL) checking
+	Lists             []string `toml:"lists"`               // DNS blacklist servers to check
+	TimeoutSeconds    int      `toml:"timeout_seconds"`     // Timeout for blacklist queries in seconds (default: 3)
+	CheckHELOResolves bool     `toml:"check_helo_resolves"` // Whether to check if HELO hostname resolves
+	Action            string   `toml:"action"`              // Action when blacklisted: "reject", "junk", "none" (default: "reject")
+}
+
+// ServerDNSChecksConfig holds DNS validation checks
+type ServerDNSChecksConfig struct {
+	RequireRDNS     bool `toml:"require_rdns"`      // Require reverse DNS for sender IP
+	RequireSenderMX bool `toml:"require_sender_mx"` // Require sender domain to have MX records
+}
+
+// ServerJunkConfig holds junk/spam detection configuration
+type ServerJunkConfig struct {
+	RejectNullSender bool     `toml:"reject_null_sender"` // Reject bounce messages (<>)
+	CheckHeaders     []string `toml:"check_headers"`      // Headers that mark email as junk
+	ApplyAction      string   `toml:"apply_action"`       // Action when junk detected: "header", "reject", "warn", "subject"
+	SubjectPattern   string   `toml:"subject_pattern"`    // Subject pattern for "subject" action (e.g., "[spam] %s")
+	Header           string   `toml:"header"`             // Header to add for "header" action (e.g., "X-Spam")
+}
+
+// ServerTLSConfig holds TLS configuration for a server
+type ServerTLSConfig struct {
+	Enabled              bool   `toml:"enabled"`                // Enable TLS for this server
+	Mode                 string `toml:"mode"`                   // TLS mode: "starttls" or "implicit"
+	Required             bool   `toml:"required"`               // Enforce TLS (reject unencrypted connections)
+	MinTLSVersion        string `toml:"min_tls_version"`        // Minimum TLS version: "1.2" or "1.3"
+	DeferredHandshake    bool   `toml:"deferred_handshake"`     // Defer TLS handshake to prevent head-of-line blocking (implicit TLS only)
+	HandshakeTimeoutSecs int    `toml:"handshake_timeout_secs"` // Timeout for TLS handshake in seconds (default: 10, 0 = no timeout)
+}
+
+// IsRelay returns true if this is a relay (MX) server
+func (s *ServerConfig) IsRelay() bool {
+	return s.Type == "relay"
+}
+
+// IsSubmission returns true if this is a submission (MSA) server
+func (s *ServerConfig) IsSubmission() bool {
+	return s.Type == "submission"
+}
+
+// IsTLSEnabled returns true if TLS is explicitly enabled
+func (s *ServerConfig) IsTLSEnabled() bool {
+	return s.TLS.Enabled
+}
+
+// UsesSTARTTLS returns true if TLS mode is "starttls"
+func (s *ServerConfig) UsesSTARTTLS() bool {
+	return s.TLS.Mode == "starttls"
+}
+
+// UsesImplicitTLS returns true if TLS mode is "implicit"
+func (s *ServerConfig) UsesImplicitTLS() bool {
+	return s.TLS.Mode == "implicit"
+}
+
+// ApplyDefaults fills in missing values from defaults
+func (s *ServerConfig) ApplyDefaults(defaults DefaultsConfig) {
+	if s.Domain == "" {
+		s.Domain = defaults.Domain
+	}
+	if s.MaxMessageSize == 0 {
+		s.MaxMessageSize = defaults.MaxMessageSize
+	}
+	if s.TimeoutSeconds == 0 {
+		s.TimeoutSeconds = defaults.TimeoutSeconds
+	}
+	if s.ShutdownTimeoutSeconds == 0 {
+		s.ShutdownTimeoutSeconds = defaults.ShutdownTimeoutSeconds
+	}
+	if s.Limits.MaxConnections == 0 {
+		s.Limits.MaxConnections = defaults.MaxConnections
+	}
 }
 
 // RateLimitConfig holds rate limiting configuration
@@ -54,14 +213,6 @@ type RateLimitDimension struct {
 	Keys          []string `toml:"keys"`           // Dimension keys to combine (IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN)
 	Limit         int      `toml:"limit"`          // Max connections/emails per window (0 = unlimited)
 	WindowSeconds int      `toml:"window_seconds"` // Time window for rate limiting in seconds (default: 60)
-}
-
-// ARCSignConfig holds configuration for ARC signing
-type ARCSignConfig struct {
-	Enabled        bool   `toml:"enabled"`          // Enable ARC signing (default: false)
-	Domain         string `toml:"domain"`           // Domain to sign with (e.g., "mail.example.com")
-	Selector       string `toml:"selector"`         // DKIM selector for ARC signatures (e.g., "arc")
-	PrivateKeyPath string `toml:"private_key_path"` // Path to RSA private key for signing (PEM format)
 }
 
 // DNSConfig holds DNS resolver configuration (global for all DNS operations)
@@ -174,6 +325,12 @@ type BlacklistsConfig struct {
 	CheckHELOResolves bool     `toml:"check_helo_resolves"` // Whether to check if HELO hostname resolves
 }
 
+// LoggingConfig holds logging configuration
+type LoggingConfig struct {
+	Level  string `toml:"level"`  // Log level: debug, info, warn, error (default: info)
+	Format string `toml:"format"` // Output format: console (human-readable) or json (structured) (default: console)
+}
+
 // TLSConfig holds TLS/certificate configuration
 type TLSConfig struct {
 	Email            string   `toml:"email"`             // Email for Let's Encrypt
@@ -213,44 +370,79 @@ type StatsConfig struct {
 // DefaultConfig returns a Config with sensible default values
 func DefaultConfig() Config {
 	return Config{
-		SMTP: SMTPConfig{
-			ListenAddr:            ":25",              // Standard SMTP port
-			Domain:                "mail.example.com", // Default domain
-			MaxMessageSize:        10 * 1024 * 1024,   // Default 10MB max message size
-			TimeoutSeconds:        10,                 // Default 10s SMTP timeout
-			MinTLSVersion:         "1.2",              // Default to TLS 1.2 minimum
-			CheckXSpamFlag:        true,               // Default to checking X-Spam-Flag header
-			DMARCQuarantineAsJunk: true,               // Default to treating quarantine as junk
-			ARCEnabled:            true,               // Default to ARC validation enabled
-			ARCSign: ARCSignConfig{
-				Enabled:        false,                       // Disabled by default
-				Domain:         "",                          // Must be configured
-				Selector:       "arc",                       // Default selector
-				PrivateKeyPath: "/etc/mizu/arc-private.pem", // Default key path
-			},
-			RequireSenderMX:        true, // Default to requiring MX records
-			ShutdownTimeoutSeconds: 60,   // Default 60s graceful shutdown
-			MaxConnections:         100,  // Default max 100 concurrent connections
-			MaxConnectionsPerIP:    10,   // Default max 10 connections per IP
-			RateLimit: RateLimitConfig{
-				Enabled:               true,  // Enabled by default
-				GossipEnabled:         false, // Disabled by default (requires cluster mode)
-				GossipIntervalSeconds: 5,     // Gossip every 5 seconds
-				Dimensions: []RateLimitDimension{
-					{
-						Name:          "per_ip",
-						Keys:          []string{"IP"},
-						Limit:         60,
-						WindowSeconds: 60,
+		Defaults: DefaultsConfig{
+			Domain:                 "mail.example.com",
+			MaxMessageSize:         10 * 1024 * 1024, // 10MB
+			TimeoutSeconds:         10,
+			ShutdownTimeoutSeconds: 60,
+			MaxConnections:         100,
+		},
+		Servers: []ServerConfig{
+			// Default MX relay server
+			{
+				Name:       "default-relay",
+				Type:       "relay",
+				ListenAddr: ":25",
+				TLS: ServerTLSConfig{
+					Enabled:  true,
+					Mode:     "starttls",
+					Required: false,
+				},
+				SPF: ServerSPFConfig{
+					Enabled: true,
+				},
+				DKIM: ServerDKIMConfig{
+					Enabled: true,
+					Mode:    "check",
+				},
+				DMARC: ServerDMARCConfig{
+					Enabled:                true,
+					RejectPolicyAction:     "reject",
+					QuarantinePolicyAction: "junk",
+				},
+				ARC: ServerARCConfig{
+					Enabled: true,
+					Mode:    "check",
+				},
+				DNSBL: ServerDNSBLConfig{
+					Enabled: true,
+				},
+				DNSChecks: ServerDNSChecksConfig{
+					RequireRDNS:     true,
+					RequireSenderMX: true,
+				},
+				Junk: ServerJunkConfig{
+					RejectNullSender: true,
+					CheckHeaders:     []string{"X-Spam-Flag", "X-Junk"},
+					ApplyAction:      "header",
+					SubjectPattern:   "[spam] %s",
+					Header:           "X-Spam",
+				},
+				MaxMessageSize: 10 * 1024 * 1024, // 10MB
+				Limits: ServerLimitsConfig{
+					MaxConnections:      100,
+					MaxConnectionsPerIP: 10,
+				},
+				RateLimit: RateLimitConfig{
+					Enabled:               true,
+					GossipEnabled:         false,
+					GossipIntervalSeconds: 5,
+					Dimensions: []RateLimitDimension{
+						{
+							Name:          "per_ip",
+							Keys:          []string{"IP"},
+							Limit:         60,
+							WindowSeconds: 60,
+						},
 					},
 				},
-			},
-			Distributed: DistributedLimitsConfig{
-				Enabled:                  false, // Disabled by default
-				GlobalMaxPerIP:           0,     // Disabled by default
-				GossipIntervalSeconds:    5,     // Gossip every 5 seconds
-				S3SyncIntervalSeconds:    30,    // Sync with S3 every 30 seconds
-				RecipientCacheTTLSeconds: 900,   // Cache recipient results for 15 minutes
+				Distributed: DistributedLimitsConfig{
+					Enabled:                  false,
+					GlobalMaxPerIP:           0,
+					GossipIntervalSeconds:    5,
+					S3SyncIntervalSeconds:    30,
+					RecipientCacheTTLSeconds: 900,
+				},
 			},
 		},
 		DNS: DNSConfig{
@@ -364,7 +556,10 @@ func DefaultConfig() Config {
 			BindPort: 7946,       // Standard memberlist port
 			Peers:    []string{}, // No peers by default
 		},
-		LogFormat: "text",
-		Local:     false,
+		Logging: LoggingConfig{
+			Level:  "info",
+			Format: "console",
+		},
+		Local: false,
 	}
 }

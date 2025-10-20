@@ -7,21 +7,21 @@ import (
 
 // Metrics holds all Prometheus metrics for the SMTP relay
 type Metrics struct {
-	// SMTP connection metrics
-	SMTPConnectionsTotal       prometheus.Counter
-	SMTPConnectionsActive      prometheus.Gauge
-	SMTPConnectionsPerIPActive *prometheus.GaugeVec
-	SMTPConnectionDuration     prometheus.Histogram
-	SMTPMessagesReceived       prometheus.Counter
-	SMTPMessagesRejected       *prometheus.CounterVec
-	SMTPMessageSize            prometheus.Histogram
+	// SMTP connection metrics (per-server)
+	SMTPConnectionsTotal       *prometheus.CounterVec   // Labels: server_name, server_type
+	SMTPConnectionsActive      *prometheus.GaugeVec     // Labels: server_name, server_type
+	SMTPConnectionsPerIPActive *prometheus.GaugeVec     // Labels: server_name, ip
+	SMTPConnectionDuration     *prometheus.HistogramVec // Labels: server_name, server_type
+	SMTPMessagesReceived       *prometheus.CounterVec   // Labels: server_name, server_type
+	SMTPMessagesRejected       *prometheus.CounterVec   // Labels: server_name, server_type, reason
+	SMTPMessageSize            *prometheus.HistogramVec // Labels: server_name, server_type
 
-	// SMTP validation metrics
-	SMTPSPFChecks       *prometheus.CounterVec
-	SMTPDMARCChecks     *prometheus.CounterVec
-	SMTPDKIMChecks      *prometheus.CounterVec
-	SMTPARCChecks       *prometheus.CounterVec
-	SMTPBlacklistChecks *prometheus.CounterVec
+	// SMTP validation metrics (per-server)
+	SMTPSPFChecks       *prometheus.CounterVec // Labels: server_name, result
+	SMTPDMARCChecks     *prometheus.CounterVec // Labels: server_name, result
+	SMTPDKIMChecks      *prometheus.CounterVec // Labels: server_name, result
+	SMTPARCChecks       *prometheus.CounterVec // Labels: server_name, result
+	SMTPBlacklistChecks *prometheus.CounterVec // Labels: server_name, result
 
 	// HTTP destination metrics
 	HTTPRequestsTotal   *prometheus.CounterVec
@@ -87,83 +87,83 @@ func New(namespace string) *Metrics {
 	}
 
 	return &Metrics{
-		// SMTP connection metrics
-		SMTPConnectionsTotal: promauto.NewCounter(prometheus.CounterOpts{
+		// SMTP connection metrics (per-server)
+		SMTPConnectionsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "connections_total",
-			Help:      "Total number of SMTP connections accepted",
-		}),
-		SMTPConnectionsActive: promauto.NewGauge(prometheus.GaugeOpts{
+			Help:      "Total number of SMTP connections accepted per server",
+		}, []string{"server_name", "server_type"}),
+		SMTPConnectionsActive: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "connections_active",
-			Help:      "Current number of active SMTP connections",
-		}),
+			Help:      "Current number of active SMTP connections per server",
+		}, []string{"server_name", "server_type"}),
 		SMTPConnectionsPerIPActive: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "connections_per_ip_active",
-			Help:      "Current number of active connections per IP address",
-		}, []string{"ip"}),
-		SMTPConnectionDuration: promauto.NewHistogram(prometheus.HistogramOpts{
+			Help:      "Current number of active connections per IP address and server",
+		}, []string{"server_name", "ip"}),
+		SMTPConnectionDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "connection_duration_seconds",
-			Help:      "Duration of SMTP connections in seconds",
+			Help:      "Duration of SMTP connections in seconds per server",
 			Buckets:   prometheus.DefBuckets,
-		}),
-		SMTPMessagesReceived: promauto.NewCounter(prometheus.CounterOpts{
+		}, []string{"server_name", "server_type"}),
+		SMTPMessagesReceived: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "messages_received_total",
-			Help:      "Total number of messages received via SMTP",
-		}),
+			Help:      "Total number of messages received via SMTP per server",
+		}, []string{"server_name", "server_type"}),
 		SMTPMessagesRejected: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "messages_rejected_total",
-			Help:      "Total number of messages rejected",
-		}, []string{"reason"}),
-		SMTPMessageSize: promauto.NewHistogram(prometheus.HistogramOpts{
+			Help:      "Total number of messages rejected per server",
+		}, []string{"server_name", "server_type", "reason"}),
+		SMTPMessageSize: promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "message_size_bytes",
-			Help:      "Size of received messages in bytes",
+			Help:      "Size of received messages in bytes per server",
 			Buckets:   prometheus.ExponentialBuckets(1024, 2, 15), // 1KB to 16MB
-		}),
+		}, []string{"server_name", "server_type"}),
 
-		// SMTP validation metrics
+		// SMTP validation metrics (per-server)
 		SMTPSPFChecks: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "spf_checks_total",
-			Help:      "Total number of SPF checks performed",
-		}, []string{"result"}),
+			Help:      "Total number of SPF checks performed per server",
+		}, []string{"server_name", "result"}),
 		SMTPDMARCChecks: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "dmarc_checks_total",
-			Help:      "Total number of DMARC checks performed",
-		}, []string{"result"}),
+			Help:      "Total number of DMARC checks performed per server",
+		}, []string{"server_name", "result"}),
 		SMTPDKIMChecks: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "dkim_checks_total",
-			Help:      "Total number of DKIM checks performed",
-		}, []string{"result"}),
+			Help:      "Total number of DKIM checks performed per server",
+		}, []string{"server_name", "result"}),
 		SMTPARCChecks: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "arc_checks_total",
-			Help:      "Total number of ARC (Authenticated Received Chain) checks performed",
-		}, []string{"result"}),
+			Help:      "Total number of ARC (Authenticated Received Chain) checks performed per server",
+		}, []string{"server_name", "result"}),
 		SMTPBlacklistChecks: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "smtp",
 			Name:      "blacklist_checks_total",
-			Help:      "Total number of blacklist checks performed",
-		}, []string{"result"}),
+			Help:      "Total number of blacklist checks performed per server",
+		}, []string{"server_name", "result"}),
 
 		// HTTP destination metrics
 		HTTPRequestsTotal: promauto.NewCounterVec(prometheus.CounterOpts{

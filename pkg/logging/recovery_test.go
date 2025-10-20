@@ -1,15 +1,15 @@
 package logging
 
 import (
+	"io"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 func TestRecoverPanic(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Test with panic
 	func() {
@@ -22,7 +22,7 @@ func TestRecoverPanic(t *testing.T) {
 }
 
 func TestRecoverPanicNoPanic(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Test without panic
 	func() {
@@ -34,7 +34,7 @@ func TestRecoverPanicNoPanic(t *testing.T) {
 }
 
 func TestRecoverPanicWithCallback(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	var callbackCalled bool
 	var panicValue any
 
@@ -56,7 +56,7 @@ func TestRecoverPanicWithCallback(t *testing.T) {
 }
 
 func TestRecoverPanicWithCallbackPanic(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Test with callback that panics (should be caught)
 	func() {
@@ -71,7 +71,7 @@ func TestRecoverPanicWithCallbackPanic(t *testing.T) {
 }
 
 func TestRecoverPanicWithCallbackNil(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Test with nil callback
 	func() {
@@ -83,7 +83,7 @@ func TestRecoverPanicWithCallbackNil(t *testing.T) {
 }
 
 func TestSafeGo(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	var wg sync.WaitGroup
 
 	// Test SafeGo with panic
@@ -100,7 +100,7 @@ func TestSafeGo(t *testing.T) {
 }
 
 func TestSafeGoNoPanic(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	var wg sync.WaitGroup
 	executed := false
 
@@ -120,7 +120,7 @@ func TestSafeGoNoPanic(t *testing.T) {
 }
 
 func TestSafeGoWithCallback(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	callbackCalled := make(chan bool, 1)
 
 	// Test SafeGoWithCallback
@@ -140,7 +140,7 @@ func TestSafeGoWithCallback(t *testing.T) {
 }
 
 func TestWrapHandler(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	called := false
 
 	// Create wrapped handler
@@ -160,7 +160,7 @@ func TestWrapHandler(t *testing.T) {
 }
 
 func TestWrapHandlerNoPanic(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	called := false
 
 	// Create wrapped handler

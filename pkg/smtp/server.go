@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-
+	"log/slog"
 	"net"
 	net_http "net/http"
 	"net/mail"
@@ -31,7 +31,6 @@ import (
 
 	"github.com/emersion/go-msgauth/authres"
 	"github.com/emersion/go-smtp"
-	"go.uber.org/zap"
 )
 
 const (
@@ -78,25 +77,43 @@ type RoutingClient interface {
 // Backend implements smtp.Backend interface for our custom SMTP server.
 // It manages the overall server configuration and creates new sessions for incoming connections.
 type Backend struct {
-	Config         *config.Config         // Server configuration (ports, TLS, domains, etc.)
+	ServerConfig   *config.ServerConfig   // Server-specific configuration (this server instance)
+	GlobalConfig   *config.Config         // Global configuration (shared across servers)
 	StatsManager   *stats.Manager         // IP and domain reputation tracking
 	CircuitBreaker *poster.CircuitBreaker // Circuit breaker for destination HTTP calls
 	HTTPClient     *net_http.Client       // HTTP client for posting emails to destination
-	Logger         *zap.Logger            // Structured logger for debugging and monitoring
+	Logger         *slog.Logger           // Structured logger for debugging and monitoring
 	DNSResolver    *net.Resolver          // Custom DNS resolver (uses config.DNS.Servers or system default)
 	Metrics        *metrics.Metrics       // Prometheus metrics for observability
 
 	// Connection tracking for graceful shutdown and DoS protection
-	ActiveSessionsWg   *sync.WaitGroup       // Tracks active SMTP sessions
-	ActiveSessionCount *atomic.Int64         // Current number of active sessions (for observability)
-	ShutdownChan       chan struct{}         // Signals shutdown to new connections
-	ConnTracker        *ConnectionTracker    // Tracks connections to enforce limits
-	DistTracker        *DistributedTracker   // Optional: Distributed connection tracking
-	RateLimiter        *RateLimiter          // Rate limiter to prevent rapid connection attempts
-	ARCSigner          *validation.ARCSigner // Optional: ARC signer for adding ARC headers
-	RoutingClient      RoutingClient         // Optional: Routing/aliasing client
-	DeliveryQueue      DeliveryQueue         // Optional: Async delivery queue (used with routing)
-	SRSRewriter        SRSRewriter           // Optional: SRS rewriter for forwarding
+	ActiveSessionsWg   *sync.WaitGroup     // Tracks active SMTP sessions
+	ActiveSessionCount *atomic.Int64       // Current number of active sessions (for observability)
+	ShutdownChan       chan struct{}       // Signals shutdown to new connections
+	ConnTracker        *ConnectionTracker  // Tracks connections to enforce limits
+	DistTracker        *DistributedTracker // Optional: Distributed connection tracking
+	RateLimiter        *RateLimiter        // Rate limiter to prevent rapid connection attempts
+
+	// Authentication and signing (for submission servers)
+	Authenticator Authenticator         // Optional: Authenticates users (submission servers)
+	DKIMSigner    DKIMSigner            // Optional: Signs outbound mail with DKIM (submission servers)
+	ARCSigner     *validation.ARCSigner // Optional: ARC signer for adding ARC headers
+
+	// Routing and delivery
+	RoutingClient RoutingClient // Optional: Routing/aliasing client
+	DeliveryQueue DeliveryQueue // Optional: Async delivery queue (used with routing)
+	SRSRewriter   SRSRewriter   // Optional: SRS rewriter for forwarding
+}
+
+// Authenticator interface for SMTP AUTH
+type Authenticator interface {
+	Authenticate(username, password string) (bool, error)
+	CanSendAs(authenticatedUser, fromAddress string) bool
+}
+
+// DKIMSigner interface for signing outbound mail
+type DKIMSigner interface {
+	SignEmail(rawEmail string) (string, error)
 }
 
 // SRSRewriter defines the interface for Sender Rewriting Scheme operations
@@ -143,7 +160,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 	// Record connection attempt in metrics
 	if be.Metrics != nil {
-		be.Metrics.SMTPConnectionsTotal.Inc()
+		be.Metrics.SMTPConnectionsTotal.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type).Inc()
 	}
 
 	// Track whether session was successfully created for connection cleanup
@@ -156,11 +173,11 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 			RemoteAddr: remoteAddr,
 		}
 		if err := be.RateLimiter.CheckRateLimit(sessionCtx); err != nil {
-			be.Logger.Warn("Rate limit exceeded", zap.String("remote_addr", remoteAddr), zap.Error(err))
+			be.Logger.Warn("Rate limit exceeded", "remote_addr", remoteAddr, "error", err)
 
 			// Record rejection in metrics
 			if be.Metrics != nil {
-				be.Metrics.SMTPMessagesRejected.WithLabelValues("rate_limit").Inc()
+				be.Metrics.SMTPMessagesRejected.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type, "rate_limit").Inc()
 			}
 
 			return nil, &smtp.SMTPError{
@@ -177,7 +194,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	if be.DistTracker != nil {
 		// Distributed tracker wraps local tracker
 		if err := be.DistTracker.TryAcquire(remoteAddr); err != nil {
-			be.Logger.Warn("Distributed connection limit exceeded", zap.String("remote_addr", remoteAddr), zap.Error(err))
+			be.Logger.Warn("Distributed connection limit exceeded", "remote_addr", remoteAddr, "error", err)
 			return nil, &smtp.SMTPError{
 				Code:         421,
 				EnhancedCode: smtp.EnhancedCode{4, 3, 2},
@@ -192,7 +209,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		}()
 	} else if tracker != nil {
 		if err := tracker.TryAcquire(remoteAddr); err != nil {
-			be.Logger.Warn("Connection limit exceeded", zap.String("remote_addr", remoteAddr), zap.Error(err))
+			be.Logger.Warn("Connection limit exceeded", "remote_addr", remoteAddr, "error", err)
 			return nil, &smtp.SMTPError{
 				Code:         421,
 				EnhancedCode: smtp.EnhancedCode{4, 3, 2},
@@ -215,12 +232,12 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		if be.ActiveSessionCount != nil {
 			count := be.ActiveSessionCount.Add(1)
 			be.Logger.Debug("Session count incremented",
-				zap.Int64("active_sessions", count),
-				zap.String("remote_addr", remoteAddr))
+				"active_sessions", count,
+				"remote_addr", remoteAddr)
 
 			// Update Prometheus gauge for active connections
 			if be.Metrics != nil {
-				be.Metrics.SMTPConnectionsActive.Set(float64(count))
+				be.Metrics.SMTPConnectionsActive.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type).Set(float64(count))
 			}
 		}
 
@@ -228,9 +245,9 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		defer func() {
 			if r := recover(); r != nil {
 				be.Logger.Error("Panic in NewSession - recovering",
-					zap.String("remote_addr", remoteAddr),
-					zap.Any("panic", r),
-					zap.Stack("stack"))
+					"remote_addr", remoteAddr,
+					"panic", r,
+					"stack", "")
 
 				// Decrement counter and call Done() since we won't reach Logout()
 				if be.ActiveSessionCount != nil {
@@ -244,57 +261,81 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		}()
 	}
 
-	be.Logger.Info("New session", zap.String("remote_addr", remoteAddr))
+	be.Logger.Info("New session", "remote_addr", remoteAddr)
 
 	ipStr := stats.GetIPFromRemoteAddr(remoteAddr)
 	hasRDNS := true
 
-	// Perform security checks in production mode
-	if !be.Config.Local {
+	// Perform security checks in production mode (skip for submission servers with relaxed validation)
+	// Relay servers should validate, submission servers with skip_rdns/skip_dnsbl will skip
+	if !be.GlobalConfig.Local {
 		// Extract IP from address
 		host, _, err := net.SplitHostPort(remoteAddr)
 		if err != nil {
-			be.Logger.Error("Failed to parse remote address", zap.String("remote_addr", remoteAddr), zap.Error(err))
+			be.Logger.Error("Failed to parse remote address", "remote_addr", remoteAddr, "error", err)
 			return nil, ErrInternalServerError
 		}
 
 		// Parse IP address
 		ip := net.ParseIP(host)
 		if ip == nil {
-			be.Logger.Error("Failed to parse IP address", zap.String("host", host))
+			be.Logger.Error("Failed to parse IP address", "host", host)
 			return nil, ErrInternalServerError
 		}
 
 		// Check DNS blacklists (RBLs) to prevent spam
-		if be.Config.Blacklists.Enabled && len(be.Config.Blacklists.Lists) > 0 {
-			checker := blacklist.NewChecker(be.Config.Blacklists.Lists, time.Duration(be.Config.Blacklists.TimeoutSeconds)*time.Second, be.Logger)
+		if be.ServerConfig.DNSBL.Enabled && len(be.ServerConfig.DNSBL.Lists) > 0 {
+			timeoutSecs := be.ServerConfig.DNSBL.TimeoutSeconds
+			if timeoutSecs == 0 {
+				timeoutSecs = 3 // Default timeout
+			}
+			checker := blacklist.NewChecker(be.ServerConfig.DNSBL.Lists, time.Duration(timeoutSecs)*time.Second, be.Logger)
 			isListed, reason, err := checker.CheckIP(ip)
 			if err != nil {
-				be.Logger.Error("Blacklist check error", zap.Error(err), zap.String("ip", host))
+				be.Logger.Error("Blacklist check error", "error", err, "ip", host)
 				// Don't reject on blacklist check errors - fail open for availability
 			} else if isListed {
-				be.Logger.Warn("Rejecting session - blacklisted", zap.String("remote_addr", remoteAddr), zap.String("reason", reason))
-
-				// Record blacklist rejection in metrics
-				if be.Metrics != nil {
-					be.Metrics.SMTPBlacklistChecks.WithLabelValues("blocked").Inc()
-					be.Metrics.SMTPMessagesRejected.WithLabelValues("blacklist").Inc()
+				// Determine action based on configuration
+				action := be.ServerConfig.DNSBL.Action
+				if action == "" {
+					action = "reject" // Default to reject
 				}
 
-				return nil, &smtp.SMTPError{
-					Code:         550,
-					EnhancedCode: smtp.EnhancedCode{5, 7, 1},
-					Message:      fmt.Sprintf("your IP address is blacklisted: %s", reason),
+				be.Logger.Warn("IP blacklisted", "remote_addr", remoteAddr, "reason", reason, "action", action)
+
+				// Record blacklist detection in metrics
+				if be.Metrics != nil {
+					be.Metrics.SMTPBlacklistChecks.WithLabelValues(be.ServerConfig.Name, "blocked").Inc()
+				}
+
+				switch action {
+				case "reject":
+					// Reject the connection
+					if be.Metrics != nil {
+						be.Metrics.SMTPMessagesRejected.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type, "blacklist").Inc()
+					}
+					return nil, &smtp.SMTPError{
+						Code:         550,
+						EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+						Message:      fmt.Sprintf("your IP address is blacklisted: %s", reason),
+					}
+				case "junk":
+					// Mark for junk but allow connection
+					be.Logger.Info("Allowing blacklisted IP but marking as junk", "ip", host, "reason", reason)
+					// Note: The session will be created and marked as junk
+				case "none":
+					// Just log but take no action
+					be.Logger.Info("Blacklisted IP detected but no action configured", "ip", host, "reason", reason)
 				}
 			} else if be.Metrics != nil {
 				// Record successful blacklist check
-				be.Metrics.SMTPBlacklistChecks.WithLabelValues("pass").Inc()
+				be.Metrics.SMTPBlacklistChecks.WithLabelValues(be.ServerConfig.Name, "pass").Inc()
 			}
 		}
 
 		// Require valid reverse DNS (PTR record) - helps prevent spam from compromised hosts
 		// Use context with timeout to prevent hanging on unresponsive DNS servers
-		rdnsCtx, rdnsCancel := context.WithTimeout(context.Background(), time.Duration(be.Config.DNS.TimeoutSeconds)*time.Second)
+		rdnsCtx, rdnsCancel := context.WithTimeout(context.Background(), time.Duration(be.GlobalConfig.DNS.TimeoutSeconds)*time.Second)
 		names, err := be.DNSResolver.LookupAddr(rdnsCtx, host)
 		rdnsCancel()
 		if err != nil || len(names) == 0 {
@@ -306,17 +347,17 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 			// Record rejection in metrics
 			if be.Metrics != nil {
-				be.Metrics.SMTPMessagesRejected.WithLabelValues("no_rdns").Inc()
+				be.Metrics.SMTPMessagesRejected.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type, "no_rdns").Inc()
 			}
 
-			be.Logger.Warn("Rejecting session - no reverse DNS", zap.String("remote_addr", remoteAddr))
+			be.Logger.Warn("Rejecting session - no reverse DNS", "remote_addr", remoteAddr)
 			return nil, &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 7, 25},
 				Message:      "no reverse DNS record for IP address",
 			}
 		}
-		be.Logger.Debug("Reverse DNS lookup", zap.String("host", host), zap.Any("names", names))
+		be.Logger.Debug("Reverse DNS lookup", "host", host, "names", names)
 
 		// Record connection in stats
 		if be.StatsManager != nil {
@@ -324,7 +365,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 			// Check IP reputation
 			if shouldDeny, reputation := be.StatsManager.CheckIPReputation(ipStr); shouldDeny {
-				be.Logger.Warn("Rejecting session - poor reputation", zap.String("remote_addr", remoteAddr), zap.Float64("score", reputation))
+				be.Logger.Warn("Rejecting session - poor reputation", "remote_addr", remoteAddr, "score", reputation)
 				return nil, &smtp.SMTPError{
 					Code:         421,
 					EnhancedCode: smtp.EnhancedCode{4, 7, 1},
@@ -347,7 +388,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	// Set initial idle timeout
 	if err := c.Conn().SetDeadline(time.Now().Add(IdleTimeout)); err != nil {
 		cancel()
-		be.Logger.Error("Failed to set deadline", zap.Error(err))
+		be.Logger.Error("Failed to set deadline", "error", err)
 		return nil, ErrInternalServerError
 	}
 
@@ -355,32 +396,37 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	traceID := generateTraceID()
 
 	session := &Session{
-		conn:           c,
-		helo:           "",
-		from:           "",
-		to:             make([]string, 0),
-		remoteAddr:     c.Conn().RemoteAddr().String(),
-		config:         be.Config,
-		tlsState:       tlsState,
-		statsManager:   be.StatsManager,
-		circuitBreaker: be.CircuitBreaker,
-		httpClient:     be.HTTPClient,
-		dnsResolver:    be.DNSResolver,
-		connTracker:    be.ConnTracker,
-		distTracker:    be.DistTracker,
-		rateLimiter:    be.RateLimiter,
-		metrics:        be.Metrics,
-		ctx:            ctx,
-		Logger:         be.Logger.With(zap.String("trace_id", traceID)),
-		cancel:         cancel,
-		sessionsWg:     be.ActiveSessionsWg,
-		sessionCount:   be.ActiveSessionCount,
-		commandState:   stateNew, // Explicitly initialize command state
-		traceID:        traceID,
-		arcSigner:      be.ARCSigner,     // Add ARC signer (nil if disabled)
-		routingClient:  be.RoutingClient, // Add routing client (nil if disabled)
-		deliveryQueue:  be.DeliveryQueue, // Add delivery queue (nil if disabled)
-		srsRewriter:    be.SRSRewriter,   // Add SRS rewriter (nil if disabled)
+		conn:              c,
+		helo:              "",
+		from:              "",
+		to:                make([]string, 0),
+		remoteAddr:        c.Conn().RemoteAddr().String(),
+		serverConfig:      be.ServerConfig,
+		globalConfig:      be.GlobalConfig,
+		tlsState:          tlsState,
+		statsManager:      be.StatsManager,
+		circuitBreaker:    be.CircuitBreaker,
+		httpClient:        be.HTTPClient,
+		dnsResolver:       be.DNSResolver,
+		connTracker:       be.ConnTracker,
+		distTracker:       be.DistTracker,
+		rateLimiter:       be.RateLimiter,
+		metrics:           be.Metrics,
+		ctx:               ctx,
+		Logger:            be.Logger.With("trace_id", traceID),
+		cancel:            cancel,
+		sessionsWg:        be.ActiveSessionsWg,
+		sessionCount:      be.ActiveSessionCount,
+		commandState:      stateNew, // Explicitly initialize command state
+		traceID:           traceID,
+		isAuthenticated:   false,            // Not authenticated initially
+		authenticatedUser: "",               // No user yet
+		authenticator:     be.Authenticator, // Authenticator (nil if not submission)
+		dkimSigner:        be.DKIMSigner,    // DKIM signer (nil if not enabled)
+		arcSigner:         be.ARCSigner,     // ARC signer (nil if disabled)
+		routingClient:     be.RoutingClient, // Routing client (nil if disabled)
+		deliveryQueue:     be.DeliveryQueue, // Delivery queue (nil if disabled)
+		srsRewriter:       be.SRSRewriter,   // SRS rewriter (nil if disabled)
 	}
 
 	sessionCreated = true
@@ -396,7 +442,8 @@ type Session struct {
 	to             []string               // Recipient email addresses (RCPT TO)
 	remoteAddr     string                 // Remote IP:port of the client
 	mailData       bytes.Buffer           // Buffer to store the raw email body
-	config         *config.Config         // Server configuration
+	serverConfig   *config.ServerConfig   // Server-specific configuration (this server instance)
+	globalConfig   *config.Config         // Global configuration (shared across servers)
 	tlsState       *tls.ConnectionState   // TLS connection state (nil if not using TLS)
 	statsManager   *stats.Manager         // IP and domain reputation tracking
 	circuitBreaker *poster.CircuitBreaker // Circuit breaker for HTTP destination
@@ -407,10 +454,16 @@ type Session struct {
 	rateLimiter    *RateLimiter           // Multi-dimensional rate limiter
 	metrics        *metrics.Metrics       // Prometheus metrics for observability
 	ctx            context.Context        // Session context with deadline for timeout
-	Logger         *zap.Logger            // Structured logger for this session
+	Logger         *slog.Logger           // Structured logger for this session
 	cancel         context.CancelFunc     // Cancel function to clean up resources
 	sessionsWg     *sync.WaitGroup        // WaitGroup to track active sessions for graceful shutdown
 	sessionCount   *atomic.Int64          // Pointer to active session counter for observability
+
+	// Authentication (for submission servers)
+	isAuthenticated   bool          // Whether user has authenticated via SMTP AUTH
+	authenticatedUser string        // Username from successful authentication
+	authenticator     Authenticator // Authenticator for this session
+	dkimSigner        DKIMSigner    // DKIM signer for outbound mail
 
 	// Anti-spam tracking
 	isJunk       bool     // Whether this message is considered junk/spam
@@ -446,6 +499,22 @@ const (
 	stateData        // After DATA command (currently receiving message)
 )
 
+// serverName returns the server name for metric labeling
+func (s *Session) serverName() string {
+	if s.serverConfig != nil {
+		return s.serverConfig.Name
+	}
+	return "unknown"
+}
+
+// serverType returns the server type for metric labeling
+func (s *Session) serverType() string {
+	if s.serverConfig != nil {
+		return s.serverConfig.Type
+	}
+	return "unknown"
+}
+
 // Helo is called for the HELO/EHLO command.
 // RFC 5321 requires this to be the first command in an SMTP session.
 func (s *Session) Helo(hostname string) error {
@@ -456,7 +525,7 @@ func (s *Session) Helo(hostname string) error {
 
 	// Enforce command sequence - HELO/EHLO must be first
 	if s.commandState != stateNew {
-		s.Logger.Warn("Rejecting HELO/EHLO - already received", zap.String("remote_addr", s.remoteAddr), zap.Int("state", int(s.commandState)))
+		s.Logger.Warn("Rejecting HELO/EHLO - already received", "remote_addr", s.remoteAddr, "state", int(s.commandState))
 		return &smtp.SMTPError{
 			Code:         503,
 			EnhancedCode: smtp.EnhancedCode{5, 5, 1},
@@ -465,11 +534,11 @@ func (s *Session) Helo(hostname string) error {
 	}
 
 	// Validate HELO hostname for security (skip in local development mode)
-	if !s.config.Local {
+	if !s.globalConfig.Local {
 		// Reject if HELO claims to be our own domain or a subdomain (spoofing attempt)
 		// Case-insensitive check for robustness.
-		if strings.HasSuffix(strings.ToLower(hostname), "."+strings.ToLower(s.config.SMTP.Domain)) || strings.EqualFold(hostname, s.config.SMTP.Domain) {
-			s.Logger.Warn("Rejecting HELO/EHLO - client using our domain", zap.String("remote_addr", s.remoteAddr), zap.String("hostname", hostname), zap.String("our_domain", s.config.SMTP.Domain))
+		if strings.HasSuffix(strings.ToLower(hostname), "."+strings.ToLower(s.serverConfig.Domain)) || strings.EqualFold(hostname, s.serverConfig.Domain) {
+			s.Logger.Warn("Rejecting HELO/EHLO - client using our domain", "remote_addr", s.remoteAddr, "hostname", hostname, "our_domain", s.serverConfig.Domain)
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 7, 8},
@@ -479,7 +548,7 @@ func (s *Session) Helo(hostname string) error {
 
 		// Reject localhost or single-label hostnames
 		if hostname == "localhost" || !strings.Contains(hostname, ".") {
-			s.Logger.Warn("Rejecting HELO/EHLO - invalid hostname", zap.String("remote_addr", s.remoteAddr), zap.String("hostname", hostname))
+			s.Logger.Warn("Rejecting HELO/EHLO - invalid hostname", "remote_addr", s.remoteAddr, "hostname", hostname)
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 7, 1},
@@ -490,7 +559,7 @@ func (s *Session) Helo(hostname string) error {
 		// Reject bare IP addresses. Per RFC 5321, IP literals must be in brackets.
 		isIPLiteral := strings.HasPrefix(hostname, "[") && strings.HasSuffix(hostname, "]")
 		if !isIPLiteral && net.ParseIP(hostname) != nil {
-			s.Logger.Warn("Rejecting HELO/EHLO - bare IP", zap.String("remote_addr", s.remoteAddr), zap.String("ip", hostname))
+			s.Logger.Warn("Rejecting HELO/EHLO - bare IP", "remote_addr", s.remoteAddr, "ip", hostname)
 			return &smtp.SMTPError{
 				Code:    550,
 				Message: "HELO with bare IP must use [IP] format",
@@ -499,7 +568,7 @@ func (s *Session) Helo(hostname string) error {
 
 		// Check for invalid characters
 		if strings.ContainsAny(hostname, " \t\r\n") {
-			s.Logger.Warn("Rejecting HELO/EHLO - invalid characters", zap.String("remote_addr", s.remoteAddr))
+			s.Logger.Warn("Rejecting HELO/EHLO - invalid characters", "remote_addr", s.remoteAddr)
 			return &smtp.SMTPError{
 				Code:    550,
 				Message: "invalid characters in HELO hostname",
@@ -507,10 +576,10 @@ func (s *Session) Helo(hostname string) error {
 		}
 
 		// Optional: Verify HELO hostname has valid DNS records
-		if s.config.Blacklists.CheckHELOResolves {
-			resolves, reason, err := blacklist.CheckHELOResolves(hostname, time.Duration(s.config.Blacklists.TimeoutSeconds)*time.Second)
+		if s.globalConfig.Blacklists.CheckHELOResolves {
+			resolves, reason, err := blacklist.CheckHELOResolves(hostname, time.Duration(s.globalConfig.Blacklists.TimeoutSeconds)*time.Second)
 			if err != nil || !resolves {
-				s.Logger.Warn("Rejecting HELO/EHLO - hostname check failed", zap.String("remote_addr", s.remoteAddr), zap.String("hostname", hostname), zap.String("reason", reason))
+				s.Logger.Warn("Rejecting HELO/EHLO - hostname check failed", "remote_addr", s.remoteAddr, "hostname", hostname, "reason", reason)
 				return &smtp.SMTPError{
 					Code:         550,
 					EnhancedCode: smtp.EnhancedCode{5, 7, 27},
@@ -522,7 +591,7 @@ func (s *Session) Helo(hostname string) error {
 
 	s.helo = hostname
 	s.commandState = stateHelo
-	s.Logger.Info("HELO/EHLO received", zap.String("remote_addr", s.remoteAddr), zap.String("hostname", hostname))
+	s.Logger.Info("HELO/EHLO received", "remote_addr", s.remoteAddr, "hostname", hostname)
 
 	// Reset to idle timeout to wait for the next command
 	if err := s.setCommandTimeout(IdleTimeout); err != nil {
@@ -555,13 +624,13 @@ func (s *Session) setCommandTimeout(timeout time.Duration) error {
 	// Check if session deadline has been exceeded
 	select {
 	case <-s.ctx.Done():
-		s.Logger.Warn("Session deadline exceeded", zap.String("remote_addr", s.remoteAddr))
+		s.Logger.Warn("Session deadline exceeded", "remote_addr", s.remoteAddr)
 		return ErrSessionTimeout
 	default:
 		// Set the command timeout
 		deadline := time.Now().Add(timeout)
 		if err := s.conn.Conn().SetDeadline(deadline); err != nil {
-			s.Logger.Error("Failed to set deadline", zap.Error(err))
+			s.Logger.Error("Failed to set deadline", "error", err)
 			return ErrInternalServerError
 		}
 		return nil
@@ -573,8 +642,8 @@ func (s *Session) setCommandTimeout(timeout time.Duration) error {
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	// Reject null sender <> (bounce messages) to prevent backscatter
 	// Check this FIRST before any other processing for security
-	if from == "" || from == "<>" {
-		s.Logger.Warn("Rejecting null sender", zap.String("remote_addr", s.remoteAddr))
+	if s.serverConfig.Junk.RejectNullSender && (from == "" || from == "<>") {
+		s.Logger.Warn("Rejecting null sender", "remote_addr", s.remoteAddr)
 		return &smtp.SMTPError{
 			Code:         550,
 			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
@@ -588,7 +657,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		// EHLO was handled by go-smtp internally, update our state
 		s.helo = heloHostname
 		s.commandState = stateHelo
-		s.Logger.Debug("HELO/EHLO set via conn.Hostname", zap.String("remote_addr", s.remoteAddr), zap.String("hostname", heloHostname))
+		s.Logger.Debug("HELO/EHLO set via conn.Hostname", "remote_addr", s.remoteAddr, "hostname", heloHostname)
 	}
 
 	// Set timeout for this command
@@ -598,7 +667,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 
 	// Check if HELO/EHLO has been received
 	if s.helo == "" {
-		s.Logger.Warn("Rejecting MAIL FROM - no HELO/EHLO", zap.String("remote_addr", s.remoteAddr))
+		s.Logger.Warn("Rejecting MAIL FROM - no HELO/EHLO", "remote_addr", s.remoteAddr)
 		return &smtp.SMTPError{
 			Code:         503,
 			EnhancedCode: smtp.EnhancedCode{5, 5, 1},
@@ -608,8 +677,8 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 
 	// Update and check TLS state (skip in local mode)
 	s.updateTLSState()
-	if !s.config.Local && s.tlsState == nil {
-		s.Logger.Warn("Rejecting MAIL FROM - TLS required", zap.String("from", from))
+	if !s.globalConfig.Local && s.tlsState == nil {
+		s.Logger.Warn("Rejecting MAIL FROM - TLS required", "from", from)
 		return ErrTLSRequiredStartTLS
 	}
 
@@ -623,7 +692,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 
 		// Check domain reputation
 		if shouldDeny, reputation := s.statsManager.CheckDomainReputation(senderDomain); shouldDeny {
-			s.Logger.Warn("Rejecting MAIL FROM - poor domain reputation", zap.String("from", from), zap.Float64("score", reputation))
+			s.Logger.Warn("Rejecting MAIL FROM - poor domain reputation", "from", from, "score", reputation)
 			return &smtp.SMTPError{
 				Code:         421,
 				EnhancedCode: smtp.EnhancedCode{4, 7, 1},
@@ -637,7 +706,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	// This allows dynamic user management without syncing mailbox lists
 
 	// Perform SPF and MX checks in parallel (skip in local mode)
-	if !s.config.Local {
+	if !s.globalConfig.Local {
 		var wg sync.WaitGroup
 		var spfMu sync.Mutex // Protect SPF result writes
 
@@ -650,17 +719,17 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 				defer wg.Done()
 				res, err := validation.CheckSPF(context.Background(), ip, s.helo, from)
 				if err != nil {
-					s.Logger.Debug("SPF check error", zap.String("from", from), zap.Error(err))
+					s.Logger.Debug("SPF check error", "from", from, "error", err)
 					if s.metrics != nil {
-						s.metrics.SMTPSPFChecks.WithLabelValues("error").Inc()
+						s.metrics.SMTPSPFChecks.WithLabelValues(s.serverName(), "error").Inc()
 					}
 				} else if res != nil {
 					resultStr := string(*res)
-					s.Logger.Debug("SPF result", zap.String("from", from), zap.String("result", resultStr))
+					s.Logger.Debug("SPF result", "from", from, "result", resultStr)
 
 					// Record SPF check result in metrics
 					if s.metrics != nil {
-						s.metrics.SMTPSPFChecks.WithLabelValues(resultStr).Inc()
+						s.metrics.SMTPSPFChecks.WithLabelValues(s.serverName(), resultStr).Inc()
 					}
 
 					spfMu.Lock()
@@ -678,20 +747,20 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		// MX check in parallel
 		var mxErr error
 		var hasMX bool
-		if s.config.SMTP.RequireSenderMX && senderDomain != "" {
+		if s.serverConfig.DNSChecks.RequireSenderMX && senderDomain != "" {
 			wg.Add(1)
 			logging.SafeGo(s.Logger, "mx-check", func() {
 				defer wg.Done()
 				var err error
-				hasMX, err = validation.CheckMXRecord(context.Background(), senderDomain, s.dnsResolver, time.Duration(s.config.DNS.TimeoutSeconds)*time.Second)
+				hasMX, err = validation.CheckMXRecord(context.Background(), senderDomain, s.dnsResolver, time.Duration(s.globalConfig.DNS.TimeoutSeconds)*time.Second)
 				if err != nil {
-					s.Logger.Warn("MX lookup error for sender domain", zap.String("from", from), zap.String("domain", senderDomain), zap.Error(err))
+					s.Logger.Warn("MX lookup error for sender domain", "from", from, "domain", senderDomain, "error", err)
 					mxErr = err
 					// Continue despite lookup error - don't fail on temporary DNS issues
 				} else if !hasMX {
-					s.Logger.Warn("Sender domain has no MX records", zap.String("from", from), zap.String("domain", senderDomain))
+					s.Logger.Warn("Sender domain has no MX records", "from", from, "domain", senderDomain)
 				} else {
-					s.Logger.Debug("Sender domain has valid MX records", zap.String("from", from), zap.String("domain", senderDomain))
+					s.Logger.Debug("Sender domain has valid MX records", "from", from, "domain", senderDomain)
 				}
 			})
 		}
@@ -700,7 +769,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		wg.Wait()
 
 		// Check MX result after parallel execution
-		if s.config.SMTP.RequireSenderMX && senderDomain != "" && mxErr == nil && !hasMX {
+		if s.serverConfig.DNSChecks.RequireSenderMX && senderDomain != "" && mxErr == nil && !hasMX {
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 7, 1},
@@ -721,7 +790,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 			To:         s.to, // May be empty at this point
 		}
 		if err := s.rateLimiter.CheckRateLimit(sessionCtx); err != nil {
-			s.Logger.Warn("Rate limit exceeded for sender", zap.String("from", from), zap.Error(err))
+			s.Logger.Warn("Rate limit exceeded for sender", "from", from, "error", err)
 			return &smtp.SMTPError{
 				Code:         421,
 				EnhancedCode: smtp.EnhancedCode{4, 3, 2},
@@ -731,9 +800,9 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	}
 
 	if s.tlsState != nil {
-		s.Logger.Info("MAIL FROM", zap.String("from", from), zap.String("remote_addr", s.remoteAddr), zap.String("tls", tlsVersionString(s.tlsState.Version)))
+		s.Logger.Info("MAIL FROM", "from", from, "remote_addr", s.remoteAddr, "tls", tlsVersionString(s.tlsState.Version))
 	} else {
-		s.Logger.Info("MAIL FROM", zap.String("from", from), zap.String("remote_addr", s.remoteAddr), zap.String("tls", "none"))
+		s.Logger.Info("MAIL FROM", "from", from, "remote_addr", s.remoteAddr, "tls", "none")
 	}
 
 	// Reset to idle timeout to wait for the next command
@@ -754,7 +823,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 	// Enforce command sequence - must have MAIL FROM before RCPT TO
 	if s.commandState != stateMail && s.commandState != stateRcpt {
-		s.Logger.Warn("Rejecting RCPT TO - bad sequence", zap.String("remote_addr", s.remoteAddr))
+		s.Logger.Warn("Rejecting RCPT TO - bad sequence", "remote_addr", s.remoteAddr)
 		return &smtp.SMTPError{
 			Code:         503,
 			EnhancedCode: smtp.EnhancedCode{5, 5, 1},
@@ -764,12 +833,12 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 	// Update and check TLS state (skip in local mode)
 	s.updateTLSState()
-	if !s.config.Local && s.tlsState == nil {
-		s.Logger.Warn("Rejecting RCPT TO - TLS required", zap.String("to", to))
+	if !s.globalConfig.Local && s.tlsState == nil {
+		s.Logger.Warn("Rejecting RCPT TO - TLS required", "to", to)
 		return ErrTLSRequired
 	}
 
-	s.Logger.Info("RCPT TO", zap.String("to", to), zap.String("remote_addr", s.remoteAddr))
+	s.Logger.Info("RCPT TO", "to", to, "remote_addr", s.remoteAddr)
 
 	// Decode SRS addresses if this is an SRS bounce/reply
 	// This converts SRS0=...@relay.mizu.com back to original@example.com
@@ -777,8 +846,8 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		decoded, err := s.srsRewriter.Decode(to)
 		if err != nil {
 			s.Logger.Warn("Failed to decode SRS address",
-				zap.String("srs_address", to),
-				zap.Error(err))
+				"srs_address", to,
+				"error", err)
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 1, 1},
@@ -786,15 +855,15 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 			}
 		}
 		s.Logger.Info("Decoded SRS address",
-			zap.String("srs_address", to),
-			zap.String("original_address", decoded))
+			"srs_address", to,
+			"original_address", decoded)
 		to = decoded // Use decoded address for all subsequent processing
 	}
 
 	// Enforce single recipient per transaction
 	// This ensures per-recipient validation at the destination and proper retry behavior
 	if len(s.to) >= 1 {
-		s.Logger.Warn("Rejecting RCPT TO - multiple recipients", zap.String("to", to))
+		s.Logger.Warn("Rejecting RCPT TO - multiple recipients", "to", to)
 		return &smtp.SMTPError{
 			Code:         452,
 			EnhancedCode: smtp.EnhancedCode{4, 5, 3},
@@ -814,7 +883,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 			To:         s.to,
 		}
 		if err := s.rateLimiter.CheckRateLimit(sessionCtx); err != nil {
-			s.Logger.Warn("Rate limit exceeded for recipient", zap.String("to", to), zap.Error(err))
+			s.Logger.Warn("Rate limit exceeded for recipient", "to", to, "error", err)
 			return &smtp.SMTPError{
 				Code:         421,
 				EnhancedCode: smtp.EnhancedCode{4, 3, 2},
@@ -824,15 +893,15 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	}
 
 	// Perform routing lookup if enabled and configured to validate during RCPT
-	if s.routingClient != nil && s.config.Routing.Enabled && s.config.Routing.ValidateDuringRcpt {
+	if s.routingClient != nil && s.globalConfig.Routing.Enabled && s.globalConfig.Routing.ValidateDuringRcpt {
 		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
 		// Note: subject is not available during RCPT TO, will be empty
 		result, err := s.routingClient.Resolve(s.ctx, to, s.from, ipStr, "")
 		if err != nil {
-			s.Logger.Warn("Routing lookup failed", zap.String("to", to), zap.Error(err))
+			s.Logger.Warn("Routing lookup failed", "to", to, "error", err)
 
 			// Handle fallback based on configuration
-			if s.config.Routing.FallbackOnError == "reject" {
+			if s.globalConfig.Routing.FallbackOnError == "reject" {
 				return &smtp.SMTPError{
 					Code:         550,
 					EnhancedCode: smtp.EnhancedCode{5, 4, 0},
@@ -850,9 +919,9 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		// Check if recipient is accepted
 		if !result.Accepted {
 			s.Logger.Info("Recipient rejected by routing",
-				zap.String("to", to),
-				zap.String("error_code", result.ErrorCode),
-				zap.String("error_message", result.ErrorMessage))
+				"to", to,
+				"error_code", result.ErrorCode,
+				"error_message", result.ErrorMessage)
 
 			// Map error codes to SMTP errors
 			switch result.ErrorCode {
@@ -892,10 +961,10 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		// Store routing result for use in DATA
 		s.routingResult = result
 		s.Logger.Info("Recipient accepted by routing",
-			zap.String("to", to),
-			zap.Strings("deliver_to", result.DeliverTo),
-			zap.Strings("forward_to", result.ForwardTo),
-			zap.Bool("is_catchall", result.IsCatchall))
+			"to", to,
+			"deliver_to", result.DeliverTo,
+			"forward_to", result.ForwardTo,
+			"is_catchall", result.IsCatchall)
 	}
 
 	// Reset to idle timeout to wait for the next command
@@ -917,7 +986,7 @@ func (s *Session) Data(r io.Reader) (err error) {
 	defer s.mailData.Reset() // Ensure buffer is cleared after processing.
 
 	// 2. Handle local mode separately for development and testing.
-	if s.config.Local {
+	if s.globalConfig.Local {
 		return s.handleLocalMode(rawEmail)
 	}
 
@@ -947,22 +1016,22 @@ func (s *Session) readMessageData(r io.Reader) (string, error) {
 
 	// Enforce command sequence - must have at least one recipient.
 	if s.commandState != stateRcpt {
-		s.Logger.Warn("Rejecting DATA - bad sequence", zap.String("remote_addr", s.remoteAddr))
+		s.Logger.Warn("Rejecting DATA - bad sequence", "remote_addr", s.remoteAddr)
 		return "", &smtp.SMTPError{Code: 503, EnhancedCode: smtp.EnhancedCode{5, 5, 1}, Message: "bad sequence of commands - RCPT TO first"}
 	}
 
 	// Final update and check of TLS state.
 	s.updateTLSState()
-	if !s.config.Local && s.tlsState == nil {
+	if !s.globalConfig.Local && s.tlsState == nil {
 		s.Logger.Warn("Rejecting DATA - TLS required")
 		return "", ErrTLSRequired
 	}
 
-	s.Logger.Info("Receiving DATA", zap.String("from", s.from), zap.Strings("to", s.to))
+	s.Logger.Info("Receiving DATA", "from", s.from, "to", s.to)
 
 	// Read the entire email into a buffer, respecting the size limit.
-	if _, err := io.Copy(&s.mailData, io.LimitReader(r, int64(s.config.SMTP.MaxMessageSize))); err != nil {
-		s.Logger.Error("Failed to read message data", zap.Error(err))
+	if _, err := io.Copy(&s.mailData, io.LimitReader(r, int64(s.serverConfig.MaxMessageSize))); err != nil {
+		s.Logger.Error("Failed to read message data", "error", err)
 		return "", err
 	}
 
@@ -970,13 +1039,13 @@ func (s *Session) readMessageData(r io.Reader) (string, error) {
 
 	// Record message received and size in metrics
 	if s.metrics != nil {
-		s.metrics.SMTPMessagesReceived.Inc()
-		s.metrics.SMTPMessageSize.Observe(float64(len(rawEmail)))
+		s.metrics.SMTPMessagesReceived.WithLabelValues(s.serverName(), s.serverType()).Inc()
+		s.metrics.SMTPMessageSize.WithLabelValues(s.serverName(), s.serverType()).Observe(float64(len(rawEmail)))
 	}
 
 	// Check for empty message.
 	if strings.TrimSpace(rawEmail) == "" {
-		s.Logger.Warn("Rejecting empty message", zap.String("from", s.from))
+		s.Logger.Warn("Rejecting empty message", "from", s.from)
 		return "", &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "empty message not accepted"}
 	}
 
@@ -988,7 +1057,7 @@ func (s *Session) handleLocalMode(rawEmail string) error {
 	s.Logger.Info("=== LOCAL MODE: EMAIL CONTENT START ===")
 	fmt.Println(rawEmail)
 	s.Logger.Info("=== LOCAL MODE: EMAIL CONTENT END ===")
-	s.Logger.Info("Local mode - received email", zap.String("from", s.from), zap.Strings("to", s.to))
+	s.Logger.Info("Local mode - received email", "from", s.from, "to", s.to)
 	return nil
 }
 
@@ -1001,77 +1070,108 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 	}
 
 	// DMARC validation
-	dmarcResult, err := validation.CheckDMARC(context.Background(), rawEmail, s.spfResult, s.config.SMTP.DMARCQuarantineAsJunk, s.Logger)
+	quarantineAction := s.serverConfig.DMARC.QuarantinePolicyAction
+	if quarantineAction == "" {
+		quarantineAction = "junk" // Default to junk for quarantine
+	}
+	dmarcResult, err := validation.CheckDMARC(context.Background(), rawEmail, s.spfResult, quarantineAction, s.Logger)
 	s.dmarcResult = dmarcResult // Store for ARC signing
 	if err != nil {
-		s.Logger.Warn("DMARC validation error", zap.Error(err))
+		s.Logger.Warn("DMARC validation error", "error", err)
 		if s.metrics != nil {
-			s.metrics.SMTPDMARCChecks.WithLabelValues("error").Inc()
+			s.metrics.SMTPDMARCChecks.WithLabelValues(s.serverName(), "error").Inc()
 		}
 	} else if dmarcResult != nil {
 		// Record DMARC check result in metrics
 		if s.metrics != nil {
 			if dmarcResult.Pass {
-				s.metrics.SMTPDMARCChecks.WithLabelValues("pass").Inc()
+				s.metrics.SMTPDMARCChecks.WithLabelValues(s.serverName(), "pass").Inc()
 			} else {
-				s.metrics.SMTPDMARCChecks.WithLabelValues("fail").Inc()
+				s.metrics.SMTPDMARCChecks.WithLabelValues(s.serverName(), "fail").Inc()
 			}
 		}
 
-		// If DMARC policy is 'reject' and validation failed, reject the message.
+		// Handle DMARC policy=reject failures based on configured action
 		if !dmarcResult.Pass && dmarcResult.Policy == "reject" {
-			s.recordDMARCFailure()
-			s.Logger.Warn("Rejecting email - DMARC reject policy", zap.String("from", s.from), zap.Strings("reasons", dmarcResult.FailureReasons))
-
-			// Record rejection in metrics
-			if s.metrics != nil {
-				s.metrics.SMTPMessagesRejected.WithLabelValues("dmarc_reject").Inc()
+			rejectAction := s.serverConfig.DMARC.RejectPolicyAction
+			if rejectAction == "" {
+				rejectAction = "reject" // Default to reject for reject policy
 			}
 
-			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "message rejected due to DMARC policy"}
+			switch rejectAction {
+			case "reject":
+				s.recordDMARCFailure()
+				s.Logger.Warn("Rejecting email - DMARC reject policy", "from", s.from, "reasons", dmarcResult.FailureReasons)
+				if s.metrics != nil {
+					s.metrics.SMTPMessagesRejected.WithLabelValues(s.serverName(), s.serverType(), "dmarc_reject").Inc()
+				}
+				return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "message rejected due to DMARC policy"}
+			case "junk":
+				s.isJunk = true
+				s.Logger.Info("Marking message as junk - DMARC reject policy", "from", s.from)
+			case "none":
+				s.Logger.Debug("DMARC reject policy - no action configured", "from", s.from)
+			}
+		}
+
+		// Handle DMARC policy=quarantine failures
+		if !dmarcResult.Pass && dmarcResult.Policy == "quarantine" {
+			switch quarantineAction {
+			case "reject":
+				s.recordDMARCFailure()
+				s.Logger.Warn("Rejecting email - DMARC quarantine policy with reject action", "from", s.from, "reasons", dmarcResult.FailureReasons)
+				if s.metrics != nil {
+					s.metrics.SMTPMessagesRejected.WithLabelValues(s.serverName(), s.serverType(), "dmarc_quarantine").Inc()
+				}
+				return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "message rejected due to DMARC quarantine policy"}
+			case "junk":
+				// Already handled by CheckDMARC via ShouldBeJunk
+			case "none":
+				s.Logger.Debug("DMARC quarantine policy - no action configured", "from", s.from)
+			}
 		}
 
 		// Mark as junk if DMARC suggests it.
 		if dmarcResult.ShouldBeJunk {
 			s.isJunk = true
 			s.junkReasons = append(s.junkReasons, "DMARC check failed or missing with unaligned auth")
-			s.Logger.Info("Marking as junk - DMARC", zap.Strings("reasons", dmarcResult.FailureReasons))
+			s.Logger.Info("Marking as junk - DMARC", "reasons", dmarcResult.FailureReasons)
 		}
 	}
 
 	// ARC (Authenticated Received Chain) validation
 	// ARC preserves email authentication results through forwarding intermediaries
-	if s.config.SMTP.ARCEnabled {
+	if s.serverConfig.ARC.Enabled && (s.serverConfig.ARC.Mode == "" || s.serverConfig.ARC.Mode == "check") {
 		arcResult, err := validation.CheckARC(context.Background(), rawEmail, s.Logger)
 		s.arcResult = arcResult // Store for ARC signing
 		if err != nil {
-			s.Logger.Warn("ARC validation error", zap.Error(err))
+			s.Logger.Warn("ARC validation error", "error", err)
 			if s.metrics != nil {
-				s.metrics.SMTPARCChecks.WithLabelValues("error").Inc()
+				s.metrics.SMTPARCChecks.WithLabelValues(s.serverName(), "error").Inc()
 			}
 		} else if arcResult != nil {
 			// Record ARC check result in metrics
 			if s.metrics != nil {
 				if arcResult.Pass {
-					s.metrics.SMTPARCChecks.WithLabelValues("pass").Inc()
+					s.metrics.SMTPARCChecks.WithLabelValues(s.serverName(), "pass").Inc()
 				} else {
-					s.metrics.SMTPARCChecks.WithLabelValues("fail").Inc()
+					s.metrics.SMTPARCChecks.WithLabelValues(s.serverName(), "fail").Inc()
 				}
 			}
 
 			// Log ARC validation result
 			s.Logger.Debug("ARC validation result",
-				zap.Bool("pass", arcResult.Pass),
-				zap.Bool("chain_valid", arcResult.ChainValid),
-				zap.Int("instance", arcResult.Instance),
-				zap.Strings("failure_reasons", arcResult.FailureReasons))
+				"pass", arcResult.Pass,
+				"chain_valid", arcResult.ChainValid,
+				"instance", arcResult.Instance,
+				"failure_reasons", arcResult.FailureReasons)
 
 			// If ARC chain is broken (invalid), mark as suspicious but don't reject
 			// ARC failure doesn't mean the message is spam, just that the chain is broken
 			if !arcResult.Pass && arcResult.Instance > 0 {
 				s.Logger.Info("ARC chain validation failed",
-					zap.Int("instance", arcResult.Instance),
-					zap.Strings("reasons", arcResult.FailureReasons))
+					"instance", arcResult.Instance,
+					"reasons", arcResult.FailureReasons)
 				// Note: We don't mark as junk solely based on ARC failure
 				// ARC is informational and helps with forwarded emails
 			}
@@ -1080,7 +1180,7 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 			// at an earlier hop, this can override DMARC failures for forwarded emails
 			if arcResult.Pass && arcResult.Instance > 0 && s.isJunk {
 				s.Logger.Info("ARC chain valid - message likely forwarded, reconsidering junk status",
-					zap.Int("arc_instance", arcResult.Instance))
+					"arc_instance", arcResult.Instance)
 				// Note: In a full implementation, we'd parse ARC-Authentication-Results
 				// to see if earlier hops validated successfully
 			}
@@ -1088,7 +1188,7 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 	}
 
 	if s.isJunk {
-		s.Logger.Info("Message marked as junk", zap.String("from", s.from), zap.Strings("reasons", s.junkReasons))
+		s.Logger.Info("Message marked as junk", "from", s.from, "reasons", s.junkReasons)
 	}
 
 	return nil
@@ -1107,7 +1207,7 @@ func (s *Session) deliverMessage(rawEmail string) error {
 
 	emailWithHeaders := InjectMizuHeaders(
 		rawEmail,
-		s.config.SMTP.Domain,
+		s.serverConfig.Domain,
 		s.remoteAddr,
 		s.helo,
 		s.traceID,
@@ -1120,22 +1220,63 @@ func (s *Session) deliverMessage(rawEmail string) error {
 
 	s.Logger.Debug("Injected Received and X-Mizu-* headers")
 
-	// Step 2: Sign email with ARC if enabled
-	// ARC signature covers the complete message including our added headers
+	// Apply junk modifications if message is marked as junk
+	if s.isJunk {
+		action := s.serverConfig.Junk.ApplyAction
+		if action == "" {
+			action = "header" // Default action
+		}
+
+		switch action {
+		case "header":
+			// Add custom junk header
+			headerName := s.serverConfig.Junk.Header
+			if headerName == "" {
+				headerName = "X-Spam" // Default header
+			}
+			emailWithHeaders = addJunkHeader(emailWithHeaders, headerName)
+			s.Logger.Debug("Added junk header", "header", headerName)
+
+		case "subject":
+			// Modify subject with pattern
+			pattern := s.serverConfig.Junk.SubjectPattern
+			if pattern == "" {
+				pattern = "[spam] %s" // Default pattern
+			}
+			emailWithHeaders = modifySubject(emailWithHeaders, pattern)
+			s.Logger.Debug("Modified subject for junk", "pattern", pattern)
+		}
+	}
+
+	// Step 2: Sign email with DKIM if enabled (for submission servers)
+	// DKIM signing should happen before ARC signing
 	signedEmail := emailWithHeaders
-	if s.arcSigner != nil && s.config.SMTP.ARCSign.Enabled {
+	if s.dkimSigner != nil && s.serverConfig.DKIM.Enabled && s.serverConfig.DKIM.Mode == "sign" {
 		var err error
-		signedEmail, err = s.arcSigner.SignEmail(emailWithHeaders, s.spfResult, s.dmarcResult, s.arcResult)
+		signedEmail, err = s.dkimSigner.SignEmail(signedEmail)
 		if err != nil {
-			s.Logger.Warn("Failed to sign email with ARC", zap.Error(err))
+			s.Logger.Warn("Failed to sign email with DKIM", "error", err)
+			// Don't fail delivery on DKIM signing error, just log and continue
+		} else {
+			s.Logger.Debug("Email signed with DKIM")
+		}
+	}
+
+	// Step 3: Sign email with ARC if enabled
+	// ARC signature covers the complete message including our added headers and DKIM signature
+	if s.arcSigner != nil && s.serverConfig.ARC.Enabled && s.serverConfig.ARC.Mode == "sign" {
+		var err error
+		signedEmail, err = s.arcSigner.SignEmail(signedEmail, s.spfResult, s.dmarcResult, s.arcResult)
+		if err != nil {
+			s.Logger.Warn("Failed to sign email with ARC", "error", err)
 			// Don't fail delivery on ARC signing error, just log and continue
 		} else {
 			s.Logger.Debug("Email signed with ARC headers")
 		}
 	}
 
-	// Step 3: Choose delivery path based on routing configuration
-	if s.routingClient != nil && s.config.Routing.Enabled && s.deliveryQueue != nil && s.config.Queue.Enabled {
+	// Step 4: Choose delivery path based on routing configuration
+	if s.routingClient != nil && s.globalConfig.Routing.Enabled && s.deliveryQueue != nil && s.globalConfig.Queue.Enabled {
 		// Async delivery with routing
 		return s.deliverWithRouting(signedEmail)
 	}
@@ -1161,14 +1302,14 @@ func (s *Session) deliverWithRouting(signedEmail string) error {
 			freshResult, err := s.routingClient.Resolve(s.ctx, s.to[0], s.from, ipStr, subject)
 			if err != nil {
 				s.Logger.Warn("Fresh routing lookup with subject failed, using cached result",
-					zap.String("recipient", s.to[0]),
-					zap.Error(err))
+					"recipient", s.to[0],
+					"error", err)
 				routingResult = s.routingResult // Fall back to cached result
 			} else {
 				routingResult = freshResult
 				s.Logger.Debug("Used fresh routing lookup with subject",
-					zap.String("recipient", s.to[0]),
-					zap.String("subject", subject))
+					"recipient", s.to[0],
+					"subject", subject)
 			}
 		} else {
 			routingResult = s.routingResult
@@ -1194,9 +1335,9 @@ func (s *Session) deliverWithRouting(signedEmail string) error {
 	for _, job := range jobs {
 		if err := s.deliveryQueue.Enqueue(job); err != nil {
 			s.Logger.Error("Failed to enqueue delivery job",
-				zap.String("job_id", job.ID),
-				zap.String("endpoint", job.Endpoint),
-				zap.Error(err))
+				"job_id", job.ID,
+				"endpoint", job.Endpoint,
+				"error", err)
 
 			return &smtp.SMTPError{
 				Code:         451,
@@ -1206,17 +1347,17 @@ func (s *Session) deliverWithRouting(signedEmail string) error {
 		}
 
 		s.Logger.Info("Delivery job enqueued",
-			zap.String("job_id", job.ID),
-			zap.String("trace_id", s.traceID),
-			zap.String("endpoint", job.Endpoint),
-			zap.Strings("recipients", job.Recipients),
-			zap.Bool("is_forwarding", job.IsForwarding))
+			"job_id", job.ID,
+			"trace_id", s.traceID,
+			"endpoint", job.Endpoint,
+			"recipients", job.Recipients,
+			"is_forwarding", job.IsForwarding)
 	}
 
 	// Return success immediately - async delivery
 	s.Logger.Info("Message queued for async delivery",
-		zap.Int("job_count", len(jobs)),
-		zap.String("trace_id", s.traceID))
+		"job_count", len(jobs),
+		"trace_id", s.traceID)
 
 	// Record as successful delivery for stats (we accepted it)
 	s.finalizeSuccessfulDelivery()
@@ -1233,12 +1374,12 @@ func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.Resolv
 		endpoint := routing.DeliveryEndpoint
 		isCustomEndpoint := (routing.DeliveryEndpoint != "")
 		if endpoint == "" {
-			endpoint = s.config.Delivery.URL
+			endpoint = s.globalConfig.Delivery.URL
 		}
 
 		// For custom endpoints from routing, don't send API key
 		// Custom endpoints should have authentication in their URL
-		apiKey := s.config.Delivery.APIKey
+		apiKey := s.globalConfig.Delivery.APIKey
 		if routing.DeliveryEndpoint != "" {
 			apiKey = "" // Custom endpoint - no API key (auth should be in URL)
 		}
@@ -1263,9 +1404,9 @@ func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.Resolv
 		jobs = append(jobs, job)
 
 		s.Logger.Debug("Created delivery job",
-			zap.String("job_id", job.ID),
-			zap.String("endpoint", endpoint),
-			zap.Strings("recipients", routing.DeliverTo))
+			"job_id", job.ID,
+			"endpoint", endpoint,
+			"recipients", routing.DeliverTo)
 	}
 
 	// Job for forwarding
@@ -1273,12 +1414,12 @@ func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.Resolv
 		endpoint := routing.ForwardEndpoint
 		isCustomEndpoint := (routing.ForwardEndpoint != "")
 		if endpoint == "" {
-			endpoint = s.config.Forwarding.URL
+			endpoint = s.globalConfig.Forwarding.URL
 		}
 
 		// For custom endpoints from routing, don't send API key
 		// Custom endpoints should have authentication in their URL
-		apiKey := s.config.Forwarding.APIKey
+		apiKey := s.globalConfig.Forwarding.APIKey
 		if routing.ForwardEndpoint != "" {
 			apiKey = "" // Custom endpoint - no API key (auth should be in URL)
 		}
@@ -1290,13 +1431,13 @@ func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.Resolv
 			rewritten, err := s.srsRewriter.Encode(s.from)
 			if err != nil {
 				s.Logger.Warn("Failed to apply SRS rewriting, using original sender",
-					zap.String("from", s.from),
-					zap.Error(err))
+					"from", s.from,
+					"error", err)
 			} else {
 				srsFrom = rewritten
 				s.Logger.Debug("Applied SRS rewriting for forwarding",
-					zap.String("original_from", s.from),
-					zap.String("srs_from", srsFrom))
+					"original_from", s.from,
+					"srs_from", srsFrom)
 			}
 		}
 
@@ -1320,10 +1461,10 @@ func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.Resolv
 		jobs = append(jobs, job)
 
 		s.Logger.Debug("Created forwarding job",
-			zap.String("job_id", job.ID),
-			zap.String("endpoint", endpoint),
-			zap.Strings("recipients", routing.ForwardTo),
-			zap.String("srs_from", srsFrom))
+			"job_id", job.ID,
+			"endpoint", endpoint,
+			"recipients", routing.ForwardTo,
+			"srs_from", srsFrom)
 	}
 
 	return jobs
@@ -1336,7 +1477,7 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 		// Check cache for all recipients
 		for _, recipient := range s.to {
 			if found, isBlocked, reason := s.distTracker.IsRecipientCached(recipient); found {
-				s.Logger.Sugar().Infof("Recipient %s found in cache: %s", recipient, reason)
+				s.Logger.Info(fmt.Sprintf("Recipient %s found in cache: %s", recipient, reason))
 				if isBlocked {
 					// Recipient is blocked (403)
 					return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "Recipient blocked by destination"}
@@ -1350,9 +1491,9 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 	err := poster.PostEmailToDestinationWithContext(
 		s.ctx,
 		signedEmail,
-		s.config.Delivery.URL,
-		s.config.Delivery.APIKey,
-		s.config.Delivery.MaxRetryAttempts,
+		s.globalConfig.Delivery.URL,
+		s.globalConfig.Delivery.APIKey,
+		s.globalConfig.Delivery.MaxRetryAttempts,
 		s.isJunk,
 		s.from,
 		s.to,
@@ -1363,7 +1504,7 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 	)
 
 	if err != nil {
-		s.Logger.Sugar().Errorf("Failed to deliver message to destination: %v", err)
+		s.Logger.Error(fmt.Sprintf("Failed to deliver message to destination: %v", err))
 
 		// Check if this is a recipient-specific error that should be cached
 		var httpErr *poster.HTTPStatusError
@@ -1407,7 +1548,7 @@ func (s *Session) finalizeSuccessfulDelivery() {
 			s.statsManager.RecordHamDelivery(ipStr, s.senderDomain)
 		}
 	}
-	s.Logger.Info("Email delivered successfully", zap.String("from", s.from), zap.Strings("to", s.to))
+	s.Logger.Info("Email delivered successfully", "from", s.from, "to", s.to)
 }
 
 // recordDMARCFailure is a helper to record DMARC failure stats.
@@ -1425,7 +1566,7 @@ func (s *Session) validateHeaders(rawEmail string) error {
 	// Use net/mail to parse headers robustly.
 	msg, err := mail.ReadMessage(strings.NewReader(rawEmail))
 	if err != nil {
-		s.Logger.Warn("Rejecting message - failed to parse headers", zap.String("from", s.from), zap.Error(err))
+		s.Logger.Warn("Rejecting message - failed to parse headers", "from", s.from, "error", err)
 		return &smtp.SMTPError{
 			Code:    550,
 			Message: "invalid header format",
@@ -1438,30 +1579,56 @@ func (s *Session) validateHeaders(rawEmail string) error {
 
 	headers := msg.Header
 
-	// Check for external spam flags if enabled
-	if s.config.SMTP.CheckXSpamFlag {
-		if spamFlag := headers.Get("X-Spam-Flag"); strings.EqualFold(spamFlag, "YES") {
-			s.Logger.Warn("Rejecting message - X-Spam-Flag YES", zap.String("from", s.from))
-			// Record this as a junk message for stats
-			if s.statsManager != nil {
-				ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-				s.statsManager.RecordJunkMessage(ipStr, s.senderDomain)
-			}
-			return &smtp.SMTPError{
-				Code:         550,
-				EnhancedCode: smtp.EnhancedCode{5, 7, 1},
-				Message:      "Message identified as spam",
+	// Check for junk headers if configured
+	if len(s.serverConfig.Junk.CheckHeaders) > 0 {
+		for _, headerName := range s.serverConfig.Junk.CheckHeaders {
+			if headerValue := headers.Get(headerName); headerValue != "" {
+				// Header detected - apply configured action
+				action := s.serverConfig.Junk.ApplyAction
+				if action == "" {
+					action = "reject" // Default action
+				}
+
+				s.Logger.Info("Junk header detected", "from", s.from, "header", headerName, "value", headerValue, "action", action)
+
+				// Record this as a junk message for stats
+				if s.statsManager != nil {
+					ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
+					s.statsManager.RecordJunkMessage(ipStr, s.senderDomain)
+				}
+
+				switch action {
+				case "reject":
+					s.Logger.Warn("Rejecting message - junk header present", "from", s.from, "header", headerName)
+					return &smtp.SMTPError{
+						Code:         550,
+						EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+						Message:      "Message identified as junk",
+					}
+				case "header":
+					// Mark message as junk (will add header in Data method)
+					s.isJunk = true
+					s.Logger.Info("Marking message as junk - will add header", "from", s.from)
+				case "subject":
+					// Mark message as junk (will modify subject in Data method)
+					s.isJunk = true
+					s.Logger.Info("Marking message as junk - will modify subject", "from", s.from)
+				case "warn":
+					// Just log, don't modify or reject
+					s.Logger.Warn("Junk header detected but no action taken", "from", s.from, "header", headerName)
+				}
+				break // Only process first matching header
 			}
 		}
 	}
 
 	// Check required headers
 	if _, hasFrom := headers["From"]; !hasFrom {
-		s.Logger.Warn("Rejecting message - missing From header", zap.String("from", s.from))
+		s.Logger.Warn("Rejecting message - missing From header", "from", s.from)
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "missing required From header"}
 	}
 	if _, hasDate := headers["Date"]; !hasDate {
-		s.Logger.Warn("Rejecting message - missing Date header", zap.String("from", s.from))
+		s.Logger.Warn("Rejecting message - missing Date header", "from", s.from)
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "missing required Date header"}
 	}
 
@@ -1469,7 +1636,7 @@ func (s *Session) validateHeaders(rawEmail string) error {
 	if _, hasMessageID := headers["Message-Id"]; !hasMessageID {
 		s.isJunk = true
 		s.junkReasons = append(s.junkReasons, "missing Message-ID header")
-		s.Logger.Info("Marking as junk - missing Message-ID", zap.String("from", s.from))
+		s.Logger.Info("Marking as junk - missing Message-ID", "from", s.from)
 	}
 
 	// Check for duplicate headers that should be unique
@@ -1479,7 +1646,7 @@ func (s *Session) validateHeaders(rawEmail string) error {
 			case "from", "date", "message-id", "subject", "to":
 				s.isJunk = true
 				s.junkReasons = append(s.junkReasons, fmt.Sprintf("duplicate %s header", headerKey))
-				s.Logger.Info("Marking as junk - duplicate header", zap.String("from", s.from), zap.String("header", headerKey))
+				s.Logger.Info("Marking as junk - duplicate header", "from", s.from, "header", headerKey)
 			}
 		}
 	}
@@ -1490,7 +1657,7 @@ func (s *Session) validateHeaders(rawEmail string) error {
 		if _, err := mail.ParseDate(dateHeaders[0]); err != nil {
 			s.isJunk = true
 			s.junkReasons = append(s.junkReasons, "invalid Date header format")
-			s.Logger.Info("Marking as junk - invalid Date format", zap.String("from", s.from), zap.Error(err))
+			s.Logger.Info("Marking as junk - invalid Date format", "from", s.from, "error", err)
 		}
 	}
 
@@ -1511,13 +1678,13 @@ func (s *Session) Reset() {
 
 	// Reset idle timeout after successful message
 	if err := s.setCommandTimeout(IdleTimeout); err != nil {
-		s.Logger.Error("Failed to reset idle timeout", zap.Error(err))
+		s.Logger.Error("Failed to reset idle timeout", "error", err)
 	}
 }
 
 // Logout is called when the session ends.
 func (s *Session) Logout() error {
-	s.Logger.Debug("Session logout", zap.String("remote_addr", s.remoteAddr))
+	s.Logger.Debug("Session logout", "remote_addr", s.remoteAddr)
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -1534,8 +1701,8 @@ func (s *Session) Logout() error {
 		if s.sessionCount != nil {
 			count := s.sessionCount.Add(-1)
 			s.Logger.Debug("Session count decremented",
-				zap.Int64("active_sessions", count),
-				zap.String("remote_addr", s.remoteAddr))
+				"active_sessions", count,
+				"remote_addr", s.remoteAddr)
 		}
 
 		s.sessionsWg.Done()

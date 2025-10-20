@@ -81,7 +81,7 @@ func TestDKIM_ValidSignature(t *testing.T) {
 	}
 
 	// Test DMARC validation with the signed email
-	result, err := CheckDMARC(context.Background(), signedEmail.String(), nil, false, nil)
+	result, err := CheckDMARC(context.Background(), signedEmail.String(), nil, "none", nil)
 	if err != nil {
 		t.Fatalf("CheckDMARC failed: %v", err)
 	}
@@ -122,7 +122,7 @@ This is a test email that has been tampered with.
 		return []string{"v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC="}, nil
 	}
 
-	result, err := CheckDMARC(context.Background(), rawEmail, nil, false, nil)
+	result, err := CheckDMARC(context.Background(), rawEmail, nil, "none", nil)
 	if err != nil {
 		t.Fatalf("CheckDMARC failed: %v", err)
 	}
@@ -145,7 +145,7 @@ Subject: No DKIM Signature
 This email has no DKIM signature.
 `
 
-	result, err := CheckDMARC(context.Background(), rawEmail, nil, false, nil)
+	result, err := CheckDMARC(context.Background(), rawEmail, nil, "none", nil)
 	if err != nil {
 		t.Fatalf("CheckDMARC failed: %v", err)
 	}
@@ -197,7 +197,7 @@ Email with multiple DKIM signatures.
 		return nil, fmt.Errorf("no key")
 	}
 
-	result, err := CheckDMARC(context.Background(), rawEmail, nil, false, nil)
+	result, err := CheckDMARC(context.Background(), rawEmail, nil, "none", nil)
 	if err != nil {
 		t.Fatalf("CheckDMARC failed: %v", err)
 	}
@@ -324,7 +324,7 @@ No valid DKIM signature.
 		Result: authres.SPFResult{Value: authres.ResultPass},
 	}
 
-	result, err := CheckDMARC(context.Background(), rawEmail, spfResult, false, nil)
+	result, err := CheckDMARC(context.Background(), rawEmail, spfResult, "none", nil)
 	if err != nil {
 		t.Fatalf("CheckDMARC failed: %v", err)
 	}
@@ -363,7 +363,7 @@ This should pass.
 	}
 
 	// Even without actual DKIM signature, test the logic
-	result, err := CheckDMARC(context.Background(), rawEmail, nil, true, nil)
+	result, err := CheckDMARC(context.Background(), rawEmail, nil, "junk", nil)
 	if err != nil {
 		t.Fatalf("CheckDMARC failed: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestDKIM_SignatureAge(t *testing.T) {
 			// modified verifications. Instead, let's test the age logic directly.
 
 			// Call CheckDMARC - it will generate new verifications, so we need a different approach
-			result, err := CheckDMARC(context.Background(), signedEmail.String(), nil, false, nil)
+			result, err := CheckDMARC(context.Background(), signedEmail.String(), nil, "none", nil)
 			if err != nil {
 				t.Fatalf("CheckDMARC failed: %v", err)
 			}
@@ -526,7 +526,7 @@ Subject: Expiration Test
 Test email.
 `
 
-	result, err := CheckDMARC(context.Background(), rawEmail, nil, false, nil)
+	result, err := CheckDMARC(context.Background(), rawEmail, nil, "none", nil)
 	if err != nil {
 		t.Fatalf("CheckDMARC failed: %v", err)
 	}

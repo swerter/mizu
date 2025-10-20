@@ -1,11 +1,13 @@
 package blacklist
 
 import (
+	"io"
+
 	"net"
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 func TestReverseIPAddress(t *testing.T) {
@@ -134,7 +136,7 @@ func TestCheckHELOResolves(t *testing.T) {
 }
 
 func TestNewChecker(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	lists := []string{"zen.spamhaus.org", "bl.spamcop.net"}
 	timeout := 3 * time.Second
 
@@ -158,7 +160,7 @@ func TestNewChecker(t *testing.T) {
 }
 
 func TestCheckerCheckIP_ValidIP(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Use a non-existent blacklist to ensure we get a clean non-listed result
 	checker := NewChecker([]string{"invalid-blacklist-that-does-not-exist.example"}, 1*time.Second, logger)
@@ -181,7 +183,7 @@ func TestCheckerCheckIP_ValidIP(t *testing.T) {
 }
 
 func TestCheckerCheckIP_InvalidIP(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	checker := NewChecker([]string{"zen.spamhaus.org"}, 1*time.Second, logger)
 
 	// Test with IPv6 (not supported)
@@ -202,7 +204,7 @@ func TestCheckerCheckIP_InvalidIP(t *testing.T) {
 }
 
 func TestCheckerCheckIP_Timeout(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Use very short timeout to test timeout behavior
 	checker := NewChecker([]string{"zen.spamhaus.org"}, 1*time.Nanosecond, logger)

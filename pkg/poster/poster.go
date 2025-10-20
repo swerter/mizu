@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // NewHTTPClient creates a new HTTP client with the specified timeout.
@@ -28,7 +28,7 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 // The traceID parameter is added as X-Trace-ID header for distributed tracing and log correlation.
 // The circuitBreaker parameter is optional - if provided, requests will be protected by the circuit breaker pattern.
 // The httpClient parameter specifies the HTTP client to use for requests (with configured timeout).
-func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *zap.Logger) error {
+func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *slog.Logger) error {
 	// If circuit breaker is provided and enabled, use it
 	if circuitBreaker != nil {
 		return circuitBreaker.Call(func() error {
@@ -41,7 +41,7 @@ func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, des
 }
 
 // postEmailWithRetries contains the actual retry logic
-func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, httpClient *http.Client, logger *zap.Logger) error {
+func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, httpClient *http.Client, logger *slog.Logger) error {
 	var lastErr error
 
 	// Ensure at least one attempt even if configured incorrectly
@@ -62,7 +62,7 @@ func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, 
 		// Backoff sequence: 0s (first attempt), 1s, 2s, 4s, 8s, etc.
 		if attempt > 0 {
 			backoff := time.Duration(1<<(attempt-1)) * time.Second
-			logger.Sugar().Infof("Retrying HTTP post to URL (attempt %d/%d) after %v delay", attempt+1, maxRetryAttempts, backoff)
+			logger.Info(fmt.Sprintf("Retrying HTTP post to URL (attempt %d/%d) after %v delay", attempt+1, maxRetryAttempts, backoff))
 
 			// Sleep with context awareness - allows early cancellation
 			select {
@@ -84,23 +84,23 @@ func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, 
 		// Determine if the error warrants a retry
 		// Non-retryable errors (like 4xx HTTP codes) fail immediately
 		if !IsRetryableError(err) {
-			logger.Sugar().Warnf("Non-retryable error posting to URL: %v", err)
+			logger.Warn(fmt.Sprintf("Non-retryable error posting to URL: %v", err))
 			return err
 		}
 
 		if attempt < maxRetryAttempts-1 {
-			logger.Sugar().Warnf("Retryable error posting to URL (attempt %d/%d): %v", attempt+1, maxRetryAttempts, err)
+			logger.Warn(fmt.Sprintf("Retryable error posting to URL (attempt %d/%d): %v", attempt+1, maxRetryAttempts, err))
 		}
 	}
 
 	// All retries exhausted
-	logger.Sugar().Errorf("All retry attempts exhausted (%d/%d) posting to URL: %v", maxRetryAttempts, maxRetryAttempts, lastErr)
+	logger.Error(fmt.Sprintf("All retry attempts exhausted (%d/%d) posting to URL: %v", maxRetryAttempts, maxRetryAttempts, lastErr))
 	return fmt.Errorf("failed after %d attempts: %w", maxRetryAttempts, lastErr)
 }
 
 // postEmailAttemptWithContext performs a single attempt to post the email with context support.
 // It sends the raw email as message/rfc822 content type with API key authentication.
-func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, isJunk bool, mailFrom string, mailTo []string, traceID string, httpClient *http.Client, logger *zap.Logger) error {
+func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, isJunk bool, mailFrom string, mailTo []string, traceID string, httpClient *http.Client, logger *slog.Logger) error {
 	if httpClient == nil {
 		return fmt.Errorf("httpClient cannot be nil")
 	}
@@ -115,7 +115,7 @@ func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinati
 
 	// Only set API key if provided (custom endpoints may use URL-based auth)
 	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey) // Authentication header
+		req.Header.Set("Authorization", "Bearer "+apiKey) // Bearer token authentication
 	}
 
 	// Add envelope addresses as headers
@@ -147,7 +147,7 @@ func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinati
 		return NewHTTPStatusError(resp.StatusCode, string(bodyBytes))
 	}
 
-	logger.Sugar().Infof("Successfully sent email to destination URL, status: %d", resp.StatusCode)
+	logger.Info(fmt.Sprintf("Successfully sent email to destination URL, status: %d", resp.StatusCode))
 	return nil
 }
 

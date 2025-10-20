@@ -1,15 +1,15 @@
 package smtp
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
-	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/poster"
 	"migadu/mizu/pkg/stats"
 
 	"github.com/emersion/go-smtp"
-	"go.uber.org/zap"
 )
 
 func TestMail_NullSenderRejection(t *testing.T) {
@@ -33,25 +33,24 @@ func TestMail_NullSenderRejection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a test session with mock connection
-			cfg := &config.Config{
-				Local: true, // Use local mode to skip TLS/SPF checks
-			}
-			statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+			cfg := testConfig()
+			statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			cbConfig := poster.CircuitBreakerConfig{
 				Enabled:          true,
 				FailureThreshold: 5,
 				Timeout:          30 * time.Second,
 				SuccessThreshold: 3,
 			}
-			cb := poster.NewCircuitBreaker(cbConfig, zap.NewNop(), nil)
+			cb := poster.NewCircuitBreaker(cbConfig, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 			session := &Session{
 				conn:           (*smtp.Conn)(nil),  // Set to nil, we'll bypass by setting helo directly
 				helo:           "test.example.com", // Set HELO to pass that check
-				config:         cfg,
+				serverConfig:   &cfg.Servers[0],
+				globalConfig:   cfg,
 				statsManager:   statsManager,
 				circuitBreaker: cb,
-				Logger:         zap.NewNop(),
+				Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 				remoteAddr:     "192.0.2.1:12345",
 			}
 
@@ -94,10 +93,8 @@ func TestMail_NullSenderPreventsBackscatter(t *testing.T) {
 	// Backscatter occurs when a server accepts mail with forged sender, then tries to
 	// send bounce messages to innocent parties.
 
-	cfg := &config.Config{
-		Local: true,
-	}
-	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, zap.NewNop())
+	cfg := testConfig()
+	statsManager := stats.NewManager(false, 0, "test", false, 0, nil, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer statsManager.Stop()
 	cbConfig := poster.CircuitBreakerConfig{
 		Enabled:          true,
@@ -105,15 +102,16 @@ func TestMail_NullSenderPreventsBackscatter(t *testing.T) {
 		Timeout:          30 * time.Second,
 		SuccessThreshold: 3,
 	}
-	cb := poster.NewCircuitBreaker(cbConfig, zap.NewNop(), nil)
+	cb := poster.NewCircuitBreaker(cbConfig, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
 	session := &Session{
 		conn:           (*smtp.Conn)(nil), // Set to nil, we'll bypass by setting helo directly
 		helo:           "attacker.example.com",
-		config:         cfg,
+		serverConfig:   &cfg.Servers[0],
+		globalConfig:   cfg,
 		statsManager:   statsManager,
 		circuitBreaker: cb,
-		Logger:         zap.NewNop(),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		remoteAddr:     "198.51.100.1:54321",
 	}
 

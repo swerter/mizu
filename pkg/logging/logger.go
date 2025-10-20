@@ -1,39 +1,32 @@
 package logging
 
 import (
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	"log/slog"
+	"os"
 )
 
-// Setup initializes a zap logger based on the provided format and verbosity.
-// It also replaces the global logger and redirects the standard log output.
-func Setup(format string, verbose bool) (*zap.Logger, error) {
-	var config zap.Config
+// Setup initializes a slog logger based on the provided format and verbosity.
+func Setup(format string, verbose bool) (*slog.Logger, error) {
+	var level slog.Level
+	if verbose {
+		level = slog.LevelDebug
+	} else {
+		level = slog.LevelInfo
+	}
 
+	var handler slog.Handler
 	if format == "json" {
-		config = zap.NewProductionConfig()
+		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: level,
+		})
 	} else {
-		config = zap.NewDevelopmentConfig()
-		config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-		config.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02 15:04:05.000")
+		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: level,
+		})
 	}
 
-	if !verbose {
-		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-	} else {
-		config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
-	}
-
-	logger, err := config.Build()
-	if err != nil {
-		return nil, err
-	}
-
-	// Replace global logger
-	zap.ReplaceGlobals(logger)
-
-	// Redirect standard log to zap
-	zap.RedirectStdLog(logger)
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
 
 	return logger, nil
 }

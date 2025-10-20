@@ -135,3 +135,54 @@ func buildAuthenticationSummary(spfResult *validation.SPFResult, dmarcResult *va
 
 	return strings.Join(parts, " ")
 }
+
+// addJunkHeader adds a custom header to mark the message as junk/spam
+func addJunkHeader(rawEmail, headerName string) string {
+	header := fmt.Sprintf("%s: YES\r\n", headerName)
+	return header + rawEmail
+}
+
+// modifySubject modifies the Subject header according to the provided pattern
+// The pattern should contain %s which will be replaced with the original subject
+func modifySubject(rawEmail, pattern string) string {
+	lines := strings.Split(rawEmail, "\r\n")
+	var result []string
+	subjectModified := false
+
+	for i, line := range lines {
+		// Look for Subject header (case-insensitive)
+		if !subjectModified && len(line) >= 8 && strings.EqualFold(line[:8], "Subject:") {
+			// Extract original subject (everything after "Subject: ")
+			originalSubject := strings.TrimSpace(line[8:])
+
+			// Handle multi-line subjects (RFC 5322 folding)
+			// Check if next lines are continuations (start with whitespace)
+			for i+1 < len(lines) && len(lines[i+1]) > 0 && (lines[i+1][0] == ' ' || lines[i+1][0] == '\t') {
+				i++
+				originalSubject += " " + strings.TrimSpace(lines[i])
+			}
+
+			// Apply pattern
+			newSubject := fmt.Sprintf(pattern, originalSubject)
+			result = append(result, "Subject: "+newSubject)
+			subjectModified = true
+		} else {
+			result = append(result, line)
+		}
+	}
+
+	// If no subject was found, add one
+	if !subjectModified {
+		// Find the end of headers (empty line)
+		for i, line := range result {
+			if line == "" {
+				// Insert subject before the empty line
+				newSubject := fmt.Sprintf(pattern, "(no subject)")
+				result = append(result[:i], append([]string{"Subject: " + newSubject}, result[i:]...)...)
+				break
+			}
+		}
+	}
+
+	return strings.Join(result, "\r\n")
+}

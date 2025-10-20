@@ -2,6 +2,8 @@ package stats
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -9,7 +11,7 @@ import (
 
 	"migadu/mizu/pkg/health"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 const (
@@ -36,7 +38,7 @@ const eventChanBufferSize = 1000
 type Manager struct {
 	enabled           bool
 	retentionDuration time.Duration
-	logger            *zap.Logger
+	logger            *slog.Logger
 
 	// Sync configuration
 	syncEnabled  bool
@@ -82,9 +84,9 @@ type event struct {
 }
 
 // NewManager creates a new stats manager
-func NewManager(enabled bool, retentionDuration time.Duration, hostname string, syncEnabled bool, syncInterval time.Duration, syncServers []string, maxIPEntries, maxDomainEntries int, logger *zap.Logger) *Manager {
+func NewManager(enabled bool, retentionDuration time.Duration, hostname string, syncEnabled bool, syncInterval time.Duration, syncServers []string, maxIPEntries, maxDomainEntries int, logger *slog.Logger) *Manager {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -116,7 +118,7 @@ func (m *Manager) Start() {
 		return
 	}
 
-	m.logger.Sugar().Infof("Starting stats manager with %v retention", m.retentionDuration)
+	m.logger.Info(fmt.Sprintf("Starting stats manager with %v retention", m.retentionDuration))
 
 	// Start cleanup goroutine
 	go m.cleanupLoop()
@@ -155,8 +157,8 @@ func (m *Manager) processEventsLoop() {
 	defer func() {
 		if r := recover(); r != nil {
 			m.logger.Error("panic in stats event processing loop",
-				zap.Any("panic", r),
-				zap.Stack("stack"),
+				"panic", r,
+				"stack", "",
 			)
 			// Critical: restart the loop if it panics
 			m.logger.Warn("Restarting stats event processing loop after panic")
@@ -266,12 +268,12 @@ func (m *Manager) cleanup() {
 
 	if expiredIPs > 0 || expiredDomains > 0 || evictedIPs > 0 || evictedDomains > 0 {
 		m.logger.Debug("Cleaned expired stats entries",
-			zap.Int("expired_ips", expiredIPs),
-			zap.Int("expired_domains", expiredDomains),
-			zap.Int("evicted_ips", evictedIPs),
-			zap.Int("evicted_domains", evictedDomains),
-			zap.Int("remaining_ips", len(m.ips)),
-			zap.Int("remaining_domains", len(m.domains)))
+			"expired_ips", expiredIPs,
+			"expired_domains", expiredDomains,
+			"evicted_ips", evictedIPs,
+			"evicted_domains", evictedDomains,
+			"remaining_ips", len(m.ips),
+			"remaining_domains", len(m.domains))
 	}
 }
 
@@ -490,8 +492,8 @@ func (m *Manager) sendEvent(e event) {
 		m.metricsMu.Unlock()
 
 		m.logger.Warn("Stats event channel is full, dropping event",
-			zap.Any("event_type", e.Type),
-			zap.Uint64("total_dropped", droppedCount))
+			"event_type", e.Type,
+			"total_dropped", droppedCount)
 	}
 }
 

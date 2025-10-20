@@ -12,12 +12,12 @@ import (
 	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/stats"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TestStatsIntegration tests the stats system integration
 func TestStatsIntegration(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	statsMgr := stats.NewManager(
 		true,
@@ -121,7 +121,7 @@ domain = "mail.test.com"
 
 // TestComponentsIntegration tests that all major components can be initialized together
 func TestComponentsIntegration(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create config
 	cfg := config.DefaultConfig()

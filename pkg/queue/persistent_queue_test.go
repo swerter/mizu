@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TestPersistentQueue_HybridStorage tests that large emails (>1MB) are stored on filesystem
@@ -37,7 +37,7 @@ func TestPersistentQueue_HybridStorage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create persistent queue
 	config := QueueConfig{
@@ -153,7 +153,7 @@ func TestPersistentQueue_OrphanCleanup(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create persistent queue
 	config := QueueConfig{

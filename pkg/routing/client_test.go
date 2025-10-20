@@ -1,6 +1,8 @@
 package routing
 
 import (
+	"io"
+
 	"context"
 	"encoding/json"
 	"net/http"
@@ -8,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 func TestNewClient(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	client, err := NewClient(ClientConfig{
 		Endpoint: "https://routing.example.com",
@@ -30,7 +32,7 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestNewClient_MissingEndpoint(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	_, err := NewClient(ClientConfig{
 		Logger: logger,
@@ -52,7 +54,7 @@ func TestNewClient_MissingLogger(t *testing.T) {
 }
 
 func TestNewClient_Defaults(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	client, err := NewClient(ClientConfig{
 		Endpoint: "https://routing.example.com",
@@ -100,7 +102,7 @@ func TestResolve_AcceptedRecipient(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint: server.URL,
 		Logger:   logger,
@@ -136,7 +138,7 @@ func TestResolve_RejectedRecipient(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint: server.URL,
 		Logger:   logger,
@@ -173,7 +175,7 @@ func TestResolve_Caching(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint:        server.URL,
 		Logger:          logger,
@@ -215,7 +217,7 @@ func TestResolve_WithAPIKey(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint: server.URL,
 		APIKey:   "test-api-key",
@@ -245,7 +247,7 @@ func TestFlushCache(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint: server.URL,
 		Logger:   logger,
@@ -277,7 +279,7 @@ func TestFlushCache(t *testing.T) {
 }
 
 func TestGetStats(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint: "https://routing.example.com",
 		Logger:   logger,
@@ -308,7 +310,7 @@ func TestResolve_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint:   server.URL,
 		Logger:     logger,
@@ -336,7 +338,7 @@ func TestResolve_Timeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint:   server.URL,
 		Logger:     logger,
@@ -358,7 +360,7 @@ func TestResolve_Timeout(t *testing.T) {
 }
 
 func TestBuildCacheKey(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint: "https://routing.example.com",
 		Logger:   logger,

@@ -42,31 +42,31 @@ func TestNew_CustomNamespace(t *testing.T) {
 func TestMetrics_SMTPMetrics(t *testing.T) {
 	m := New("test_smtp")
 
-	// Test counter
-	m.SMTPConnectionsTotal.Inc()
-	m.SMTPMessagesReceived.Inc()
+	// Test counters with server labels
+	m.SMTPConnectionsTotal.WithLabelValues("relay", "relay").Inc()
+	m.SMTPMessagesReceived.WithLabelValues("relay", "relay").Inc()
 
-	// Test gauge
-	m.SMTPConnectionsActive.Set(5)
-	m.SMTPConnectionsActive.Inc()
-	m.SMTPConnectionsActive.Dec()
+	// Test gauge with server labels
+	m.SMTPConnectionsActive.WithLabelValues("relay", "relay").Set(5)
+	m.SMTPConnectionsActive.WithLabelValues("relay", "relay").Inc()
+	m.SMTPConnectionsActive.WithLabelValues("relay", "relay").Dec()
 
-	// Test histogram
-	m.SMTPConnectionDuration.Observe(1.5)
-	m.SMTPMessageSize.Observe(1024)
+	// Test histograms with server labels
+	m.SMTPConnectionDuration.WithLabelValues("relay", "relay").Observe(1.5)
+	m.SMTPMessageSize.WithLabelValues("relay", "relay").Observe(1024)
 
-	// Test counter vec
-	m.SMTPMessagesRejected.WithLabelValues("spam").Inc()
-	m.SMTPSPFChecks.WithLabelValues("pass").Inc()
-	m.SMTPDMARCChecks.WithLabelValues("pass").Inc()
-	m.SMTPDKIMChecks.WithLabelValues("pass").Inc()
-	m.SMTPARCChecks.WithLabelValues("pass").Inc()
-	m.SMTPBlacklistChecks.WithLabelValues("clean").Inc()
+	// Test counter vec with server labels
+	m.SMTPMessagesRejected.WithLabelValues("relay", "relay", "spam").Inc()
+	m.SMTPSPFChecks.WithLabelValues("relay", "pass").Inc()
+	m.SMTPDMARCChecks.WithLabelValues("relay", "pass").Inc()
+	m.SMTPDKIMChecks.WithLabelValues("relay", "pass").Inc()
+	m.SMTPARCChecks.WithLabelValues("relay", "pass").Inc()
+	m.SMTPBlacklistChecks.WithLabelValues("relay", "clean").Inc()
 
-	// Test gauge vec
-	m.SMTPConnectionsPerIPActive.WithLabelValues("192.168.1.1").Set(2)
+	// Test gauge vec with server label
+	m.SMTPConnectionsPerIPActive.WithLabelValues("relay", "192.168.1.1").Set(2)
 
-	t.Log("✓ SMTP metrics work correctly")
+	t.Log("✓ SMTP metrics work correctly with server labels")
 }
 
 func TestMetrics_HTTPMetrics(t *testing.T) {

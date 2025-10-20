@@ -1,6 +1,8 @@
 package queue
 
 import (
+	"io"
+
 	"context"
 	"fmt"
 	"net/http"
@@ -9,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TestPersistentQueue_SuccessfulDeliveryCleanup verifies jobs are fully cleaned up after successful delivery
@@ -28,7 +30,7 @@ func TestPersistentQueue_SuccessfulDeliveryCleanup(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create persistent queue
 	config := QueueConfig{
@@ -138,7 +140,7 @@ func TestPersistentQueue_RetryCleanup_Slow(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	config := QueueConfig{
 		Workers:         1,
@@ -220,7 +222,7 @@ func TestPersistentQueue_DLQExpiration(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	config := QueueConfig{
 		Workers:         1,
@@ -302,7 +304,7 @@ func TestPersistentQueue_NoIndefiniteGrowth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	config := QueueConfig{
 		Workers:         4,
@@ -415,7 +417,7 @@ func TestPersistentQueue_ScheduleIndexConsistency(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	config := QueueConfig{
 		Workers:         1,

@@ -1,6 +1,8 @@
 package routing
 
 import (
+	"io"
+
 	"context"
 	"encoding/json"
 	"net/http"
@@ -8,7 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TestSeparateNegativeCache tests that negative responses have a separate cache with different TTL
@@ -40,7 +42,7 @@ func TestSeparateNegativeCache(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint:                server.URL,
 		Logger:                  logger,
@@ -117,7 +119,7 @@ func TestNonRetryableError_4xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint:   server.URL,
 		Logger:     logger,
@@ -154,7 +156,7 @@ func TestRetryable_5xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint:   server.URL,
 		Logger:     logger,
@@ -199,7 +201,7 @@ func TestCacheKeyIncludesSender(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint: server.URL,
 		Logger:   logger,
@@ -249,7 +251,7 @@ func TestFlushCache_BothCaches(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client, err := NewClient(ClientConfig{
 		Endpoint: server.URL,
 		Logger:   logger,

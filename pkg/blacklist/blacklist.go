@@ -1,6 +1,8 @@
 package blacklist
 
 import (
+	"io"
+
 	"context"
 	"fmt"
 	"net"
@@ -8,7 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
+
+	"migadu/mizu/pkg/logging"
 )
 
 // resolver defines an interface for DNS lookups, allowing for mocking in tests.
@@ -22,14 +26,14 @@ type resolver interface {
 type Checker struct {
 	lists    []string
 	timeout  time.Duration
-	logger   *zap.Logger
+	logger   *slog.Logger
 	resolver resolver // Use interface for testability
 }
 
 // NewChecker creates a new blacklist checker.
-func NewChecker(lists []string, timeout time.Duration, logger *zap.Logger) *Checker {
+func NewChecker(lists []string, timeout time.Duration, logger *slog.Logger) *Checker {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	return &Checker{
@@ -71,37 +75,38 @@ func (c *Checker) CheckIP(ip net.IP) (bool, string, error) {
 
 	for _, list := range c.lists {
 		wg.Add(1)
-		go func(l string) {
-			defer wg.Done()
-			query := fmt.Sprintf("%s.%s", reversedIP, l)
-			addrs, err := c.resolver.LookupIPAddr(ctx, query)
-			if err != nil {
-				// Not listed or error - either way, skip
-				c.logger.Debug("blacklist lookup", zap.String("query", query), zap.Error(err))
-				return
-			}
-			if len(addrs) > 0 {
-				// IP is listed. Check if it's Spamhaus to get detailed reason
-				reason := l
-				if strings.Contains(l, "spamhaus") && len(addrs) > 0 {
-					// Extract last octet from response (e.g., 127.0.0.2 -> 2)
-					responseIP := addrs[0].IP.To4()
-					if responseIP != nil && len(responseIP) == 4 {
-						code := responseIP[3]
-						spamhausReason := getSpamhausReason(code)
-						reason = fmt.Sprintf("%s (%s)", l, spamhausReason)
-					}
+		logging.SafeGoWithWg(c.logger, fmt.Sprintf("blacklist-lookup-%s", list), &wg, func(l string) func() {
+			return func() {
+				query := fmt.Sprintf("%s.%s", reversedIP, l)
+				addrs, err := c.resolver.LookupIPAddr(ctx, query)
+				if err != nil {
+					// Not listed or error - either way, skip
+					c.logger.Debug("blacklist lookup", "query", query, "error", err)
+					return
 				}
-				resultChan <- result{list: l, reason: reason}
+				if len(addrs) > 0 {
+					// IP is listed. Check if it's Spamhaus to get detailed reason
+					reason := l
+					if strings.Contains(l, "spamhaus") && len(addrs) > 0 {
+						// Extract last octet from response (e.g., 127.0.0.2 -> 2)
+						responseIP := addrs[0].IP.To4()
+						if responseIP != nil && len(responseIP) == 4 {
+							code := responseIP[3]
+							spamhausReason := getSpamhausReason(code)
+							reason = fmt.Sprintf("%s (%s)", l, spamhausReason)
+						}
+					}
+					resultChan <- result{list: l, reason: reason}
+				}
 			}
-		}(list)
+		}(list))
 	}
 
 	// Wait for all lookups to complete in a separate goroutine to not block the timeout.
-	go func() {
+	logging.SafeGo(c.logger, "blacklist-closer", func() {
 		wg.Wait()
 		close(resultChan)
-	}()
+	})
 
 	select {
 	case res, ok := <-resultChan:

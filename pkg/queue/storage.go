@@ -1,19 +1,21 @@
 package queue
 
 import (
+	"io"
+
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // Storage provides persistent storage for the queue using BadgerDB
 type Storage struct {
 	db      *badger.DB
-	logger  *zap.Logger
+	logger  *slog.Logger
 	metrics MetricsRecorder
 }
 
@@ -28,7 +30,7 @@ type MetricsRecorder interface {
 type StorageConfig struct {
 	DataDir    string // Directory for BadgerDB files
 	SyncWrites bool   // Enable sync writes for durability (default: true for mail queue)
-	Logger     *zap.Logger
+	Logger     *slog.Logger
 	Metrics    MetricsRecorder // Optional metrics recorder
 }
 
@@ -39,7 +41,7 @@ func NewStorage(config StorageConfig) (*Storage, error) {
 	}
 
 	if config.Logger == nil {
-		config.Logger = zap.NewNop()
+		config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	// Open BadgerDB
@@ -211,7 +213,7 @@ func (s *Storage) GetDueJobs(limit int) ([]*DeliveryJob, error) {
 				return json.Unmarshal(val, &job)
 			})
 			if err != nil {
-				s.logger.Error("Failed to unmarshal job", zap.String("job_id", jobID), zap.Error(err))
+				s.logger.Error("Failed to unmarshal job", "job_id", jobID, "error", err)
 				continue
 			}
 
@@ -291,7 +293,7 @@ func (s *Storage) GetDLQEntries(limit int) ([]*DLQEntry, error) {
 				return json.Unmarshal(val, &entry)
 			})
 			if err != nil {
-				s.logger.Error("Failed to unmarshal DLQ entry", zap.Error(err))
+				s.logger.Error("Failed to unmarshal DLQ entry", "error", err)
 				continue
 			}
 
@@ -435,7 +437,7 @@ func (s *Storage) GetAllJobs() ([]*DeliveryJob, error) {
 				return json.Unmarshal(val, &job)
 			})
 			if err != nil {
-				s.logger.Error("Failed to unmarshal job during recovery", zap.Error(err))
+				s.logger.Error("Failed to unmarshal job during recovery", "error", err)
 				continue
 			}
 

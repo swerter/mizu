@@ -19,7 +19,7 @@ import (
 
 	"github.com/emersion/go-msgauth/authres"
 	"github.com/emersion/go-msgauth/dkim"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // ARCResult represents the result of ARC (Authenticated Received Chain) validation.
@@ -98,9 +98,9 @@ type ARCSet struct {
 //	    // Message has valid ARC chain from previous hops
 //	    // This helps determine if authentication failures are due to forwarding
 //	}
-func CheckARC(ctx context.Context, rawEmail string, logger *zap.Logger) (*ARCResult, error) {
+func CheckARC(ctx context.Context, rawEmail string, logger *slog.Logger) (*ARCResult, error) {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	// Parse the email message to extract headers
@@ -127,7 +127,7 @@ func CheckARC(ctx context.Context, rawEmail string, logger *zap.Logger) (*ARCRes
 		FailureReasons: make([]string, 0),
 	}
 
-	logger.Debug("Found ARC headers", zap.Int("max_instance", maxInstance), zap.Int("sets_count", len(arcSets)))
+	logger.Debug("Found ARC headers", "max_instance", maxInstance, "sets_count", len(arcSets))
 
 	// Validate the ARC chain
 	// The chain is valid if all ARC-Seal and ARC-Message-Signature headers verify correctly
@@ -139,16 +139,16 @@ func CheckARC(ctx context.Context, rawEmail string, logger *zap.Logger) (*ARCRes
 	result.Pass = result.ChainValid
 
 	logger.Debug("ARC validation result",
-		zap.Int("instance", result.Instance),
-		zap.Bool("chain_valid", result.ChainValid),
-		zap.Bool("pass", result.Pass),
-		zap.Strings("failure_reasons", result.FailureReasons))
+		"instance", result.Instance,
+		"chain_valid", result.ChainValid,
+		"pass", result.Pass,
+		"failure_reasons", result.FailureReasons)
 
 	return result, nil
 }
 
 // extractARCSets extracts and organizes ARC header sets from email headers
-func extractARCSets(headers mail.Header, logger *zap.Logger) (map[int]*ARCSet, int) {
+func extractARCSets(headers mail.Header, logger *slog.Logger) (map[int]*ARCSet, int) {
 	sets := make(map[int]*ARCSet)
 	maxInstance := 0
 
@@ -200,15 +200,15 @@ func extractARCSets(headers mail.Header, logger *zap.Logger) (map[int]*ARCSet, i
 	for i := 1; i <= maxInstance; i++ {
 		set := sets[i]
 		if set == nil {
-			logger.Warn("Missing ARC set", zap.Int("instance", i))
+			logger.Warn("Missing ARC set", "instance", i)
 			continue
 		}
 		if set.AuthenticationResults == "" || set.MessageSignature == "" || set.Seal == "" {
 			logger.Warn("Incomplete ARC set",
-				zap.Int("instance", i),
-				zap.Bool("has_aar", set.AuthenticationResults != ""),
-				zap.Bool("has_ams", set.MessageSignature != ""),
-				zap.Bool("has_as", set.Seal != ""))
+				"instance", i,
+				"has_aar", set.AuthenticationResults != "",
+				"has_ams", set.MessageSignature != "",
+				"has_as", set.Seal != "")
 		}
 	}
 
@@ -265,7 +265,7 @@ func extractDomain(header string) string {
 }
 
 // validateARCChain validates the entire ARC chain by verifying signatures
-func validateARCChain(rawEmail string, sets map[int]*ARCSet, maxInstance int, logger *zap.Logger) (bool, []string) {
+func validateARCChain(rawEmail string, sets map[int]*ARCSet, maxInstance int, logger *slog.Logger) (bool, []string) {
 	reasons := make([]string, 0)
 
 	// Check that we have a complete chain from 1 to maxInstance
@@ -274,7 +274,7 @@ func validateARCChain(rawEmail string, sets map[int]*ARCSet, maxInstance int, lo
 		if set == nil {
 			reason := fmt.Sprintf("missing ARC set for instance %d", i)
 			reasons = append(reasons, reason)
-			logger.Warn("ARC chain validation failed", zap.String("reason", reason))
+			logger.Warn("ARC chain validation failed", "reason", reason)
 			return false, reasons
 		}
 
@@ -282,7 +282,7 @@ func validateARCChain(rawEmail string, sets map[int]*ARCSet, maxInstance int, lo
 		if set.AuthenticationResults == "" || set.MessageSignature == "" || set.Seal == "" {
 			reason := fmt.Sprintf("incomplete ARC set at instance %d", i)
 			reasons = append(reasons, reason)
-			logger.Warn("ARC chain validation failed", zap.String("reason", reason))
+			logger.Warn("ARC chain validation failed", "reason", reason)
 			return false, reasons
 		}
 	}
@@ -305,15 +305,15 @@ func validateARCChain(rawEmail string, sets map[int]*ARCSet, maxInstance int, lo
 			}
 			reasons = append(reasons, reason)
 			logger.Warn("ARC-Message-Signature verification failed",
-				zap.Int("instance", i),
-				zap.String("domain", set.MessageSignatureDomain),
-				zap.Error(err))
+				"instance", i,
+				"domain", set.MessageSignatureDomain,
+				"error", err)
 			return false, reasons
 		}
 
 		logger.Debug("ARC-Message-Signature verified",
-			zap.Int("instance", i),
-			zap.String("domain", set.MessageSignatureDomain))
+			"instance", i,
+			"domain", set.MessageSignatureDomain)
 	}
 
 	// Verify ARC-Seal headers (these sign the previous ARC sets)
@@ -332,24 +332,24 @@ func validateARCChain(rawEmail string, sets map[int]*ARCSet, maxInstance int, lo
 			}
 			reasons = append(reasons, reason)
 			logger.Warn("ARC-Seal verification failed",
-				zap.Int("instance", i),
-				zap.String("domain", set.SealDomain),
-				zap.Error(err))
+				"instance", i,
+				"domain", set.SealDomain,
+				"error", err)
 			return false, reasons
 		}
 
 		logger.Debug("ARC-Seal verified",
-			zap.Int("instance", i),
-			zap.String("domain", set.SealDomain))
+			"instance", i,
+			"domain", set.SealDomain)
 	}
 
-	logger.Info("ARC chain validated successfully", zap.Int("max_instance", maxInstance))
+	logger.Info("ARC chain validated successfully", "max_instance", maxInstance)
 	return true, reasons
 }
 
 // verifyARCMessageSignature verifies an ARC-Message-Signature header
 // This is similar to DKIM verification but for ARC headers
-func verifyARCMessageSignature(rawEmail string, set *ARCSet, logger *zap.Logger) (bool, error) {
+func verifyARCMessageSignature(rawEmail string, set *ARCSet, logger *slog.Logger) (bool, error) {
 	// ARC-Message-Signature uses DKIM-style signatures
 	// We need to convert the ARC-Message-Signature to a format that dkim.Verify can handle
 
@@ -403,7 +403,7 @@ func verifyARCMessageSignature(rawEmail string, set *ARCSet, logger *zap.Logger)
 
 // verifyARCSeal verifies an ARC-Seal header
 // The ARC-Seal at instance i signs all ARC headers from instances 1 through i
-func verifyARCSeal(rawEmail string, set *ARCSet, instance int, logger *zap.Logger) (bool, error) {
+func verifyARCSeal(rawEmail string, set *ARCSet, instance int, logger *slog.Logger) (bool, error) {
 	// ARC-Seal also uses DKIM-style signatures
 	// The seal signs: ARC-Authentication-Results, ARC-Message-Signature, and previous ARC-Seal headers
 
@@ -494,7 +494,7 @@ func GetARCAuthenticationResults(rawEmail string) ([]authres.Result, error) {
 	}
 
 	// Find the highest instance ARC-Authentication-Results
-	arcSets, maxInstance := extractARCSets(msg.Header, zap.NewNop())
+	arcSets, maxInstance := extractARCSets(msg.Header, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if maxInstance == 0 {
 		return nil, nil // No ARC headers
 	}
@@ -546,7 +546,7 @@ type ARCSigner struct {
 	Domain     string          // Domain to sign with (e.g., "mail.example.com")
 	Selector   string          // DKIM selector (e.g., "arc")
 	PrivateKey *rsa.PrivateKey // RSA private key for signing
-	Logger     *zap.Logger     // Logger
+	Logger     *slog.Logger    // Logger
 }
 
 // NewARCSigner creates a new ARC signer from a private key file.
@@ -582,9 +582,9 @@ type ARCSigner struct {
 //	if err != nil {
 //	    log.Fatal("Failed to create ARC signer:", err)
 //	}
-func NewARCSigner(domain, selector, privateKeyPath string, logger *zap.Logger) (*ARCSigner, error) {
+func NewARCSigner(domain, selector, privateKeyPath string, logger *slog.Logger) (*ARCSigner, error) {
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	// Read private key file
@@ -663,9 +663,9 @@ func (s *ARCSigner) SignEmail(rawEmail string, spfResult *SPFResult, dmarcResult
 	arcHeaders := fmt.Sprintf("ARC-Seal: %s\r\nARC-Message-Signature: %s\r\nARC-Authentication-Results: %s\r\n", as, ams, aar)
 
 	s.Logger.Info("Added ARC headers",
-		zap.Int("instance", instance),
-		zap.String("domain", s.Domain),
-		zap.String("selector", s.Selector))
+		"instance", instance,
+		"domain", s.Domain,
+		"selector", s.Selector)
 
 	return arcHeaders + rawEmail, nil
 }

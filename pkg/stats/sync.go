@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
-	"go.uber.org/zap"
 )
 
 // SyncFromS3 downloads and merges stats from other servers
@@ -25,8 +24,8 @@ func (m *Manager) SyncFromS3(ctx context.Context, s3Client *minio.Client, bucket
 		merged, err := m.syncFromServer(ctx, s3Client, bucket, prefix, serverHostname)
 		if err != nil {
 			m.logger.Error("Failed to sync from server",
-				zap.String("server", serverHostname),
-				zap.Error(err))
+				"server", serverHostname,
+				"error", err)
 			// Continue with other servers even if one fails
 			continue
 		}
@@ -35,8 +34,8 @@ func (m *Manager) SyncFromS3(ctx context.Context, s3Client *minio.Client, bucket
 
 	if totalMerged > 0 {
 		m.logger.Debug("Completed stats sync",
-			zap.Int("servers", len(m.syncServers)),
-			zap.Int("total_entries_merged", totalMerged))
+			"servers", len(m.syncServers),
+			"total_entries_merged", totalMerged)
 	}
 
 	return nil
@@ -65,7 +64,7 @@ func (m *Manager) syncFromServer(ctx context.Context, s3Client *minio.Client, bu
 		if errResp.Code == "NoSuchKey" {
 			// If we have synced before and it's been a while, the peer might be gone.
 			if attemptExists && time.Since(lastAttempt) > stalePeerTimeout {
-				m.logger.Warn("Peer stats file not found for stale peer, skipping for now", zap.String("peer", serverHostname), zap.String("object", objectName))
+				m.logger.Warn("Peer stats file not found for stale peer, skipping for now", "peer", serverHostname, "object", objectName)
 				return 0, nil // Not an error, just a stale peer
 			}
 		}
@@ -111,11 +110,11 @@ func (m *Manager) syncFromServer(ctx context.Context, s3Client *minio.Client, bu
 	m.lastSyncMu.Unlock()
 
 	m.logger.Debug("Synced stats from server",
-		zap.String("server", serverHostname),
-		zap.Time("last_modified", objInfo.LastModified),
-		zap.Int("ips", len(remoteStats.IPs)),
-		zap.Int("domains", len(remoteStats.Domains)),
-		zap.Int("merged", merged))
+		"server", serverHostname,
+		"last_modified", objInfo.LastModified,
+		"ips", len(remoteStats.IPs),
+		"domains", len(remoteStats.Domains),
+		"merged", merged)
 
 	return merged, nil
 }
@@ -128,22 +127,22 @@ func (m *Manager) StartSyncLoop(ctx context.Context, s3Client *minio.Client, buc
 	}
 
 	m.logger.Info("Starting stats sync loop",
-		zap.Duration("interval", interval),
-		zap.Int("servers", len(m.syncServers)))
+		"interval", interval,
+		"servers", len(m.syncServers))
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	// Sync immediately on start
 	if err := m.SyncFromS3(ctx, s3Client, bucket, prefix); err != nil {
-		m.logger.Error("Failed to sync stats", zap.Error(err))
+		m.logger.Error("Failed to sync stats", "error", err)
 	}
 
 	for {
 		select {
 		case <-ticker.C:
 			if err := m.SyncFromS3(ctx, s3Client, bucket, prefix); err != nil {
-				m.logger.Error("Failed to sync stats", zap.Error(err))
+				m.logger.Error("Failed to sync stats", "error", err)
 				// Continue running even if sync fails
 			}
 		case <-ctx.Done():

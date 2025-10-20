@@ -1,6 +1,8 @@
 package validation
 
 import (
+	"io"
+
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -11,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/emersion/go-msgauth/authres"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 func TestCheckARC_NoARCHeaders(t *testing.T) {
@@ -22,7 +24,7 @@ Subject: Test message
 This is a test message without ARC headers.
 `
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	result, err := CheckARC(context.Background(), rawEmail, logger)
 
 	if err != nil {
@@ -63,7 +65,7 @@ Subject: Test message
 This is a test message with ARC headers.
 `
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	result, err := CheckARC(context.Background(), rawEmail, logger)
 
 	if err != nil {
@@ -104,7 +106,7 @@ Subject: Test message
 This is a test message with multiple ARC headers.
 `
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	result, err := CheckARC(context.Background(), rawEmail, logger)
 
 	if err != nil {
@@ -205,7 +207,7 @@ func TestExtractDomain(t *testing.T) {
 func TestCheckARC_InvalidEmail(t *testing.T) {
 	rawEmail := "invalid email format"
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, err := CheckARC(context.Background(), rawEmail, logger)
 
 	if err == nil {
@@ -226,7 +228,7 @@ Subject: Test message
 This is a test message with incomplete ARC headers.
 `
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	result, err := CheckARC(context.Background(), rawEmail, logger)
 
 	if err != nil {
@@ -318,7 +320,7 @@ Body`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := zap.NewNop()
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 			result, err := CheckARC(context.Background(), tt.rawEmail, logger)
 
 			if err != nil {
@@ -348,7 +350,7 @@ func TestARCSignerBasic(t *testing.T) {
 		Domain:     "example.com",
 		Selector:   "arc",
 		PrivateKey: privateKey,
-		Logger:     zap.NewNop(),
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	rawEmail := `From: sender@test.com
@@ -409,7 +411,7 @@ func TestARCSignerMultipleInstances(t *testing.T) {
 		Domain:     "forwarder.com",
 		Selector:   "arc",
 		PrivateKey: privateKey,
-		Logger:     zap.NewNop(),
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// Email already has ARC instance 1
@@ -471,7 +473,7 @@ func TestNewARCSignerFromFile(t *testing.T) {
 	tmpFile.Close()
 
 	// Load signer
-	signer, err := NewARCSigner("example.com", "arc", tmpFile.Name(), zap.NewNop())
+	signer, err := NewARCSigner("example.com", "arc", tmpFile.Name(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Failed to create ARC signer: %v", err)
 	}
@@ -492,7 +494,7 @@ func TestNewARCSignerFromFile(t *testing.T) {
 // TestNewARCSignerInvalidKey tests error handling for invalid keys
 func TestNewARCSignerInvalidKey(t *testing.T) {
 	// Non-existent file
-	_, err := NewARCSigner("example.com", "arc", "/nonexistent/key.pem", zap.NewNop())
+	_, err := NewARCSigner("example.com", "arc", "/nonexistent/key.pem", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err == nil {
 		t.Error("Expected error for non-existent key file")
 	}
@@ -507,7 +509,7 @@ func TestNewARCSignerInvalidKey(t *testing.T) {
 	tmpFile.WriteString("not a valid PEM file")
 	tmpFile.Close()
 
-	_, err = NewARCSigner("example.com", "arc", tmpFile.Name(), zap.NewNop())
+	_, err = NewARCSigner("example.com", "arc", tmpFile.Name(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err == nil {
 		t.Error("Expected error for invalid PEM file")
 	}
@@ -518,7 +520,7 @@ func TestBuildAuthenticationResults(t *testing.T) {
 	signer := &ARCSigner{
 		Domain:   "example.com",
 		Selector: "arc",
-		Logger:   zap.NewNop(),
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	spfResult := &SPFResult{

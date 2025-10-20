@@ -13,7 +13,7 @@ import (
 	"migadu/mizu/pkg/metrics"
 	"migadu/mizu/pkg/poster"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // PersistentQueue manages async email delivery with persistent storage and 48-hour retry window
@@ -49,7 +49,7 @@ type PersistentQueue struct {
 	forwardingCircuitBreaker *poster.CircuitBreaker
 
 	// Observability
-	logger  *zap.Logger
+	logger  *slog.Logger
 	metrics *metrics.Metrics
 
 	// Statistics
@@ -69,7 +69,7 @@ func NewPersistentQueue(
 	httpClient *http.Client,
 	deliveryCircuitBreaker *poster.CircuitBreaker,
 	forwardingCircuitBreaker *poster.CircuitBreaker,
-	logger *zap.Logger,
+	logger *slog.Logger,
 	m *metrics.Metrics,
 ) (*PersistentQueue, error) {
 	if config.Workers <= 0 {
@@ -146,9 +146,9 @@ func (q *PersistentQueue) Start() error {
 	}
 
 	q.logger.Info("Starting persistent delivery queue",
-		zap.Int("workers", q.workers),
-		zap.Duration("max_retry_age", q.schedule.MaxAge),
-		zap.Int("estimated_retry_count", q.schedule.EstimateRetryCount()))
+		"workers", q.workers,
+		"max_retry_age", q.schedule.MaxAge,
+		"estimated_retry_count", q.schedule.EstimateRetryCount())
 
 	// Recover jobs from storage
 	if err := q.recoverJobs(); err != nil {
@@ -178,7 +178,7 @@ func (q *PersistentQueue) Start() error {
 	})
 
 	q.logger.Info("Persistent delivery queue started",
-		zap.Int("workers_active", q.workers))
+		"workers_active", q.workers)
 
 	return nil
 }
@@ -221,10 +221,10 @@ func (q *PersistentQueue) Enqueue(job *DeliveryJob) error {
 	}
 
 	q.logger.Debug("Job enqueued to persistent storage",
-		zap.String("job_id", job.ID),
-		zap.Time("next_retry", job.NextRetry),
-		zap.Strings("recipients", job.Recipients),
-		zap.Bool("large_email", job.EmailStorageKey != ""))
+		"job_id", job.ID,
+		"next_retry", job.NextRetry,
+		"recipients", job.Recipients,
+		"large_email", job.EmailStorageKey != "")
 
 	return nil
 }
@@ -232,8 +232,8 @@ func (q *PersistentQueue) Enqueue(job *DeliveryJob) error {
 // worker processes jobs from the jobs channel or priority queue
 func (q *PersistentQueue) worker(workerID int) {
 	q.logger.Debug("Persistent queue worker started",
-		zap.Int("worker_id", workerID),
-		zap.Bool("priority_mode", q.priorityMode))
+		"worker_id", workerID,
+		"priority_mode", q.priorityMode)
 
 	if q.priorityMode {
 		q.workerPriorityMode(workerID)
@@ -247,7 +247,7 @@ func (q *PersistentQueue) workerFIFOMode(workerID int) {
 	for {
 		select {
 		case <-q.shutdownCh:
-			q.logger.Debug("Persistent queue worker shutting down", zap.Int("worker_id", workerID))
+			q.logger.Debug("Persistent queue worker shutting down", "worker_id", workerID)
 			return
 		case job := <-q.jobsChan:
 			if job != nil {
@@ -262,7 +262,7 @@ func (q *PersistentQueue) workerPriorityMode(workerID int) {
 	for {
 		select {
 		case <-q.shutdownCh:
-			q.logger.Debug("Persistent queue worker shutting down (priority mode)", zap.Int("worker_id", workerID))
+			q.logger.Debug("Persistent queue worker shutting down (priority mode)", "worker_id", workerID)
 			return
 		default:
 			// Wait for jobs in priority queue
@@ -307,7 +307,7 @@ func (q *PersistentQueue) processDueJobs() {
 	// Get jobs that are due (NextRetry <= now)
 	jobs, err := q.storage.GetDueJobs(100) // Process up to 100 jobs per tick
 	if err != nil {
-		q.logger.Error("Failed to get due jobs", zap.Error(err))
+		q.logger.Error("Failed to get due jobs", "error", err)
 		return
 	}
 
@@ -316,8 +316,8 @@ func (q *PersistentQueue) processDueJobs() {
 	}
 
 	q.logger.Debug("Dispatching due jobs to workers",
-		zap.Int("count", len(jobs)),
-		zap.Bool("priority_mode", q.priorityMode))
+		"count", len(jobs),
+		"priority_mode", q.priorityMode)
 
 	if q.priorityMode {
 		// Priority mode: Add jobs to priority queue
@@ -353,12 +353,12 @@ func (q *PersistentQueue) processJob(job *DeliveryJob, now time.Time) {
 	// Check if job has expired
 	if q.schedule.ShouldGiveUp(job, now) {
 		q.logger.Warn("Job expired, moving to DLQ",
-			zap.String("job_id", job.ID),
-			zap.Duration("age", now.Sub(job.CreatedAt)),
-			zap.Int("attempts", job.Attempts))
+			"job_id", job.ID,
+			"age", now.Sub(job.CreatedAt),
+			"attempts", job.Attempts)
 
 		if err := q.storage.MoveToDLQ(job, "expired after max retry age"); err != nil {
-			q.logger.Error("Failed to move job to DLQ", zap.String("job_id", job.ID), zap.Error(err))
+			q.logger.Error("Failed to move job to DLQ", "job_id", job.ID, "error", err)
 		} else {
 			q.statsTotal.dlq.Add(1)
 			// Note: We keep email files for DLQ entries until DLQ expires (7 days)
@@ -372,10 +372,10 @@ func (q *PersistentQueue) processJob(job *DeliveryJob, now time.Time) {
 	job.LastAttempt = now
 
 	q.logger.Debug("Attempting delivery",
-		zap.String("job_id", job.ID),
-		zap.Int("attempt", job.Attempts),
-		zap.Duration("age", now.Sub(job.CreatedAt)),
-		zap.Bool("is_forwarding", job.IsForwarding))
+		"job_id", job.ID,
+		"attempt", job.Attempts,
+		"age", now.Sub(job.CreatedAt),
+		"is_forwarding", job.IsForwarding)
 
 	deliveryStart := time.Now()
 	err := q.deliverJob(job)
@@ -384,22 +384,22 @@ func (q *PersistentQueue) processJob(job *DeliveryJob, now time.Time) {
 	if err == nil {
 		// Success - delete from queue
 		q.logger.Info("Delivery successful",
-			zap.String("job_id", job.ID),
-			zap.Int("attempts", job.Attempts),
-			zap.Duration("total_duration", now.Sub(job.CreatedAt)))
+			"job_id", job.ID,
+			"attempts", job.Attempts,
+			"total_duration", now.Sub(job.CreatedAt))
 
 		// Delete from BadgerDB
 		if err := q.storage.DeleteJob(job); err != nil {
-			q.logger.Error("Failed to delete successful job", zap.String("job_id", job.ID), zap.Error(err))
+			q.logger.Error("Failed to delete successful job", "job_id", job.ID, "error", err)
 		}
 
 		// Clean up email file if stored on filesystem
 		if job.EmailStorageKey != "" {
 			if err := q.emailStorage.Delete(job.EmailStorageKey); err != nil {
 				q.logger.Warn("Failed to delete email file",
-					zap.String("job_id", job.ID),
-					zap.String("storage_key", job.EmailStorageKey),
-					zap.Error(err))
+					"job_id", job.ID,
+					"storage_key", job.EmailStorageKey,
+					"error", err)
 			}
 		}
 
@@ -416,12 +416,12 @@ func (q *PersistentQueue) processJob(job *DeliveryJob, now time.Time) {
 	// Delivery failed - check if we should retry
 	if !q.shouldRetry(job, err) {
 		q.logger.Warn("Job failed permanently, moving to DLQ",
-			zap.String("job_id", job.ID),
-			zap.Int("attempts", job.Attempts),
-			zap.Error(err))
+			"job_id", job.ID,
+			"attempts", job.Attempts,
+			"error", err)
 
 		if err := q.storage.MoveToDLQ(job, fmt.Sprintf("permanent failure: %v", err)); err != nil {
-			q.logger.Error("Failed to move job to DLQ", zap.String("job_id", job.ID), zap.Error(err))
+			q.logger.Error("Failed to move job to DLQ", "job_id", job.ID, "error", err)
 		} else {
 			q.statsTotal.dlq.Add(1)
 			q.statsTotal.failed.Add(1)
@@ -489,7 +489,7 @@ func (q *PersistentQueue) deliverJob(job *DeliveryJob) error {
 }
 
 // shouldRetry determines if a job should be retried based on the error
-func (q *PersistentQueue) shouldRetry(job *DeliveryJob, err error) bool {
+func (q *PersistentQueue) shouldRetry(_ *DeliveryJob, err error) bool {
 	if err == nil {
 		return false
 	}
@@ -505,18 +505,18 @@ func (q *PersistentQueue) scheduleRetry(job *DeliveryJob, now time.Time, err err
 	job.NextRetry = q.schedule.NextRetryTime(job, now)
 
 	q.logger.Info("Scheduling retry",
-		zap.String("job_id", job.ID),
-		zap.Int("attempt", job.Attempts),
-		zap.Time("next_retry", job.NextRetry),
-		zap.Duration("retry_in", job.NextRetry.Sub(now)),
-		zap.Duration("age", now.Sub(job.CreatedAt)),
-		zap.Error(err))
+		"job_id", job.ID,
+		"attempt", job.Attempts,
+		"next_retry", job.NextRetry,
+		"retry_in", job.NextRetry.Sub(now),
+		"age", now.Sub(job.CreatedAt),
+		"error", err)
 
 	// Save updated job with new retry time
 	if err := q.storage.SaveJob(job); err != nil {
 		q.logger.Error("Failed to save job for retry",
-			zap.String("job_id", job.ID),
-			zap.Error(err))
+			"job_id", job.ID,
+			"error", err)
 	}
 
 }
@@ -529,7 +529,7 @@ func (q *PersistentQueue) recoverJobs() error {
 	}
 
 	q.logger.Info("Recovered jobs from storage",
-		zap.Int("count", len(jobs)))
+		"count", len(jobs))
 
 	// Jobs are already in storage, scheduler will pick them up
 	return nil
@@ -575,10 +575,10 @@ func (q *PersistentQueue) Shutdown(ctx context.Context) error {
 
 	// Wait for workers with timeout
 	done := make(chan struct{})
-	go func() {
+	logging.SafeGo(q.logger, "queue-shutdown-wait", func() {
 		q.workersWg.Wait()
 		close(done)
-	}()
+	})
 
 	select {
 	case <-done:
@@ -589,7 +589,7 @@ func (q *PersistentQueue) Shutdown(ctx context.Context) error {
 
 	// Close storage
 	if err := q.storage.Close(); err != nil {
-		q.logger.Error("Failed to close storage", zap.Error(err))
+		q.logger.Error("Failed to close storage", "error", err)
 		return err
 	}
 
@@ -601,7 +601,7 @@ func (q *PersistentQueue) Shutdown(ctx context.Context) error {
 func (q *PersistentQueue) GetStats() QueueStats {
 	storageStats, err := q.storage.GetStats()
 	if err != nil {
-		q.logger.Error("Failed to get storage stats", zap.Error(err))
+		q.logger.Error("Failed to get storage stats", "error", err)
 		storageStats = make(map[string]interface{})
 	}
 
@@ -679,7 +679,7 @@ func (q *PersistentQueue) CleanupOrphanedEmails() (int, error) {
 	}
 
 	q.logger.Debug("Active storage keys",
-		zap.Int("count", len(activeKeys)))
+		"count", len(activeKeys))
 
 	// Clean up orphaned email files
 	cleaned, err := q.emailStorage.CleanupOrphaned(activeKeys)
@@ -689,7 +689,7 @@ func (q *PersistentQueue) CleanupOrphanedEmails() (int, error) {
 
 	if cleaned > 0 {
 		q.logger.Info("Orphaned email cleanup complete",
-			zap.Int("files_removed", cleaned))
+			"files_removed", cleaned)
 	} else {
 		q.logger.Debug("Orphaned email cleanup complete - no orphans found")
 	}
@@ -776,7 +776,7 @@ func (q *PersistentQueue) GetDLQEntry(jobID string) (*DLQEntry, error) {
 
 // ReprocessDLQJob moves a job from DLQ back to the active queue for retry
 func (q *PersistentQueue) ReprocessDLQJob(jobID string) error {
-	q.logger.Info("Reprocessing DLQ job", zap.String("job_id", jobID))
+	q.logger.Info("Reprocessing DLQ job", "job_id", jobID)
 	return q.storage.ReprocessDLQJob(jobID)
 }
 
@@ -792,14 +792,14 @@ func (q *PersistentQueue) DeleteDLQEntry(jobID string) error {
 	if entry.Job.EmailStorageKey != "" {
 		if err := q.emailStorage.Delete(entry.Job.EmailStorageKey); err != nil {
 			q.logger.Warn("Failed to delete email file for DLQ entry",
-				zap.String("job_id", jobID),
-				zap.String("storage_key", entry.Job.EmailStorageKey),
-				zap.Error(err))
+				"job_id", jobID,
+				"storage_key", entry.Job.EmailStorageKey,
+				"error", err)
 			// Continue with deletion even if file cleanup fails
 		}
 	}
 
-	q.logger.Info("Deleting DLQ entry", zap.String("job_id", jobID))
+	q.logger.Info("Deleting DLQ entry", "job_id", jobID)
 	return q.storage.DeleteDLQEntry(jobID)
 }
 

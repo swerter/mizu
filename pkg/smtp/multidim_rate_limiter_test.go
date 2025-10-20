@@ -1,10 +1,12 @@
 package smtp
 
 import (
+	"io"
+
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 	"migadu/mizu/pkg/config"
 )
 
@@ -24,7 +26,7 @@ func TestRateLimiter_IPDimension(t *testing.T) {
 		},
 	}
 
-	rl := NewRateLimiter(cfg, nil, zap.NewNop())
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rl.Shutdown()
 
 	ctx := SessionContext{
@@ -68,7 +70,7 @@ func TestRateLimiter_FromDimension(t *testing.T) {
 		},
 	}
 
-	rl := NewRateLimiter(cfg, nil, zap.NewNop())
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rl.Shutdown()
 
 	// Same sender from different IPs
@@ -117,7 +119,7 @@ func TestRateLimiter_FromDomainDimension(t *testing.T) {
 		},
 	}
 
-	rl := NewRateLimiter(cfg, nil, zap.NewNop())
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rl.Shutdown()
 
 	// Different senders from same domain
@@ -166,7 +168,7 @@ func TestRateLimiter_ToDimension(t *testing.T) {
 		},
 	}
 
-	rl := NewRateLimiter(cfg, nil, zap.NewNop())
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rl.Shutdown()
 
 	// Different senders to same recipient
@@ -218,7 +220,7 @@ func TestRateLimiter_CompositeKeys(t *testing.T) {
 		},
 	}
 
-	rl := NewRateLimiter(cfg, nil, zap.NewNop())
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rl.Shutdown()
 
 	ctx := SessionContext{
@@ -282,7 +284,7 @@ func TestRateLimiter_MultipleDimensions(t *testing.T) {
 		},
 	}
 
-	rl := NewRateLimiter(cfg, nil, zap.NewNop())
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rl.Shutdown()
 
 	// First 5 emails - should pass both limits
@@ -343,7 +345,7 @@ func TestRateLimiter_SlidingWindow(t *testing.T) {
 		},
 	}
 
-	rl := NewRateLimiter(cfg, nil, zap.NewNop())
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rl.Shutdown()
 
 	ctx := SessionContext{
@@ -393,7 +395,7 @@ func TestRateLimiter_GetStats(t *testing.T) {
 		},
 	}
 
-	rl := NewRateLimiter(cfg, nil, zap.NewNop())
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rl.Shutdown()
 
 	stats := rl.GetStats()

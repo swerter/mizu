@@ -1,14 +1,16 @@
 package cluster
 
 import (
+	"io"
+
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 func TestLeaderElection_SingleNode(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create single node cluster
 	c1, err := NewCluster(Config{
@@ -34,7 +36,7 @@ func TestLeaderElection_SingleNode(t *testing.T) {
 }
 
 func TestLeaderElection_MultiNode(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create first node
 	c1, err := NewCluster(Config{
@@ -91,7 +93,7 @@ func TestLeaderElection_MultiNode(t *testing.T) {
 }
 
 func TestLeaderElection_ThreeNodes(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create three nodes with different names
 	c1, err := NewCluster(Config{
@@ -169,7 +171,7 @@ func TestLeaderElection_ThreeNodes(t *testing.T) {
 }
 
 func TestLeaderElection_LeaderFailover(t *testing.T) {
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create cluster with 3 nodes
 	c1, err := NewCluster(Config{

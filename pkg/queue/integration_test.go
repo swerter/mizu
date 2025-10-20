@@ -1,6 +1,8 @@
 package queue
 
 import (
+	"io"
+
 	"context"
 	"fmt"
 	"net/http"
@@ -14,7 +16,7 @@ import (
 
 	"migadu/mizu/pkg/poster"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // TestPersistentQueue_CrashRecovery tests queue survives restart with pending jobs
@@ -32,7 +34,7 @@ func TestPersistentQueue_CrashRecovery(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := QueueConfig{
 		Workers:         2,
 		MaxRetryHours:   48,
@@ -132,7 +134,7 @@ func TestPersistentQueue_CircuitBreakerIntegration(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create circuit breaker with low threshold
 	cbConfig := poster.CircuitBreakerConfig{
@@ -224,7 +226,7 @@ func TestPersistentQueue_ConcurrentWorkers(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := QueueConfig{
 		Workers:         5, // 5 concurrent workers
 		MaxRetryHours:   48,
@@ -301,7 +303,7 @@ func TestPersistentQueue_HTTPTimeoutHandling(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := QueueConfig{
 		Workers:         1,
 		MaxRetryHours:   48,
@@ -358,7 +360,7 @@ func TestPersistentQueue_MaxRetryHours_MoveToDLQ(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := QueueConfig{
 		Workers:         1,
 		MaxRetryHours:   1, // Only 1 hour max age (for faster test)
@@ -429,7 +431,7 @@ func TestPersistentQueue_CustomEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := QueueConfig{
 		Workers:         1,
 		MaxRetryHours:   48,
@@ -493,7 +495,7 @@ func TestPersistentQueue_MultipleRecipients(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := QueueConfig{
 		Workers:         1,
 		MaxRetryHours:   48,
@@ -547,7 +549,7 @@ func TestPersistentQueue_EmptyEmailContent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := QueueConfig{
 		Workers:         1,
 		MaxRetryHours:   48,
@@ -613,7 +615,7 @@ func TestPersistentQueue_ShutdownWithPendingJobs(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := QueueConfig{
 		Workers:         2,
 		MaxRetryHours:   48,
