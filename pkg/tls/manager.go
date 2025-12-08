@@ -1,35 +1,40 @@
 package tls
 
 import (
-	"io"
-
 	"crypto/tls"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
-	"log/slog"
-
-	"migadu/mizu/pkg/storage"
 )
 
 // Manager handles automatic TLS certificate management using Let's Encrypt
 type Manager struct {
 	autocertManager *autocert.Manager
 	logger          *slog.Logger
+	stopCertSync    chan struct{} // Signal to stop certificate sync worker
 }
 
 // Config holds configuration for TLS manager
 type Config struct {
-	Enabled   bool
-	Email     string
-	Domains   []string
-	S3Client  *minio.Client
-	S3Bucket  string
-	S3Prefix  string
-	IsLeaderF func() bool
-	Staging   bool // Use Let's Encrypt staging environment
+	Enabled       bool
+	Email         string
+	Domains       []string
+	DefaultDomain string // Default domain for SNI-less connections
+	S3Client      *minio.Client
+	S3Bucket      string
+	S3Prefix      string
+	IsLeaderF     func() bool
+	Staging       bool          // Use Let's Encrypt staging environment
+	RenewBefore   time.Duration // How long before expiry to renew (0 = default 30 days)
+	FallbackDir   string        // Local fallback directory for certificates (empty = no fallback)
+	SyncInterval  time.Duration // How often to sync certificates (0 = no sync)
 }
 
 // NewManager creates a new TLS manager with autocert and S3 storage
@@ -55,23 +60,105 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		return nil, nil
 	}
 
-	// Create S3 cache with leader-only writes
-	s3Cache := storage.NewAutocertS3Cache(cfg.S3Client, cfg.S3Bucket, cfg.S3Prefix, cfg.IsLeaderF, logger)
+	// Create S3 cache
+	s3Cache, err := NewS3Cache(cfg.S3Client, cfg.S3Bucket, cfg.S3Prefix, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize S3 cache: %w", err)
+	}
 
-	// Configure autocert with S3 cache
-	m := &autocert.Manager{
-		Prompt:     autocert.AcceptTOS,
-		HostPolicy: autocert.HostWhitelist(cfg.Domains...),
-		Cache:      s3Cache,
-		Email:      cfg.Email,
+	// Wrap S3 cache with cluster-aware wrapper
+	var cache autocert.Cache = NewClusterAwareCache(s3Cache, cfg.IsLeaderF, logger)
+	logger.Info("Cluster-aware certificate cache enabled - only leader can request certificates")
+
+	// Optionally wrap with fallback cache if directory is provided
+	if cfg.FallbackDir != "" {
+		var err error
+		cache, err = NewFallbackCache(cache, cfg.FallbackDir, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize fallback cache: %w", err)
+		}
+	} else {
+		logger.Info("Certificate fallback cache disabled - using S3 only")
+	}
+
+	// Determine default domain for SNI-less connections
+	defaultDomain := cfg.DefaultDomain
+	if defaultDomain == "" && len(cfg.Domains) > 0 {
+		// If not specified, use the first configured domain
+		defaultDomain = cfg.Domains[0]
+	}
+
+	// Create autocert manager
+	autocertMgr := &autocert.Manager{
+		Prompt:      autocert.AcceptTOS,
+		Email:       cfg.Email,
+		HostPolicy:  autocert.HostWhitelist(cfg.Domains...),
+		Cache:       cache,
+		RenewBefore: cfg.RenewBefore, // 0 = default 30 days
+		Client: &acme.Client{
+			DirectoryURL: "https://acme-v02.api.letsencrypt.org/directory",
+		},
 	}
 
 	// Use staging environment for testing
 	if cfg.Staging {
-		m.Client = &acme.Client{
+		autocertMgr.Client = &acme.Client{
 			DirectoryURL: "https://acme-staging-v02.api.letsencrypt.org/directory",
 		}
 		logger.Info("TLS manager using Let's Encrypt staging environment")
+	}
+
+	m := &Manager{
+		autocertManager: autocertMgr,
+		logger:          logger,
+		stopCertSync:    make(chan struct{}),
+	}
+
+	// Create TLS config with autocert and logging wrapper
+	baseTLSConfig := autocertMgr.TLSConfig()
+
+	// Wrap GetCertificate with enhanced logging and SNI handling
+	originalGetCert := baseTLSConfig.GetCertificate
+	baseTLSConfig.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		serverName := hello.ServerName
+
+		// Handle missing SNI by using default domain
+		if serverName == "" {
+			if defaultDomain != "" {
+				logger.Debug("TLS: Missing SNI - using default domain", "domain", defaultDomain)
+				serverName = defaultDomain
+			} else {
+				logger.Debug("TLS: Rejected certificate request - missing SNI and no default domain")
+				return nil, ErrMissingServerName
+			}
+		}
+
+		// Normalize server name to lowercase for case-insensitive comparison
+		// RFC 4343: DNS names are case-insensitive
+		serverName = strings.ToLower(serverName)
+
+		// Check if the server name matches our configured domains using the HostPolicy
+		if err := autocertMgr.HostPolicy(nil, serverName); err != nil {
+			logger.Debug("TLS: Rejected certificate request for unconfigured domain", "domain", serverName, "error", err)
+			return nil, fmt.Errorf("%w: %s", ErrHostNotAllowed, serverName)
+		}
+
+		logger.Debug("TLS: Certificate request during handshake", "domain", serverName, "has_sni", hello.ServerName != "")
+
+		// Create a modified ClientHelloInfo with the resolved server name
+		modifiedHello := *hello
+		modifiedHello.ServerName = serverName
+
+		cert, err := originalGetCert(&modifiedHello)
+		if err != nil {
+			// Certificate retrieval failures are often transient (S3 down, ACME rate limits, network issues)
+			// Wrap as ErrCertificateUnavailable so the server logs but doesn't crash
+			// This allows the server to continue serving cached certificates for other domains
+			logger.Error("TLS: Failed to get certificate", "server_name", serverName, "error", err)
+			return nil, fmt.Errorf("%w for %s: %v", ErrCertificateUnavailable, serverName, err)
+		}
+		logger.Debug("TLS: Certificate provided", "domain", serverName)
+		return cert, nil
 	}
 
 	logger.Info("TLS manager initialized with autocert",
@@ -79,10 +166,18 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		"email", cfg.Email,
 		"staging", cfg.Staging)
 
-	return &Manager{
-		autocertManager: m,
-		logger:          logger,
-	}, nil
+	if defaultDomain != "" {
+		logger.Info("Default domain for SNI-less connections", "domain", defaultDomain)
+	}
+
+	logger.Info("Certificates will be stored in S3 bucket", "bucket", cfg.S3Bucket)
+
+	// Start certificate sync worker if configured
+	if cfg.SyncInterval > 0 {
+		m.startCertificateSyncWorker(cfg.SyncInterval)
+	}
+
+	return m, nil
 }
 
 // TLSConfig returns the TLS configuration for use with HTTP/SMTP servers
@@ -95,6 +190,13 @@ func (m *Manager) TLSConfig() *tls.Config {
 
 // HTTPHandler returns the HTTP handler for ACME HTTP-01 challenges
 // This should be registered at /.well-known/acme-challenge/
+//
+// In cluster mode, all nodes run this handler on port 80. Here's how it works:
+// 1. Leader node requests certificate from Let's Encrypt
+// 2. autocert stores challenge token in cache (S3)
+// 3. Let's Encrypt makes HTTP request to domain (may hit any node via load balancer)
+// 4. Any node can respond because challenge token is in shared S3 cache
+// 5. autocert.HTTPHandler reads token from cache and responds correctly
 func (m *Manager) HTTPHandler() http.Handler {
 	if m == nil || m.autocertManager == nil {
 		return nil
@@ -108,4 +210,9 @@ func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 		return nil, nil
 	}
 	return m.autocertManager.GetCertificate(hello)
+}
+
+// GetAutocertManager returns the underlying autocert.Manager
+func (m *Manager) GetAutocertManager() *autocert.Manager {
+	return m.autocertManager
 }

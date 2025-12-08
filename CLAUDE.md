@@ -81,34 +81,52 @@ Key packages:
    - Shares connection state and rate limits across cluster nodes
    - Message types: `MessageTypeConnectionState`, `MessageTypeRateLimit`
 
-3. **Connection Tracking & DoS Protection** ([pkg/smtp/](pkg/smtp/))
+3. **SMTP Authentication** ([pkg/smtp/auth.go](pkg/smtp/auth.go))
+   - `HTTPAuthenticator`: HTTP-based authentication for submission servers (ports 587/465)
+   - Supports AUTH PLAIN and AUTH LOGIN mechanisms (LOGIN via custom implementation)
+   - Requires TLS before authentication (except in local mode)
+   - 5-minute authentication cache to reduce API calls
+   - Validates that authenticated users can only send from authorized addresses
+   - Adds `X-Auth-User` header to delivery for authenticated messages
+
+4. **Connection Tracking & DoS Protection** ([pkg/smtp/](pkg/smtp/))
    - `ConnectionTracker`: Local per-IP and global connection limits
    - `DistributedTracker`: Cluster-wide connection tracking via gossip + S3 sync
-   - `RateLimiter`: Multi-dimensional rate limiting (IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN) with optional gossip
+   - `RateLimiter`: Multi-dimensional rate limiting (IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN, AUTHENTICATED_USER) with optional gossip
 
-4. **Reputation & Stats** ([pkg/stats/](pkg/stats/))
+5. **Reputation & Stats** ([pkg/stats/](pkg/stats/))
    - `Manager`: Tracks IP and domain reputation scores
    - Event-driven architecture with async processing (ring buffer, worker goroutines)
    - Syncs reputation data across cluster via S3
    - LRU-based eviction for memory efficiency (configurable max entries)
 
-5. **Circuit Breaker** ([pkg/poster/](pkg/poster/))
-   - Protects backend from being overwhelmed during failures
-   - States: Closed → Open → HalfOpen
-   - Configurable failure threshold, timeout, and success threshold
+6. **Synchronous Delivery with Circuit Breaker** ([pkg/poster/](pkg/poster/))
+   - **Retry logic**: Exponential backoff (1s, 2s, 4s...) with configurable max attempts
+   - **Circuit breaker**: Protects backend WITHOUT blocking retries
+     - Circuit breaker wraps **each individual retry attempt**, not the entire retry loop
+     - States: Closed → Open → HalfOpen
+     - When open: Returns `ErrCircuitOpen` (marked as retryable), so retries continue
+   - **Zero message loss**: SMTP `250 OK` only after successful HTTP delivery
+   - **Sender MTA retries**: If all attempts fail, sender's MTA retries for 24-48 hours (RFC 5321)
 
-6. **TLS Certificate Management** ([pkg/tls/](pkg/tls/))
+7. **TLS Certificate Management** ([pkg/tls/](pkg/tls/))
    - `Manager`: Handles autocert with Let's Encrypt (TLS-ALPN-01 and HTTP-01 challenges)
    - Distributed mode: Only cluster leader obtains certificates, stores in S3
    - Uses S3 for certificate storage across instances
    - Alternative: certmagic library for on-demand certificates
 
-7. **Email Validation** ([pkg/validation/](pkg/validation/))
+8. **Email Validation** ([pkg/validation/](pkg/validation/))
    - SPF validation (checks sender IP authorization)
    - DKIM validation (verifies email signature)
    - DMARC validation (checks alignment + policy enforcement)
    - ARC validation and signing (Authenticated Received Chain - preserves authentication through forwarding)
    - MX record validation for sender domains
+
+9. **Message Header Validation & Fixing** ([pkg/smtp/headers.go](pkg/smtp/headers.go))
+   - Configurable handling of missing Message-ID and Date headers via `[server.validation]`
+   - Three actions: `"reject"` (submission default), `"fix"` (relay default), `"none"`
+   - Automatic header generation: RFC-compliant Date timestamps and unique Message-IDs
+   - Case-insensitive header detection
 
 ### Configuration System
 
@@ -116,6 +134,34 @@ Key packages:
 - `Config` struct in [pkg/config/types.go](pkg/config/types.go) defines all settings
 - Environment variables supported for secrets: `DESTINATION_API_KEY`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `HEALTH_PASSWORD`, `CLUSTER_SECRET_KEY`
 - Default values defined in `DefaultConfig()`
+
+**Message Validation Configuration:**
+- `[server.validation]` section controls header validation behavior
+- `missing_headers_action`: "reject" | "fix" | "none"
+  - **"reject"** (default for submission): Reject emails missing Date or Message-ID headers
+  - **"fix"** (default for relay): Add missing headers before forwarding
+  - **"none"**: Allow through without modification
+- `allow_null_sender`: Allow bounce messages with null sender `<>` (typically false for submission, true for relay)
+
+**Authentication Configuration (for submission servers):**
+- `[server.auth]` section configures SMTP AUTH for ports 587/465
+- `enabled`: Enable SMTP AUTH (advertise AUTH in EHLO response)
+- `required`: Require authentication before MAIL FROM (implies enabled=true)
+- `url`: HTTPS endpoint for authentication (must use https://)
+- `api_key`: Bearer token for authentication API (supports env var: `${AUTH_API_KEY}`)
+- Authentication API contract:
+  ```json
+  // Request
+  {"username": "user@example.com", "password": "secret"}
+
+  // Response (success)
+  {"success": true, "user": "user@example.com", "allowed_from": ["user@example.com", "alias@example.com"]}
+
+  // Response (failure)
+  {"success": false, "error": "invalid credentials"}
+  ```
+- Authenticated messages include `X-Auth-User` header in delivery to backend
+- Rate limiting supports `AUTHENTICATED_USER` dimension for per-user limits
 
 ### Storage Backend Configuration
 
@@ -222,12 +268,42 @@ telnet localhost 25
 
 1. **Making changes to core SMTP logic**: Edit [pkg/smtp/server.go](pkg/smtp/server.go), run E2E tests
 2. **Adding new configuration options**:
-   - Add field to `Config` struct in [pkg/config/types.go](pkg/config/types.go)
-   - Update `DefaultConfig()` with sensible default
-   - Update validation in `config.Validate()` if needed
+   - Add field to appropriate struct in [pkg/config/types.go](pkg/config/types.go) (e.g., `ServerConfig`, `ServerValidationConfig`)
+   - Update `DefaultConfig()` with sensible default if applicable
+   - Add validation in `ServerConfig.Validate()` or `Config.Validate()` if the field has restricted values
+   - Update [config.toml.example](config.toml.example) with examples and documentation
 3. **Modifying validation logic**: Edit files in [pkg/validation/](pkg/validation/)
 4. **Cluster/gossip changes**: Work in [pkg/cluster/](pkg/cluster/)
 5. **Adding metrics**: Use prometheus client from [pkg/metrics/](pkg/metrics/)
+
+## Code Change Policy
+
+**IMPORTANT: Always make forward-only changes. Never implement backward compatibility or deprecated code paths.**
+
+When refactoring or changing configuration structure:
+- **DO**: Make clean, forward-only changes that require users to update their configuration
+- **DO**: Remove old code paths and configuration options entirely
+- **DO NOT**: Add "fallback to old config" logic or "deprecated but still supported" code paths
+- **DO NOT**: Keep deprecated configuration options "for backward compatibility"
+- **DO NOT**: Add comments like "DEPRECATED" or "legacy support"
+
+Example of what NOT to do:
+```go
+// BAD - Don't do this
+deliveryCfg := serverCfg.Delivery
+if deliveryCfg.URL == "" {
+    // Fallback to global for backward compatibility
+    deliveryCfg = globalCfg.Delivery
+}
+```
+
+Example of what TO do:
+```go
+// GOOD - Forward-only
+deliveryCfg := serverCfg.Delivery
+```
+
+**Rationale**: Backward compatibility code adds complexity, increases maintenance burden, and delays adoption of better designs. Breaking changes with clear migration paths are preferable to maintaining legacy code paths indefinitely.
 
 ## Common Gotchas
 
@@ -237,6 +313,8 @@ telnet localhost 25
 4. **TLS minimum version**: Only TLS 1.2 and 1.3 supported (1.0/1.1 deprecated)
 5. **Autocert leader election**: Only works with cluster mode enabled
 6. **Rate limit dimensions**: Must specify at least one dimension if rate limiting enabled
+7. **No internal queue**: Mizu is a synchronous relay - SMTP transaction completes ONLY after backend delivery succeeds or all retries exhausted
+8. **Message loss prevention**: Relies on sender MTA retry window (24-48 hours) and backend high availability - no persistent queue
 
 ## Module Information
 

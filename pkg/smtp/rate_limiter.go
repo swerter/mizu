@@ -65,9 +65,10 @@ type RateLimitData struct {
 
 // SessionContext holds all the information needed for rate limiting checks
 type SessionContext struct {
-	RemoteAddr string   // Remote address (IP:port)
-	From       string   // MAIL FROM address
-	To         []string // RCPT TO addresses
+	RemoteAddr        string   // Remote address (IP:port)
+	From              string   // MAIL FROM address
+	To                []string // RCPT TO addresses
+	AuthenticatedUser string   // Authenticated username (empty if not authenticated)
 }
 
 // NewRateLimiter creates a new multi-dimensional rate limiter with memberlist gossip
@@ -222,6 +223,12 @@ func (rl *RateLimiter) buildCompositeKey(keys []string, sessionCtx SessionContex
 				return "" // Can't build key without TO domain
 			}
 			parts = append(parts, fmt.Sprintf("TO_DOMAIN:%s", strings.ToLower(domain)))
+
+		case "AUTHENTICATED_USER":
+			if sessionCtx.AuthenticatedUser == "" {
+				return "" // Can't build key without authenticated user
+			}
+			parts = append(parts, fmt.Sprintf("USER:%s", strings.ToLower(sessionCtx.AuthenticatedUser)))
 
 		default:
 			rl.logger.Warn("Unknown rate limit dimension key", "key", key)

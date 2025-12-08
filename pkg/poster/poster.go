@@ -26,22 +26,15 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 // The isJunk parameter adds an X-Junk header to help the destination system handle spam appropriately.
 // The mailFrom and mailTo parameters are added as X-Mail-From and X-Mail-To headers with envelope addresses.
 // The traceID parameter is added as X-Trace-ID header for distributed tracing and log correlation.
-// The circuitBreaker parameter is optional - if provided, requests will be protected by the circuit breaker pattern.
+// The authenticatedUser parameter is added as X-Auth-User header when the message was sent via authenticated submission.
+// The circuitBreaker parameter is optional - if provided, each retry attempt will be protected by the circuit breaker.
 // The httpClient parameter specifies the HTTP client to use for requests (with configured timeout).
-func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *slog.Logger) error {
-	// If circuit breaker is provided and enabled, use it
-	if circuitBreaker != nil {
-		return circuitBreaker.Call(func() error {
-			return postEmailWithRetries(ctx, rawEmail, destinationURL, apiKey, maxRetryAttempts, isJunk, mailFrom, mailTo, traceID, httpClient, logger)
-		})
-	}
-
-	// No circuit breaker, call directly
-	return postEmailWithRetries(ctx, rawEmail, destinationURL, apiKey, maxRetryAttempts, isJunk, mailFrom, mailTo, traceID, httpClient, logger)
+func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, authenticatedUser string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *slog.Logger) error {
+	return postEmailWithRetries(ctx, rawEmail, destinationURL, apiKey, maxRetryAttempts, isJunk, mailFrom, mailTo, traceID, authenticatedUser, circuitBreaker, httpClient, logger)
 }
 
-// postEmailWithRetries contains the actual retry logic
-func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, httpClient *http.Client, logger *slog.Logger) error {
+// postEmailWithRetries contains the actual retry logic with circuit breaker protection per attempt
+func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, authenticatedUser string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *slog.Logger) error {
 	var lastErr error
 
 	// Ensure at least one attempt even if configured incorrectly
@@ -73,7 +66,18 @@ func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, 
 			}
 		}
 
-		err := postEmailAttemptWithContext(ctx, rawEmail, destinationURL, apiKey, isJunk, mailFrom, mailTo, traceID, httpClient, logger)
+		// Execute this attempt with circuit breaker protection
+		var err error
+		if circuitBreaker != nil {
+			// Circuit breaker protects each individual attempt
+			err = circuitBreaker.Call(func() error {
+				return postEmailAttemptWithContext(ctx, rawEmail, destinationURL, apiKey, isJunk, mailFrom, mailTo, traceID, authenticatedUser, httpClient, logger)
+			})
+		} else {
+			// No circuit breaker - call directly
+			err = postEmailAttemptWithContext(ctx, rawEmail, destinationURL, apiKey, isJunk, mailFrom, mailTo, traceID, authenticatedUser, httpClient, logger)
+		}
+
 		if err == nil {
 			// Success
 			return nil
@@ -100,7 +104,7 @@ func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, 
 
 // postEmailAttemptWithContext performs a single attempt to post the email with context support.
 // It sends the raw email as message/rfc822 content type with API key authentication.
-func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, isJunk bool, mailFrom string, mailTo []string, traceID string, httpClient *http.Client, logger *slog.Logger) error {
+func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, isJunk bool, mailFrom string, mailTo []string, traceID string, authenticatedUser string, httpClient *http.Client, logger *slog.Logger) error {
 	if httpClient == nil {
 		return fmt.Errorf("httpClient cannot be nil")
 	}
@@ -129,6 +133,11 @@ func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinati
 	// Add trace ID for distributed tracing and log correlation
 	if traceID != "" {
 		req.Header.Set("X-Trace-ID", traceID)
+	}
+
+	// Add authenticated user if message was sent via authenticated submission
+	if authenticatedUser != "" {
+		req.Header.Set("X-Auth-User", authenticatedUser)
 	}
 
 	// Signal to destination that this message was classified as junk/spam

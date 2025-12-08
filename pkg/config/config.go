@@ -35,32 +35,38 @@ func (c *Config) Validate() error {
 		return errors.New("no servers configured - at least one [[server]] section is required")
 	}
 
-	// Validate delivery configuration
-	if c.Delivery.MaxRetryAttempts > 5 {
-		return fmt.Errorf("delivery.max_retry_attempts must be <= 5 (got %d) to prevent excessive delays", c.Delivery.MaxRetryAttempts)
-	}
-	if c.Delivery.MaxRetryAttempts < 1 {
-		return fmt.Errorf("delivery.max_retry_attempts must be >= 1 (got %d)", c.Delivery.MaxRetryAttempts)
-	}
+	// Validate per-server delivery configuration
+	for i := range c.Servers {
+		srv := &c.Servers[i]
+		if srv.Delivery.MaxRetryAttempts > 5 {
+			return fmt.Errorf("server[%s].delivery.max_retry_attempts must be <= 5 (got %d) to prevent excessive delays", srv.Name, srv.Delivery.MaxRetryAttempts)
+		}
+		if srv.Delivery.MaxRetryAttempts < 1 {
+			return fmt.Errorf("server[%s].delivery.max_retry_attempts must be >= 1 (got %d)", srv.Name, srv.Delivery.MaxRetryAttempts)
+		}
 
-	// Validate HTTP timeout
-	if c.Delivery.HTTPTimeoutSeconds < 1 {
-		return fmt.Errorf("delivery.http_timeout_seconds must be >= 1 (got %d)", c.Delivery.HTTPTimeoutSeconds)
-	}
-	if c.Delivery.HTTPTimeoutSeconds > 300 {
-		return fmt.Errorf("delivery.http_timeout_seconds must be <= 300 (5m) (got %d) to prevent blocking SMTP sessions", c.Delivery.HTTPTimeoutSeconds)
+		// Validate HTTP timeout
+		if srv.Delivery.HTTPTimeoutSeconds < 1 {
+			return fmt.Errorf("server[%s].delivery.http_timeout_seconds must be >= 1 (got %d)", srv.Name, srv.Delivery.HTTPTimeoutSeconds)
+		}
+		if srv.Delivery.HTTPTimeoutSeconds > 300 {
+			return fmt.Errorf("server[%s].delivery.http_timeout_seconds must be <= 300 (5m) (got %d) to prevent blocking SMTP sessions", srv.Name, srv.Delivery.HTTPTimeoutSeconds)
+		}
+
+		// Production mode validations (skip in local mode)
+		if !c.Local {
+			if srv.Delivery.URL == "" {
+				return fmt.Errorf("server[%s].delivery.url must be set", srv.Name)
+			}
+			if srv.Delivery.APIKey == "" || srv.Delivery.APIKey == "your-api-key-here" {
+				return fmt.Errorf("server[%s].delivery.api_key must be set", srv.Name)
+			}
+		}
 	}
 
 	// Production mode validations (skip in local mode)
 	if c.Local {
 		return nil
-	}
-
-	if c.Delivery.URL == "" {
-		return errors.New("delivery.url must be set")
-	}
-	if c.Delivery.APIKey == "" || c.Delivery.APIKey == "your-api-key-here" {
-		return errors.New("delivery.api_key must be set")
 	}
 
 	// Validate storage configuration based on backend
@@ -91,13 +97,28 @@ func (c *Config) Validate() error {
 		return errors.New("tls.email must be set for Let's Encrypt certificate management")
 	}
 
-	// Validate autocert settings
-	if c.TLS.EnableAutocert {
-		if len(c.TLS.Domains) == 0 {
-			return errors.New("tls.domains must be set when tls.enable_autocert=true")
+	// Validate TLS domains
+	if len(c.TLS.Domains) == 0 {
+		return errors.New("tls.domains must be set for automatic certificate management")
+	}
+
+	// Validate cluster configuration
+	if c.Cluster.Enabled {
+		bindAddr := c.Cluster.GetBindAddr()
+		if bindAddr == "" {
+			return errors.New("cluster.addr must be set when cluster.enabled=true")
 		}
-		if !c.Cluster.Enabled {
-			return errors.New("tls.enable_autocert requires cluster.enabled=true for leader election")
+		// Prevent binding to 0.0.0.0 or localhost in production cluster mode
+		if bindAddr == "0.0.0.0" || bindAddr == "::" {
+			return errors.New("cluster.addr cannot be 0.0.0.0 or :: - must be a specific IP address for gossip protocol")
+		}
+		if bindAddr == "localhost" || bindAddr == "127.0.0.1" || bindAddr == "::1" {
+			return errors.New("cluster.addr cannot be localhost/127.0.0.1/::1 - must be a routable IP address for gossip protocol")
+		}
+
+		bindPort := c.Cluster.GetBindPort()
+		if bindPort < 1 || bindPort > 65535 {
+			return fmt.Errorf("cluster bind port must be between 1 and 65535, got %d", bindPort)
 		}
 	}
 
@@ -141,12 +162,19 @@ func (s *ServerConfig) Validate() error {
 
 	// Validate auth for submission servers
 	if s.IsSubmission() && s.Auth.Required {
-		if s.Auth.Endpoint == "" {
-			return errors.New("auth.endpoint is required when auth.required=true")
+		if s.Auth.URL == "" {
+			return errors.New("auth.url is required when auth.required=true")
 		}
 		// Enforce HTTPS for authentication endpoint
-		if !strings.HasPrefix(s.Auth.Endpoint, "https://") {
-			return errors.New("auth.endpoint must use https:// (HTTPS required for authentication)")
+		if !strings.HasPrefix(s.Auth.URL, "https://") {
+			return errors.New("auth.url must use https:// (HTTPS required for authentication)")
+		}
+	}
+
+	// Validate Validation config
+	if s.Validation.MissingHeadersAction != "" {
+		if s.Validation.MissingHeadersAction != "reject" && s.Validation.MissingHeadersAction != "fix" && s.Validation.MissingHeadersAction != "none" {
+			return fmt.Errorf("validation.missing_headers_action must be 'reject', 'fix', or 'none', got '%s'", s.Validation.MissingHeadersAction)
 		}
 	}
 
@@ -167,24 +195,8 @@ func (s *ServerConfig) Validate() error {
 		}
 	}
 
-	// Validate DKIM config
-	if s.DKIM.Enabled {
-		if s.DKIM.Mode != "" && s.DKIM.Mode != "check" && s.DKIM.Mode != "sign" {
-			return fmt.Errorf("dkim.mode must be 'check' or 'sign', got '%s'", s.DKIM.Mode)
-		}
-		// If mode is sign, require signing parameters
-		if s.DKIM.Mode == "sign" {
-			if s.DKIM.Domain == "" {
-				return errors.New("dkim.domain is required when dkim.mode='sign'")
-			}
-			if s.DKIM.Selector == "" {
-				return errors.New("dkim.selector is required when dkim.mode='sign'")
-			}
-			if s.DKIM.PrivateKeyPath == "" {
-				return errors.New("dkim.private_key_path is required when dkim.mode='sign'")
-			}
-		}
-	}
+	// DKIM validation is always enabled if DKIM.Enabled is true
+	// No additional configuration validation needed
 
 	// Validate ARC config
 	if s.ARC.Enabled {
@@ -219,6 +231,20 @@ func (s *ServerConfig) Validate() error {
 	// Validate distributed tracking
 	if s.Distributed.Enabled && s.Distributed.RecipientCacheTTLSeconds < 60 {
 		return fmt.Errorf("distributed.recipient_cache_ttl_seconds must be >= 60 (1m), got %d", s.Distributed.RecipientCacheTTLSeconds)
+	}
+
+	// Validate recipient validation config
+	if s.RecipientValidation.Enabled {
+		if s.RecipientValidation.URL == "" {
+			return errors.New("recipient_validation.url is required when recipient_validation.enabled=true")
+		}
+		// Set defaults for optional fields
+		if s.RecipientValidation.HTTPTimeoutSeconds == 0 {
+			s.RecipientValidation.HTTPTimeoutSeconds = 5
+		}
+		if s.RecipientValidation.CacheTTLSeconds == 0 {
+			s.RecipientValidation.CacheTTLSeconds = 300
+		}
 	}
 
 	return nil

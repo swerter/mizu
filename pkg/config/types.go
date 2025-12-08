@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"net"
+	"strconv"
+)
 
 // Config holds all configuration for the SMTP server(s)
 type Config struct {
@@ -9,10 +12,6 @@ type Config struct {
 	Logging    LoggingConfig    `toml:"logging"`  // Logging configuration
 	DNS        DNSConfig        `toml:"dns"`
 	Storage    StorageConfig    `toml:"storage"`
-	Delivery   DeliveryConfig   `toml:"delivery"`
-	Forwarding ForwardingConfig `toml:"forwarding"` // Optional forwarding endpoint (used with routing)
-	Routing    RoutingConfig    `toml:"routing"`    // Optional routing/aliasing system
-	Queue      QueueConfig      `toml:"queue"`      // Optional async delivery queue (used with routing)
 	TLS        TLSConfig        `toml:"tls"`
 	Blacklists BlacklistsConfig `toml:"blacklists"`
 	Health     HealthConfig     `toml:"health"`
@@ -42,7 +41,8 @@ type ServerConfig struct {
 	Domain     string `toml:"domain"`      // Server domain (overrides defaults.domain if set)
 
 	// === Message Processing ===
-	MaxMessageSize int `toml:"max_message_size"` // Maximum message size in bytes (overrides default)
+	MaxMessageSize          int `toml:"max_message_size"`           // Maximum message size in bytes (overrides default)
+	MaxRecipientsPerMessage int `toml:"max_recipients_per_message"` // Maximum recipients per message (default: 100)
 
 	// === Connection Limits ===
 	Limits ServerLimitsConfig `toml:"limits"` // Connection limits
@@ -55,7 +55,7 @@ type ServerConfig struct {
 	ShutdownTimeoutSeconds int `toml:"shutdown_timeout_seconds"` // Graceful shutdown timeout (overrides default)
 
 	// === Nested Configuration Sections ===
-	Submission ServerSubmissionConfig `toml:"submission"` // Submission-specific settings (for type="submission")
+	Validation ServerValidationConfig `toml:"validation"` // Message validation settings (applies to both relay and submission)
 	Auth       ServerAuthConfig       `toml:"auth"`       // Authentication configuration (use auth.required=true to require auth)
 	DNSChecks  ServerDNSChecksConfig  `toml:"dns_checks"` // DNS validation checks (rDNS, MX)
 	Junk       ServerJunkConfig       `toml:"junk"`       // Junk/spam detection configuration
@@ -68,6 +68,12 @@ type ServerConfig struct {
 	// === Rate Limiting (per-server) ===
 	RateLimit   RateLimitConfig         `toml:"rate_limit"`  // Rate limiting configuration
 	Distributed DistributedLimitsConfig `toml:"distributed"` // Distributed connection tracking
+
+	// === Recipient Validation Configuration (per-server) ===
+	RecipientValidation RecipientValidationConfig `toml:"recipient_validation"` // HTTP endpoint for recipient validation during RCPT TO
+
+	// === Delivery Configuration (per-server) ===
+	Delivery DeliveryConfig `toml:"delivery"` // HTTP endpoint for email delivery
 }
 
 // ServerLimitsConfig holds connection limits
@@ -77,17 +83,18 @@ type ServerLimitsConfig struct {
 	MaxConnectionsPerUser int `toml:"max_connections_per_user"` // Per-user connection limit (for submission servers)
 }
 
-// ServerSubmissionConfig holds settings specific to submission servers (type="submission")
-type ServerSubmissionConfig struct {
-	AllowNullSender   bool `toml:"allow_null_sender"`   // Allow bounce messages with null sender (<>)
-	FixMissingHeaders bool `toml:"fix_missing_headers"` // Add missing Message-ID and Date headers
+// ServerValidationConfig holds message validation settings (applies to both relay and submission)
+type ServerValidationConfig struct {
+	AllowNullSender      bool   `toml:"allow_null_sender"`      // Allow bounce messages with null sender (<>) - typically true for relay, false for submission
+	MissingHeadersAction string `toml:"missing_headers_action"` // Action for missing Message-ID/Date headers: "reject", "fix", "none" (default: "reject" for submission, "fix" for relay)
 }
 
 // ServerAuthConfig holds authentication configuration for submission servers
-// Authentication is performed via HTTPS POST to the configured endpoint
+// Authentication is performed via HTTPS POST to the configured URL
 type ServerAuthConfig struct {
-	Required bool   `toml:"required"` // Require authentication (typically true for submission servers)
-	Endpoint string `toml:"endpoint"` // HTTPS endpoint for authentication (must use https://)
+	Enabled  bool   `toml:"enabled"`  // Enable SMTP AUTH (advertise AUTH in EHLO, default: false)
+	Required bool   `toml:"required"` // Require authentication before MAIL FROM (default: false, implies enabled=true)
+	URL      string `toml:"url"`      // HTTPS URL for authentication (must use https://)
 	APIKey   string `toml:"api_key"`  // API key for authentication (sent as Bearer token, can use env var: ${AUTH_API_KEY})
 }
 
@@ -96,13 +103,9 @@ type ServerSPFConfig struct {
 	Enabled bool `toml:"enabled"` // Enable SPF validation
 }
 
-// ServerDKIMConfig holds DKIM validation and signing configuration
+// ServerDKIMConfig holds DKIM validation configuration
 type ServerDKIMConfig struct {
-	Enabled        bool   `toml:"enabled"`          // Enable DKIM (validation or signing)
-	Mode           string `toml:"mode"`             // Mode: "check" (validate incoming) or "sign" (sign outgoing)
-	Domain         string `toml:"domain"`           // Domain for DKIM signature (d=) - required for mode=sign
-	Selector       string `toml:"selector"`         // DKIM selector (s=) - required for mode=sign
-	PrivateKeyPath string `toml:"private_key_path"` // Path to RSA private key (PEM format) - required for mode=sign
+	Enabled bool `toml:"enabled"` // Enable DKIM validation
 }
 
 // ServerDMARCConfig holds DMARC validation configuration
@@ -226,11 +229,42 @@ type DNSConfig struct {
 // ClusterConfig holds global cluster/peering configuration (using memberlist)
 type ClusterConfig struct {
 	Enabled   bool     `toml:"enabled"`    // Enable cluster mode (memberlist)
-	NodeName  string   `toml:"node_name"`  // This node's name (defaults to hostname)
-	BindAddr  string   `toml:"bind_addr"`  // Address to bind memberlist to (e.g., "0.0.0.0")
-	BindPort  int      `toml:"bind_port"`  // Port for memberlist (default: 7946)
-	Peers     []string `toml:"peers"`      // Other cluster nodes to connect to (e.g., ["node1.example.com:7946"])
+	Addr      string   `toml:"addr"`       // Gossip listen address (can be "IP:port" or just "IP", must be specific IP, NOT 0.0.0.0 or localhost)
+	Port      int      `toml:"port"`       // Gossip port (used if not specified in addr, default: 7946)
+	NodeName  string   `toml:"node_name"`  // This node's name (defaults to hostname, also used as NodeID)
+	Peers     []string `toml:"peers"`      // Other cluster nodes to connect to (e.g., ["10.0.1.10:7946", "10.0.1.11:7946"])
 	SecretKey string   `toml:"secret_key"` // 32-byte base64-encoded encryption key (use CLUSTER_SECRET_KEY env var)
+}
+
+// GetBindAddr returns the bind address by parsing the addr field
+func (c *ClusterConfig) GetBindAddr() string {
+	if c.Addr == "" {
+		return ""
+	}
+	// If addr contains port, split it
+	if host, _, err := net.SplitHostPort(c.Addr); err == nil {
+		return host
+	}
+	// Otherwise, return as-is (it's just an IP)
+	return c.Addr
+}
+
+// GetBindPort returns the bind port from either addr or port field
+func (c *ClusterConfig) GetBindPort() int {
+	if c.Addr != "" {
+		// If addr contains port, extract it
+		if _, portStr, err := net.SplitHostPort(c.Addr); err == nil {
+			if port, err := strconv.Atoi(portStr); err == nil {
+				return port
+			}
+		}
+	}
+	// Fall back to port field
+	if c.Port > 0 {
+		return c.Port
+	}
+	// Default port
+	return 7946
 }
 
 // DistributedLimitsConfig holds configuration for distributed connection tracking
@@ -254,6 +288,15 @@ type StorageConfig struct {
 	Region          string `toml:"region"`            // S3 region
 }
 
+// RecipientValidationConfig holds configuration for recipient validation during RCPT TO
+type RecipientValidationConfig struct {
+	Enabled            bool   `toml:"enabled"`              // Enable recipient validation (default: false)
+	URL                string `toml:"url"`                  // HTTP endpoint for recipient validation
+	APIKey             string `toml:"api_key"`              // API key for authentication (sent as Bearer token)
+	HTTPTimeoutSeconds int    `toml:"http_timeout_seconds"` // HTTP client timeout in seconds (default: 5)
+	CacheTTLSeconds    int    `toml:"cache_ttl_seconds"`    // Cache TTL for successful validations (default: 300 = 5min)
+}
+
 // DeliveryConfig holds configuration for the HTTP delivery endpoint
 type DeliveryConfig struct {
 	URL                string               `toml:"url"`
@@ -271,34 +314,6 @@ type CircuitBreakerConfig struct {
 	TimeoutSeconds      int  `toml:"timeout_seconds"`       // time to wait before half-open in seconds (default: 30)
 	HalfOpenMaxCalls    int  `toml:"half_open_max_calls"`   // max concurrent calls in half-open (default: 1)
 	ResetTimeoutSeconds int  `toml:"reset_timeout_seconds"` // time before resetting counters in seconds (default: 60)
-}
-
-// ForwardingConfig holds configuration for the forwarding endpoint (used with routing)
-type ForwardingConfig struct {
-	Enabled            bool                 `toml:"enabled"`              // Enable forwarding functionality
-	URL                string               `toml:"url"`                  // HTTP endpoint for forwarding
-	APIKey             string               `toml:"api_key"`              // API key for authentication (or use FORWARDING_API_KEY env var)
-	MaxRetryAttempts   int                  `toml:"max_retry_attempts"`   // Max retries (used by queue, default: 5)
-	HTTPTimeoutSeconds int                  `toml:"http_timeout_seconds"` // HTTP client timeout in seconds (default: 30)
-	CircuitBreaker     CircuitBreakerConfig `toml:"circuit_breaker"`      // Circuit breaker for forwarding endpoint
-	SRS                SRSConfig            `toml:"srs"`                  // Sender Rewriting Scheme configuration
-}
-
-// SRSConfig holds configuration for Sender Rewriting Scheme (SRS)
-type SRSConfig struct {
-	Enabled bool   `toml:"enabled"` // Enable SRS for forwarded emails
-	Domain  string `toml:"domain"`  // Domain to use for SRS addresses (e.g., "relay.mizu.com")
-	Secret  string `toml:"secret"`  // Secret key for SRS HMAC (or use SRS_SECRET env var)
-}
-
-// QueueConfig holds configuration for async delivery queue (used with routing)
-type QueueConfig struct {
-	Enabled                bool          `toml:"enabled"`                  // Enable async queue (only when routing.enabled=true)
-	DataDir                string        `toml:"data_dir"`                 // Directory for persistent queue storage (default: ./data/queue)
-	Workers                int           `toml:"workers"`                  // Number of concurrent workers (default: 10)
-	MaxRetryHours          int           `toml:"max_retry_hours"`          // Maximum hours to retry before giving up (default: 48)
-	ShutdownTimeoutSeconds int           `toml:"shutdown_timeout_seconds"` // Max time to wait for graceful shutdown (default: 30)
-	DeliveryTimeout        time.Duration // HTTP delivery timeout (set from http_timeout_seconds)
 }
 
 // HealthConfig holds configuration for the health check endpoint.
@@ -333,27 +348,14 @@ type LoggingConfig struct {
 
 // TLSConfig holds TLS/certificate configuration
 type TLSConfig struct {
-	Email            string   `toml:"email"`             // Email for Let's Encrypt
-	Domains          []string `toml:"domains"`           // Domains to obtain certificates for
-	UseProduction    bool     `toml:"use_production"`    // Use Let's Encrypt production (vs staging)
-	UseLocalCA       bool     `toml:"use_local_ca"`      // Use local CA for testing
-	CertMagicVerbose bool     `toml:"certmagic_verbose"` // Enable verbose certmagic logging
-	EnableAutocert   bool     `toml:"enable_autocert"`   // Enable autocert for automatic certificate management
-}
-
-// RoutingConfig holds configuration for the optional routing/aliasing system
-type RoutingConfig struct {
-	Enabled                 bool                 `toml:"enabled"`                    // Enable routing lookups (default: false)
-	Endpoint                string               `toml:"endpoint"`                   // HTTP endpoint for routing lookups (e.g., Cloudflare Worker)
-	APIKey                  string               `toml:"api_key"`                    // API key for authentication (or use ROUTING_API_KEY env var)
-	TimeoutMS               int                  `toml:"timeout_ms"`                 // Timeout for routing queries in milliseconds (default: 100)
-	RetryAttempts           int                  `toml:"retry_attempts"`             // Number of retry attempts (default: 2)
-	CacheTTLSeconds         int                  `toml:"cache_ttl_seconds"`          // Cache TTL for successful lookups (default: 300 = 5min)
-	CacheNegativeTTLSeconds int                  `toml:"cache_negative_ttl_seconds"` // Cache TTL for failures (default: 60 = 1min)
-	CacheMaxEntries         int                  `toml:"cache_max_entries"`          // Maximum cache entries (default: 50000)
-	FallbackOnError         string               `toml:"fallback_on_error"`          // Behavior on routing error: "tempfail" (451) or "reject" (550)
-	ValidateDuringRcpt      bool                 `toml:"validate_during_rcpt"`       // Validate recipient during RCPT TO (vs. DATA)
-	CircuitBreaker          CircuitBreakerConfig `toml:"circuit_breaker"`            // Circuit breaker for routing endpoint
+	Email               string   `toml:"email"`                 // Email for Let's Encrypt
+	Domains             []string `toml:"domains"`               // Domains to obtain certificates for
+	DefaultDomain       string   `toml:"default_domain"`        // Default domain for SNI-less connections (optional, defaults to first domain)
+	UseProduction       bool     `toml:"use_production"`        // Use Let's Encrypt production (vs staging)
+	UseLocalCA          bool     `toml:"use_local_ca"`          // Use local CA for testing
+	RenewBeforeDays     int      `toml:"renew_before_days"`     // Days before expiry to renew (default: 30)
+	FallbackCacheDir    string   `toml:"fallback_cache_dir"`    // Local fallback directory for certificates (optional, empty = no fallback)
+	SyncIntervalMinutes int      `toml:"sync_interval_minutes"` // How often to sync certificates in minutes (default: 5, 0 = no sync)
 }
 
 // StatsConfig holds configuration for IP and domain reputation tracking
@@ -393,7 +395,6 @@ func DefaultConfig() Config {
 				},
 				DKIM: ServerDKIMConfig{
 					Enabled: true,
-					Mode:    "check",
 				},
 				DMARC: ServerDMARCConfig{
 					Enabled:                true,
@@ -418,7 +419,8 @@ func DefaultConfig() Config {
 					SubjectPattern:   "[spam] %s",
 					Header:           "X-Spam",
 				},
-				MaxMessageSize: 10 * 1024 * 1024, // 10MB
+				MaxMessageSize:          10 * 1024 * 1024, // 10MB
+				MaxRecipientsPerMessage: 100,              // 100 recipients max
 				Limits: ServerLimitsConfig{
 					MaxConnections:      100,
 					MaxConnectionsPerIP: 10,
@@ -443,6 +445,27 @@ func DefaultConfig() Config {
 					S3SyncIntervalSeconds:    30,
 					RecipientCacheTTLSeconds: 900,
 				},
+				RecipientValidation: RecipientValidationConfig{
+					Enabled:            false, // Disabled by default
+					URL:                "",
+					APIKey:             "",
+					HTTPTimeoutSeconds: 5,   // 5s timeout for recipient validation
+					CacheTTLSeconds:    300, // 5min cache
+				},
+				Delivery: DeliveryConfig{
+					URL:                "https://your-worker.example.com/email",
+					APIKey:             "your-api-key-here",
+					MaxRetryAttempts:   3,
+					HTTPTimeoutSeconds: 30,
+					CircuitBreaker: CircuitBreakerConfig{
+						Enabled:             true,
+						FailureThreshold:    5,
+						SuccessThreshold:    2,
+						TimeoutSeconds:      30,
+						HalfOpenMaxCalls:    1,
+						ResetTimeoutSeconds: 60,
+					},
+				},
 			},
 		},
 		DNS: DNSConfig{
@@ -459,69 +482,11 @@ func DefaultConfig() Config {
 			Prefix:         "certs/",
 			Region:         "us-east-1",
 		},
-		Delivery: DeliveryConfig{
-			URL:                "https://your-worker.example.com/email",
-			APIKey:             "your-api-key-here",
-			MaxRetryAttempts:   3,
-			HTTPTimeoutSeconds: 30, // Default 30s HTTP timeout
-			CircuitBreaker: CircuitBreakerConfig{
-				Enabled:             true,
-				FailureThreshold:    5,
-				SuccessThreshold:    2,
-				TimeoutSeconds:      30,
-				HalfOpenMaxCalls:    1,
-				ResetTimeoutSeconds: 60,
-			},
-		},
-		Forwarding: ForwardingConfig{
-			Enabled:            false,                                      // Disabled by default
-			URL:                "https://forward-worker.example.com/relay", // Example forwarding endpoint
-			APIKey:             "",                                         // No API key by default
-			MaxRetryAttempts:   5,                                          // 5 retries (handled by queue)
-			HTTPTimeoutSeconds: 30,                                         // 30s timeout
-			CircuitBreaker: CircuitBreakerConfig{
-				Enabled:             true,
-				FailureThreshold:    5,
-				SuccessThreshold:    2,
-				TimeoutSeconds:      30,
-				HalfOpenMaxCalls:    1,
-				ResetTimeoutSeconds: 60,
-			},
-		},
-		Routing: RoutingConfig{
-			Enabled:                 false,                                         // Disabled by default
-			Endpoint:                "https://routing.example.workers.dev/resolve", // Example endpoint
-			APIKey:                  "",                                            // No API key by default
-			TimeoutMS:               100,                                           // 100ms timeout
-			RetryAttempts:           2,                                             // 2 retries
-			CacheTTLSeconds:         300,                                           // 5min cache for hits
-			CacheNegativeTTLSeconds: 60,                                            // 1min cache for misses
-			CacheMaxEntries:         50000,                                         // 50k cache entries
-			FallbackOnError:         "tempfail",                                    // Temp fail on routing errors
-			ValidateDuringRcpt:      true,                                          // Validate during RCPT TO
-			CircuitBreaker: CircuitBreakerConfig{
-				Enabled:             true, // Enabled by default to protect routing endpoint
-				FailureThreshold:    10,   // 10 failures before opening (routing should be fast)
-				SuccessThreshold:    3,    // 3 successes to close
-				TimeoutSeconds:      5,    // Try again after 5s (routing is critical)
-				HalfOpenMaxCalls:    2,    // Allow 2 concurrent test calls
-				ResetTimeoutSeconds: 30,   // Reset counters after 30s
-			},
-		},
-		Queue: QueueConfig{
-			Enabled:                false,          // Disabled by default (only used with routing)
-			DataDir:                "./data/queue", // Default data directory
-			Workers:                10,             // 10 concurrent workers
-			MaxRetryHours:          48,             // 48 hours retry window
-			ShutdownTimeoutSeconds: 30,             // 30s shutdown timeout
-		},
 		TLS: TLSConfig{
-			Email:            "admin@example.com",
-			Domains:          []string{},
-			UseProduction:    true,
-			UseLocalCA:       false,
-			CertMagicVerbose: false,
-			EnableAutocert:   false,
+			Email:         "admin@example.com",
+			Domains:       []string{},
+			UseProduction: true,
+			UseLocalCA:    false,
 		},
 		Blacklists: BlacklistsConfig{
 			Enabled:           true,
@@ -551,9 +516,9 @@ func DefaultConfig() Config {
 		},
 		Cluster: ClusterConfig{
 			Enabled:  false,
+			Addr:     "",         // Must be set to specific IP when enabled
+			Port:     7946,       // Standard memberlist port
 			NodeName: "",         // Auto-detected if empty
-			BindAddr: "0.0.0.0",  // Bind to all interfaces
-			BindPort: 7946,       // Standard memberlist port
 			Peers:    []string{}, // No peers by default
 		},
 		Logging: LoggingConfig{

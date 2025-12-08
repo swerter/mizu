@@ -17,9 +17,6 @@ func TestNew(t *testing.T) {
 	if m.SMTPConnectionsTotal == nil {
 		t.Error("SMTPConnectionsTotal is nil")
 	}
-	if m.QueueJobsTotal == nil {
-		t.Error("QueueJobsTotal is nil")
-	}
 
 	t.Log("✓ Metrics created with default namespace")
 }
@@ -99,30 +96,6 @@ func TestMetrics_CircuitBreakerMetrics(t *testing.T) {
 	t.Log("✓ Circuit breaker metrics work correctly")
 }
 
-func TestMetrics_QueueMetrics(t *testing.T) {
-	m := New("test_queue")
-
-	// Test counters
-	m.QueueJobsTotal.Inc()
-	m.QueueJobsDelivered.Inc()
-	m.QueueJobsFailed.Inc()
-	m.QueueJobsRetries.Inc()
-
-	// Test gauges
-	m.QueueJobsActive.Set(10)
-	m.QueueJobsDLQ.Set(2)
-	m.QueueWorkers.Set(5)
-	m.QueueStorageSize.Set(1024000)
-	m.QueueEmailFiles.Set(50)
-	m.QueueScheduleEntries.Set(100)
-
-	// Test histograms
-	m.QueueDeliveryDuration.Observe(2.5)
-	m.QueueJobAge.Observe(300)
-
-	t.Log("✓ Queue metrics work correctly")
-}
-
 func TestMetrics_ConnectionTrackerMetrics(t *testing.T) {
 	m := New("test_conn")
 
@@ -192,9 +165,6 @@ func TestMetrics_AllMetricsNonNil(t *testing.T) {
 	}
 	if m.CircuitBreakerState == nil {
 		t.Error("CircuitBreakerState is nil")
-	}
-	if m.QueueJobsTotal == nil {
-		t.Error("QueueJobsTotal is nil")
 	}
 
 	t.Log("✓ All metrics are non-nil")

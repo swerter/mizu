@@ -24,8 +24,6 @@ import (
 	"migadu/mizu/pkg/logging"
 	"migadu/mizu/pkg/metrics"
 	"migadu/mizu/pkg/poster"
-	"migadu/mizu/pkg/queue"
-	"migadu/mizu/pkg/routing"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/validation"
 
@@ -66,12 +64,17 @@ func NewDNSResolver(dnsServers []string, timeout time.Duration, cacheTTL time.Du
 	return resolver, wrapper
 }
 
-// RoutingClient defines the interface for routing lookups
-// This allows for easier testing and potential alternative implementations
-type RoutingClient interface {
-	Resolve(ctx context.Context, recipient, sender, clientIP, subject string) (*routing.ResolveResponse, error)
+// RecipientValidator defines the interface for recipient validation during RCPT TO
+type RecipientValidator interface {
+	Validate(ctx context.Context, clientIP, from, to string) (*RecipientValidationResponse, error)
 	FlushCache()
 	GetStats() map[string]interface{}
+}
+
+// RecipientValidationResponse represents the result of recipient validation
+type RecipientValidationResponse struct {
+	Accepted bool
+	Message  string
 }
 
 // Backend implements smtp.Backend interface for our custom SMTP server.
@@ -96,40 +99,16 @@ type Backend struct {
 
 	// Authentication and signing (for submission servers)
 	Authenticator Authenticator         // Optional: Authenticates users (submission servers)
-	DKIMSigner    DKIMSigner            // Optional: Signs outbound mail with DKIM (submission servers)
 	ARCSigner     *validation.ARCSigner // Optional: ARC signer for adding ARC headers
 
-	// Routing and delivery
-	RoutingClient RoutingClient // Optional: Routing/aliasing client
-	DeliveryQueue DeliveryQueue // Optional: Async delivery queue (used with routing)
-	SRSRewriter   SRSRewriter   // Optional: SRS rewriter for forwarding
+	// Recipient validation
+	RecipientValidator RecipientValidator // Optional: Recipient validator (validates during RCPT TO)
 }
 
 // Authenticator interface for SMTP AUTH
 type Authenticator interface {
 	Authenticate(username, password string) (bool, error)
 	CanSendAs(authenticatedUser, fromAddress string) bool
-}
-
-// DKIMSigner interface for signing outbound mail
-type DKIMSigner interface {
-	SignEmail(rawEmail string) (string, error)
-}
-
-// SRSRewriter defines the interface for Sender Rewriting Scheme operations
-type SRSRewriter interface {
-	Encode(originalAddress string) (string, error)
-	Decode(srsAddress string) (string, error)
-	IsSRSAddress(address string) bool
-}
-
-// DeliveryQueue defines the interface for async email delivery
-type DeliveryQueue interface {
-	Enqueue(job *queue.DeliveryJob) error
-	GetStats() queue.QueueStats
-	Size() int
-	Start() error
-	Shutdown(ctx context.Context) error
 }
 
 // EHLO/HELO is called for the HELO/EHLO command.
@@ -396,37 +375,34 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	traceID := generateTraceID()
 
 	session := &Session{
-		conn:              c,
-		helo:              "",
-		from:              "",
-		to:                make([]string, 0),
-		remoteAddr:        c.Conn().RemoteAddr().String(),
-		serverConfig:      be.ServerConfig,
-		globalConfig:      be.GlobalConfig,
-		tlsState:          tlsState,
-		statsManager:      be.StatsManager,
-		circuitBreaker:    be.CircuitBreaker,
-		httpClient:        be.HTTPClient,
-		dnsResolver:       be.DNSResolver,
-		connTracker:       be.ConnTracker,
-		distTracker:       be.DistTracker,
-		rateLimiter:       be.RateLimiter,
-		metrics:           be.Metrics,
-		ctx:               ctx,
-		Logger:            be.Logger.With("trace_id", traceID),
-		cancel:            cancel,
-		sessionsWg:        be.ActiveSessionsWg,
-		sessionCount:      be.ActiveSessionCount,
-		commandState:      stateNew, // Explicitly initialize command state
-		traceID:           traceID,
-		isAuthenticated:   false,            // Not authenticated initially
-		authenticatedUser: "",               // No user yet
-		authenticator:     be.Authenticator, // Authenticator (nil if not submission)
-		dkimSigner:        be.DKIMSigner,    // DKIM signer (nil if not enabled)
-		arcSigner:         be.ARCSigner,     // ARC signer (nil if disabled)
-		routingClient:     be.RoutingClient, // Routing client (nil if disabled)
-		deliveryQueue:     be.DeliveryQueue, // Delivery queue (nil if disabled)
-		srsRewriter:       be.SRSRewriter,   // SRS rewriter (nil if disabled)
+		conn:               c,
+		helo:               "",
+		from:               "",
+		to:                 make([]string, 0),
+		remoteAddr:         c.Conn().RemoteAddr().String(),
+		serverConfig:       be.ServerConfig,
+		globalConfig:       be.GlobalConfig,
+		tlsState:           tlsState,
+		statsManager:       be.StatsManager,
+		circuitBreaker:     be.CircuitBreaker,
+		httpClient:         be.HTTPClient,
+		dnsResolver:        be.DNSResolver,
+		connTracker:        be.ConnTracker,
+		distTracker:        be.DistTracker,
+		rateLimiter:        be.RateLimiter,
+		metrics:            be.Metrics,
+		ctx:                ctx,
+		Logger:             be.Logger.With("trace_id", traceID),
+		cancel:             cancel,
+		sessionsWg:         be.ActiveSessionsWg,
+		sessionCount:       be.ActiveSessionCount,
+		commandState:       stateNew, // Explicitly initialize command state
+		traceID:            traceID,
+		isAuthenticated:    false,                 // Not authenticated initially
+		authenticatedUser:  "",                    // No user yet
+		authenticator:      be.Authenticator,      // Authenticator (nil if not submission)
+		arcSigner:          be.ARCSigner,          // ARC signer (nil if disabled)
+		recipientValidator: be.RecipientValidator, // Recipient validator (nil if disabled)
 	}
 
 	sessionCreated = true
@@ -463,7 +439,6 @@ type Session struct {
 	isAuthenticated   bool          // Whether user has authenticated via SMTP AUTH
 	authenticatedUser string        // Username from successful authentication
 	authenticator     Authenticator // Authenticator for this session
-	dkimSigner        DKIMSigner    // DKIM signer for outbound mail
 
 	// Anti-spam tracking
 	isJunk       bool     // Whether this message is considered junk/spam
@@ -480,13 +455,8 @@ type Session struct {
 	arcResult   *validation.ARCResult
 	arcSigner   *validation.ARCSigner // ARC signer (nil if ARC signing disabled)
 
-	// Routing
-	routingClient RoutingClient            // Routing client for recipient validation and aliasing (nil if disabled)
-	routingResult *routing.ResolveResponse // Result from routing lookup (cached during RCPT TO)
-	deliveryQueue DeliveryQueue            // Async delivery queue (nil if disabled)
-
-	// SRS (Sender Rewriting Scheme)
-	srsRewriter SRSRewriter // SRS rewriter for forwarding (nil if disabled)
+	// Recipient validation
+	recipientValidator RecipientValidator // Recipient validator for validating during RCPT TO (nil if disabled)
 }
 
 // SMTP command states for sequence validation
@@ -682,6 +652,30 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		return ErrTLSRequiredStartTLS
 	}
 
+	// Check authentication requirement (for submission servers)
+	if s.serverConfig.Auth.Required && !s.isAuthenticated {
+		s.Logger.Warn("Rejecting MAIL FROM - authentication required", "from", from, "remote_addr", s.remoteAddr)
+		return &smtp.SMTPError{
+			Code:         530,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 0},
+			Message:      "authentication required",
+		}
+	}
+
+	// Verify authenticated user can send as this FROM address
+	if s.isAuthenticated && s.authenticator != nil {
+		if !s.authenticator.CanSendAs(s.authenticatedUser, from) {
+			s.Logger.Warn("User not allowed to send from address",
+				"user", s.authenticatedUser,
+				"from", from)
+			return &smtp.SMTPError{
+				Code:         550,
+				EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+				Message:      "sender address rejected: not allowed",
+			}
+		}
+	}
+
 	// Extract domain from sender
 	senderDomain := stats.ExtractDomainFromEmail(from)
 	s.senderDomain = senderDomain
@@ -782,12 +776,13 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	s.commandState = stateMail
 
 	// Check rate limits now that we have FROM information
-	// This allows FROM, FROM_DOMAIN, and IP+FROM combination checks
+	// This allows FROM, FROM_DOMAIN, AUTHENTICATED_USER, and IP+FROM combination checks
 	if s.rateLimiter != nil {
 		sessionCtx := SessionContext{
-			RemoteAddr: s.remoteAddr,
-			From:       from,
-			To:         s.to, // May be empty at this point
+			RemoteAddr:        s.remoteAddr,
+			From:              from,
+			To:                s.to, // May be empty at this point
+			AuthenticatedUser: s.authenticatedUser,
 		}
 		if err := s.rateLimiter.CheckRateLimit(sessionCtx); err != nil {
 			s.Logger.Warn("Rate limit exceeded for sender", "from", from, "error", err)
@@ -840,34 +835,20 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 	s.Logger.Info("RCPT TO", "to", to, "remote_addr", s.remoteAddr)
 
-	// Decode SRS addresses if this is an SRS bounce/reply
-	// This converts SRS0=...@relay.mizu.com back to original@example.com
-	if s.srsRewriter != nil && s.srsRewriter.IsSRSAddress(to) {
-		decoded, err := s.srsRewriter.Decode(to)
-		if err != nil {
-			s.Logger.Warn("Failed to decode SRS address",
-				"srs_address", to,
-				"error", err)
-			return &smtp.SMTPError{
-				Code:         550,
-				EnhancedCode: smtp.EnhancedCode{5, 1, 1},
-				Message:      "invalid SRS address",
-			}
-		}
-		s.Logger.Info("Decoded SRS address",
-			"srs_address", to,
-			"original_address", decoded)
-		to = decoded // Use decoded address for all subsequent processing
+	// Check max recipients limit
+	maxRecipients := s.serverConfig.MaxRecipientsPerMessage
+	if maxRecipients == 0 {
+		maxRecipients = 100 // Default if not set
 	}
-
-	// Enforce single recipient per transaction
-	// This ensures per-recipient validation at the destination and proper retry behavior
-	if len(s.to) >= 1 {
-		s.Logger.Warn("Rejecting RCPT TO - multiple recipients", "to", to)
+	if len(s.to) >= maxRecipients {
+		s.Logger.Warn("Rejecting RCPT TO - max recipients exceeded",
+			"to", to,
+			"current_count", len(s.to),
+			"max_recipients", maxRecipients)
 		return &smtp.SMTPError{
 			Code:         452,
 			EnhancedCode: smtp.EnhancedCode{4, 5, 3},
-			Message:      "Too many recipients (only one allowed per transaction)",
+			Message:      fmt.Sprintf("Too many recipients (maximum: %d)", maxRecipients),
 		}
 	}
 
@@ -875,12 +856,13 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	s.commandState = stateRcpt
 
 	// Check rate limits now that we have TO information
-	// This allows TO, TO_DOMAIN, FROM+TO, and other recipient-based combination checks
+	// This allows TO, TO_DOMAIN, FROM+TO, AUTHENTICATED_USER, and other recipient-based combination checks
 	if s.rateLimiter != nil {
 		sessionCtx := SessionContext{
-			RemoteAddr: s.remoteAddr,
-			From:       s.from,
-			To:         s.to,
+			RemoteAddr:        s.remoteAddr,
+			From:              s.from,
+			To:                s.to,
+			AuthenticatedUser: s.authenticatedUser,
 		}
 		if err := s.rateLimiter.CheckRateLimit(sessionCtx); err != nil {
 			s.Logger.Warn("Rate limit exceeded for recipient", "to", to, "error", err)
@@ -892,23 +874,13 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		}
 	}
 
-	// Perform routing lookup if enabled and configured to validate during RCPT
-	if s.routingClient != nil && s.globalConfig.Routing.Enabled && s.globalConfig.Routing.ValidateDuringRcpt {
+	// Perform recipient validation if enabled
+	if s.recipientValidator != nil && s.serverConfig.RecipientValidation.Enabled {
 		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-		// Note: subject is not available during RCPT TO, will be empty
-		result, err := s.routingClient.Resolve(s.ctx, to, s.from, ipStr, "")
+		result, err := s.recipientValidator.Validate(s.ctx, ipStr, s.from, to)
 		if err != nil {
-			s.Logger.Warn("Routing lookup failed", "to", to, "error", err)
-
-			// Handle fallback based on configuration
-			if s.globalConfig.Routing.FallbackOnError == "reject" {
-				return &smtp.SMTPError{
-					Code:         550,
-					EnhancedCode: smtp.EnhancedCode{5, 4, 0},
-					Message:      "recipient validation failed",
-				}
-			}
-			// Default: tempfail
+			s.Logger.Warn("Recipient validation failed", "to", to, "error", err)
+			// Treat validation errors as temporary failures
 			return &smtp.SMTPError{
 				Code:         451,
 				EnhancedCode: smtp.EnhancedCode{4, 4, 0},
@@ -918,53 +890,24 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 		// Check if recipient is accepted
 		if !result.Accepted {
-			s.Logger.Info("Recipient rejected by routing",
+			s.Logger.Info("Recipient rejected by validation",
 				"to", to,
-				"error_code", result.ErrorCode,
-				"error_message", result.ErrorMessage)
+				"message", result.Message)
 
-			// Map error codes to SMTP errors
-			switch result.ErrorCode {
-			case routing.ErrorCodeDomainNotFound:
-				return &smtp.SMTPError{
-					Code:         550,
-					EnhancedCode: smtp.EnhancedCode{5, 1, 1},
-					Message:      "relay not permitted",
-				}
-			case routing.ErrorCodeRecipientNotFound:
-				return &smtp.SMTPError{
-					Code:         550,
-					EnhancedCode: smtp.EnhancedCode{5, 1, 1},
-					Message:      "mailbox does not exist",
-				}
-			case routing.ErrorCodeRecipientBlocked:
-				return &smtp.SMTPError{
-					Code:         550,
-					EnhancedCode: smtp.EnhancedCode{5, 7, 1},
-					Message:      "recipient blocked",
-				}
-			case routing.ErrorCodeQuotaExceeded:
-				return &smtp.SMTPError{
-					Code:         552,
-					EnhancedCode: smtp.EnhancedCode{5, 2, 2},
-					Message:      "mailbox full",
-				}
-			default:
-				return &smtp.SMTPError{
-					Code:         550,
-					EnhancedCode: smtp.EnhancedCode{5, 7, 1},
-					Message:      result.ErrorMessage,
-				}
+			// Use custom message if provided, otherwise use default
+			message := result.Message
+			if message == "" {
+				message = "mailbox unavailable"
+			}
+
+			return &smtp.SMTPError{
+				Code:         550,
+				EnhancedCode: smtp.EnhancedCode{5, 1, 1},
+				Message:      message,
 			}
 		}
 
-		// Store routing result for use in DATA
-		s.routingResult = result
-		s.Logger.Info("Recipient accepted by routing",
-			"to", to,
-			"deliver_to", result.DeliverTo,
-			"forward_to", result.ForwardTo,
-			"is_catchall", result.IsCatchall)
+		s.Logger.Debug("Recipient validation passed", "to", to)
 	}
 
 	// Reset to idle timeout to wait for the next command
@@ -1064,7 +1007,7 @@ func (s *Session) handleLocalMode(rawEmail string) error {
 // performPreDeliveryChecks runs all content validation checks (headers, DMARC).
 // It may mark the message as junk or return an SMTPError for a hard rejection.
 func (s *Session) performPreDeliveryChecks(rawEmail string) error {
-	// Header validation
+	// Basic header validation (required headers, format)
 	if err := s.validateHeaders(rawEmail); err != nil {
 		return err
 	}
@@ -1248,22 +1191,24 @@ func (s *Session) deliverMessage(rawEmail string) error {
 		}
 	}
 
-	// Step 2: Sign email with DKIM if enabled (for submission servers)
-	// DKIM signing should happen before ARC signing
-	signedEmail := emailWithHeaders
-	if s.dkimSigner != nil && s.serverConfig.DKIM.Enabled && s.serverConfig.DKIM.Mode == "sign" {
-		var err error
-		signedEmail, err = s.dkimSigner.SignEmail(signedEmail)
-		if err != nil {
-			s.Logger.Warn("Failed to sign email with DKIM", "error", err)
-			// Don't fail delivery on DKIM signing error, just log and continue
+	// Fix missing headers if configured to do so
+	missingHeadersAction := s.serverConfig.Validation.MissingHeadersAction
+	if missingHeadersAction == "" {
+		// Default: reject for submission, fix for relay
+		if s.serverConfig.IsSubmission() {
+			missingHeadersAction = "reject"
 		} else {
-			s.Logger.Debug("Email signed with DKIM")
+			missingHeadersAction = "fix"
 		}
 	}
+	if missingHeadersAction == "fix" {
+		emailWithHeaders = fixMissingHeaders(emailWithHeaders, s.serverConfig.Domain)
+		s.Logger.Debug("Fixed missing headers if needed")
+	}
 
-	// Step 3: Sign email with ARC if enabled
-	// ARC signature covers the complete message including our added headers and DKIM signature
+	// Step 2: Sign email with ARC if enabled
+	// ARC signature covers the complete message including our added headers
+	signedEmail := emailWithHeaders
 	if s.arcSigner != nil && s.serverConfig.ARC.Enabled && s.serverConfig.ARC.Mode == "sign" {
 		var err error
 		signedEmail, err = s.arcSigner.SignEmail(signedEmail, s.spfResult, s.dmarcResult, s.arcResult)
@@ -1275,202 +1220,11 @@ func (s *Session) deliverMessage(rawEmail string) error {
 		}
 	}
 
-	// Step 4: Choose delivery path based on routing configuration
-	if s.routingClient != nil && s.globalConfig.Routing.Enabled && s.deliveryQueue != nil && s.globalConfig.Queue.Enabled {
-		// Async delivery with routing
-		return s.deliverWithRouting(signedEmail)
-	}
-
-	// Traditional synchronous delivery
+	// Step 3: Deliver message synchronously
 	return s.deliverSynchronous(signedEmail)
 }
 
-// deliverWithRouting handles async delivery using routing results and queue
-func (s *Session) deliverWithRouting(signedEmail string) error {
-	var routingResult *routing.ResolveResponse
-
-	// If we have a cached result from RCPT TO, perform a fresh lookup with subject
-	// This allows routing policies to consider the email subject
-	if s.routingResult != nil {
-		// Extract subject from the email
-		subject := extractSubject(signedEmail)
-
-		// Perform fresh routing lookup with subject for the first recipient
-		// (in most cases there's only one recipient per SMTP transaction)
-		if len(s.to) > 0 {
-			ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-			freshResult, err := s.routingClient.Resolve(s.ctx, s.to[0], s.from, ipStr, subject)
-			if err != nil {
-				s.Logger.Warn("Fresh routing lookup with subject failed, using cached result",
-					"recipient", s.to[0],
-					"error", err)
-				routingResult = s.routingResult // Fall back to cached result
-			} else {
-				routingResult = freshResult
-				s.Logger.Debug("Used fresh routing lookup with subject",
-					"recipient", s.to[0],
-					"subject", subject)
-			}
-		} else {
-			routingResult = s.routingResult
-		}
-	} else {
-		s.Logger.Warn("No routing result available - falling back to synchronous delivery")
-		return s.deliverSynchronous(signedEmail)
-	}
-
-	// Create delivery jobs based on routing result
-	jobs := s.createDeliveryJobs(signedEmail, routingResult)
-
-	if len(jobs) == 0 {
-		s.Logger.Warn("No delivery jobs created from routing result")
-		return &smtp.SMTPError{
-			Code:         550,
-			EnhancedCode: smtp.EnhancedCode{5, 4, 0},
-			Message:      "no valid delivery targets",
-		}
-	}
-
-	// Enqueue all jobs
-	for _, job := range jobs {
-		if err := s.deliveryQueue.Enqueue(job); err != nil {
-			s.Logger.Error("Failed to enqueue delivery job",
-				"job_id", job.ID,
-				"endpoint", job.Endpoint,
-				"error", err)
-
-			return &smtp.SMTPError{
-				Code:         451,
-				EnhancedCode: smtp.EnhancedCode{4, 4, 0},
-				Message:      "temporary failure, please try again later",
-			}
-		}
-
-		s.Logger.Info("Delivery job enqueued",
-			"job_id", job.ID,
-			"trace_id", s.traceID,
-			"endpoint", job.Endpoint,
-			"recipients", job.Recipients,
-			"is_forwarding", job.IsForwarding)
-	}
-
-	// Return success immediately - async delivery
-	s.Logger.Info("Message queued for async delivery",
-		"job_count", len(jobs),
-		"trace_id", s.traceID)
-
-	// Record as successful delivery for stats (we accepted it)
-	s.finalizeSuccessfulDelivery()
-
-	return nil
-}
-
-// createDeliveryJobs creates queue jobs from routing response
-func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.ResolveResponse) []*queue.DeliveryJob {
-	jobs := []*queue.DeliveryJob{}
-
-	// Job for local delivery
-	if len(routing.DeliverTo) > 0 {
-		endpoint := routing.DeliveryEndpoint
-		isCustomEndpoint := (routing.DeliveryEndpoint != "")
-		if endpoint == "" {
-			endpoint = s.globalConfig.Delivery.URL
-		}
-
-		// For custom endpoints from routing, don't send API key
-		// Custom endpoints should have authentication in their URL
-		apiKey := s.globalConfig.Delivery.APIKey
-		if routing.DeliveryEndpoint != "" {
-			apiKey = "" // Custom endpoint - no API key (auth should be in URL)
-		}
-
-		job := &queue.DeliveryJob{
-			ID:               queue.GenerateJobID(),
-			TraceID:          s.traceID,
-			EmailContent:     signedEmail,
-			Recipients:       routing.DeliverTo,
-			Endpoint:         endpoint,
-			APIKey:           apiKey,
-			IsForwarding:     false,
-			IsCustomEndpoint: isCustomEndpoint,
-			From:             s.from,
-			OriginalFrom:     s.from,  // No SRS for delivery, From == OriginalFrom
-			OriginalTo:       s.to[0], // Original RCPT TO
-			IsJunk:           s.isJunk,
-			MaxAttempts:      0,                // Not used by persistent queue (uses time-based retries)
-			Priority:         routing.Priority, // Priority from routing response
-		}
-
-		jobs = append(jobs, job)
-
-		s.Logger.Debug("Created delivery job",
-			"job_id", job.ID,
-			"endpoint", endpoint,
-			"recipients", routing.DeliverTo)
-	}
-
-	// Job for forwarding
-	if len(routing.ForwardTo) > 0 {
-		endpoint := routing.ForwardEndpoint
-		isCustomEndpoint := (routing.ForwardEndpoint != "")
-		if endpoint == "" {
-			endpoint = s.globalConfig.Forwarding.URL
-		}
-
-		// For custom endpoints from routing, don't send API key
-		// Custom endpoints should have authentication in their URL
-		apiKey := s.globalConfig.Forwarding.APIKey
-		if routing.ForwardEndpoint != "" {
-			apiKey = "" // Custom endpoint - no API key (auth should be in URL)
-		}
-
-		// Apply SRS rewriting for forwarding to prevent SPF failures
-		srsFrom := s.from
-		originalFrom := s.from
-		if s.srsRewriter != nil {
-			rewritten, err := s.srsRewriter.Encode(s.from)
-			if err != nil {
-				s.Logger.Warn("Failed to apply SRS rewriting, using original sender",
-					"from", s.from,
-					"error", err)
-			} else {
-				srsFrom = rewritten
-				s.Logger.Debug("Applied SRS rewriting for forwarding",
-					"original_from", s.from,
-					"srs_from", srsFrom)
-			}
-		}
-
-		job := &queue.DeliveryJob{
-			ID:               queue.GenerateJobID(),
-			TraceID:          s.traceID,
-			EmailContent:     signedEmail,
-			Recipients:       routing.ForwardTo,
-			Endpoint:         endpoint,
-			APIKey:           apiKey,
-			IsForwarding:     true,
-			IsCustomEndpoint: isCustomEndpoint,
-			From:             srsFrom,      // SRS-rewritten sender
-			OriginalFrom:     originalFrom, // Keep original for logging
-			OriginalTo:       s.to[0],
-			IsJunk:           s.isJunk,
-			MaxAttempts:      0,                // Not used by persistent queue (uses time-based retries)
-			Priority:         routing.Priority, // Priority from routing response
-		}
-
-		jobs = append(jobs, job)
-
-		s.Logger.Debug("Created forwarding job",
-			"job_id", job.ID,
-			"endpoint", endpoint,
-			"recipients", routing.ForwardTo,
-			"srs_from", srsFrom)
-	}
-
-	return jobs
-}
-
-// deliverSynchronous handles traditional synchronous delivery
+// deliverSynchronous handles synchronous delivery
 func (s *Session) deliverSynchronous(signedEmail string) error {
 	// Check recipient cache first (if distributed tracking is enabled)
 	if s.distTracker != nil && len(s.to) > 0 {
@@ -1491,13 +1245,14 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 	err := poster.PostEmailToDestinationWithContext(
 		s.ctx,
 		signedEmail,
-		s.globalConfig.Delivery.URL,
-		s.globalConfig.Delivery.APIKey,
-		s.globalConfig.Delivery.MaxRetryAttempts,
+		s.serverConfig.Delivery.URL,
+		s.serverConfig.Delivery.APIKey,
+		s.serverConfig.Delivery.MaxRetryAttempts,
 		s.isJunk,
 		s.from,
 		s.to,
 		s.traceID,
+		s.authenticatedUser,
 		s.circuitBreaker,
 		s.httpClient,
 		s.Logger,
@@ -1627,16 +1382,44 @@ func (s *Session) validateHeaders(rawEmail string) error {
 		s.Logger.Warn("Rejecting message - missing From header", "from", s.from)
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "missing required From header"}
 	}
-	if _, hasDate := headers["Date"]; !hasDate {
-		s.Logger.Warn("Rejecting message - missing Date header", "from", s.from)
-		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "missing required Date header"}
+
+	// Handle missing Date and Message-ID headers based on config
+	_, hasDate := headers["Date"]
+	_, hasMessageID := headers["Message-Id"]
+
+	missingHeadersAction := s.serverConfig.Validation.MissingHeadersAction
+	if missingHeadersAction == "" {
+		// Default: reject for submission, fix for relay
+		if s.serverConfig.IsSubmission() {
+			missingHeadersAction = "reject"
+		} else {
+			missingHeadersAction = "fix"
+		}
 	}
 
-	// Check for junk indicators
-	if _, hasMessageID := headers["Message-Id"]; !hasMessageID {
-		s.isJunk = true
-		s.junkReasons = append(s.junkReasons, "missing Message-ID header")
-		s.Logger.Info("Marking as junk - missing Message-ID", "from", s.from)
+	switch missingHeadersAction {
+	case "reject":
+		if !hasDate {
+			s.Logger.Warn("Rejecting message - missing Date header", "from", s.from)
+			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "missing required Date header"}
+		}
+		if !hasMessageID {
+			s.Logger.Warn("Rejecting message - missing Message-ID header", "from", s.from)
+			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "missing required Message-ID header"}
+		}
+	case "fix":
+		// Headers will be added later before delivery (handled in fixMissingHeaders function)
+		if !hasDate {
+			s.Logger.Info("Will add missing Date header", "from", s.from)
+		}
+		if !hasMessageID {
+			s.Logger.Info("Will add missing Message-ID header", "from", s.from)
+		}
+	case "none":
+		// Allow missing headers without modification
+		if !hasDate || !hasMessageID {
+			s.Logger.Debug("Allowing message with missing headers", "from", s.from, "missing_date", !hasDate, "missing_message_id", !hasMessageID)
+		}
 	}
 
 	// Check for duplicate headers that should be unique
@@ -1724,13 +1507,4 @@ func tlsVersionString(version uint16) string {
 	default:
 		return fmt.Sprintf("Unknown (0x%x)", version)
 	}
-}
-
-// extractSubject extracts the Subject header from an email
-func extractSubject(rawEmail string) string {
-	msg, err := mail.ReadMessage(strings.NewReader(rawEmail))
-	if err != nil {
-		return ""
-	}
-	return msg.Header.Get("Subject")
 }

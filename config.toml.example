@@ -40,6 +40,7 @@ domain = "mail.example.com"          # Overrides defaults.domain if set
 
 # Message Processing
 max_message_size = 10485760          # 10MB maximum message size
+max_recipients_per_message = 100     # Maximum recipients per message (default: 100)
 
 # Timeouts
 timeout_seconds = 10
@@ -74,14 +75,9 @@ header = "X-Spam"                          # Header to add for "header" action
 [server.spf]
 enabled = true                       # Enable SPF validation
 
-# DKIM Validation/Signing
+# DKIM Validation
 [server.dkim]
-enabled = true                       # Enable DKIM (validation or signing)
-mode = "check"                       # Mode: "check" (validate incoming) or "sign" (sign outgoing)
-# For mode="sign", also configure:
-# domain = "example.com"
-# selector = "default"
-# private_key_path = "/etc/mizu/dkim-private.pem"
+enabled = true                       # Enable DKIM validation
 
 # DMARC Validation
 [server.dmarc]
@@ -129,6 +125,31 @@ gossip_interval_seconds = 5
 s3_sync_interval_seconds = 30
 recipient_cache_ttl_seconds = 900
 
+# Recipient Validation (per-server)
+# Validates recipients during RCPT TO phase before accepting the message body
+[server.recipient_validation]
+enabled = false                              # Enable recipient validation (default: false)
+url = "https://api.example.com/validate"     # HTTP endpoint for validation
+api_key = "${RECIPIENT_VALIDATION_API_KEY}"  # API key (sent as Bearer token)
+http_timeout_seconds = 5                     # HTTP request timeout (default: 5)
+cache_ttl_seconds = 300                      # Cache TTL for successful validations (default: 300 = 5min)
+
+# Email Delivery Configuration (per-server)
+[server.delivery]
+url = "https://your-worker.example.com/email"  # HTTP endpoint to POST emails to
+api_key = "${DELIVERY_API_KEY}"                # API key (sent as Bearer token)
+max_retry_attempts = 3                         # Retry up to 3 times on failure
+http_timeout_seconds = 30                      # HTTP request timeout
+
+# Circuit Breaker for destination endpoint
+[server.delivery.circuit_breaker]
+enabled = true
+failure_threshold = 5                # Open circuit after 5 consecutive failures
+success_threshold = 2                # Close circuit after 2 consecutive successes
+timeout_seconds = 30                 # Circuit opens for 30 seconds
+half_open_max_calls = 1              # Allow 1 call in half-open state
+reset_timeout_seconds = 60           # Reset failure count after 60 seconds
+
 # =============================================================================
 # Submission Server (Port 465) - Accepts mail from authenticated users
 # =============================================================================
@@ -146,10 +167,10 @@ shutdown_timeout_seconds = 60
 # Message Processing
 max_message_size = 52428800          # 50MB (larger for user submissions)
 
-# Submission-Specific Settings
-[server.submission]
-allow_null_sender = false            # Allow bounce messages with null sender (<>)
-fix_missing_headers = true           # Add missing Message-ID and Date headers
+# Message Validation Settings
+[server.validation]
+allow_null_sender = false            # Allow bounce messages with null sender (<>) - false for submission (reject), true for relay (accept bounces)
+missing_headers_action = "reject"    # Action for missing Message-ID/Date headers: "reject", "fix", "none" - "reject" for submission, "fix" for relay
 
 # Connection Limits
 [server.limits]
@@ -178,21 +199,18 @@ apply_action = "warn"
 
 # Authentication Configuration
 [server.auth]
-required = true                                    # Require authentication for this server
-endpoint = "https://auth.example.com/api/validate" # HTTPS endpoint (https:// required)
+enabled = true                                     # Enable SMTP AUTH (advertise AUTH in EHLO)
+required = true                                    # Require authentication before MAIL FROM (implies enabled=true)
+url = "https://auth.example.com/api/validate"     # HTTPS URL (https:// required)
 api_key = "${AUTH_API_KEY}"                        # API key (sent as Bearer token)
 
 # SPF - Disabled for submission (users are authenticated)
 [server.spf]
 enabled = false
 
-# DKIM Signing for outbound mail
+# DKIM - Disabled for submission (no need to validate for authenticated users)
 [server.dkim]
-enabled = true
-mode = "sign"                        # Sign outgoing emails
-domain = "example.com"
-selector = "default"
-private_key_path = "/etc/mizu/dkim-private.pem"
+enabled = false
 
 # DMARC - Disabled for submission
 [server.dmarc]
@@ -221,6 +239,21 @@ name = "per_user_daily"
 keys = ["AUTHENTICATED_USER"]
 limit = 1000                         # 1000 emails per day per user
 window_seconds = 86400
+
+# Email Delivery Configuration (per-server)
+[server.delivery]
+url = "https://your-worker.example.com/email"
+api_key = "${DELIVERY_API_KEY}"
+max_retry_attempts = 3
+http_timeout_seconds = 30
+
+[server.delivery.circuit_breaker]
+enabled = true
+failure_threshold = 5
+success_threshold = 2
+timeout_seconds = 30
+half_open_max_calls = 1
+reset_timeout_seconds = 60
 
 # =============================================================================
 # Submission Server (Port 587) - STARTTLS variant
@@ -268,31 +301,23 @@ apply_action = "warn"
 
 # Authentication Configuration
 [server.auth]
-required = true
-endpoint = "https://auth.example.com/api/validate"
-api_key = "${AUTH_API_KEY}"
+enabled = true                                     # Enable SMTP AUTH (advertise AUTH in EHLO)
+required = true                                    # Require authentication before MAIL FROM
+url = "https://auth.example.com/api/validate"     # HTTPS URL (https:// required)
+api_key = "${AUTH_API_KEY}"                        # API key (sent as Bearer token)
 
-# SPF - Disabled
 [server.spf]
 enabled = false
 
-# DKIM Signing
 [server.dkim]
-enabled = true
-mode = "sign"
-domain = "example.com"
-selector = "default"
-private_key_path = "/etc/mizu/dkim-private.pem"
+enabled = false
 
-# DMARC - Disabled
 [server.dmarc]
 enabled = false
 
-# ARC - Disabled
 [server.arc]
 enabled = false
 
-# DNSBL - Disabled
 [server.dnsbl]
 enabled = false
 
@@ -311,6 +336,21 @@ name = "per_user_daily"
 keys = ["AUTHENTICATED_USER"]
 limit = 1000
 window_seconds = 86400
+
+# Email Delivery Configuration (per-server)
+[server.delivery]
+url = "https://your-worker.example.com/email"
+api_key = "${DELIVERY_API_KEY}"
+max_retry_attempts = 3
+http_timeout_seconds = 30
+
+[server.delivery.circuit_breaker]
+enabled = true
+failure_threshold = 5
+success_threshold = 2
+timeout_seconds = 30
+half_open_max_calls = 1
+reset_timeout_seconds = 60
 
 # =============================================================================
 # DNS Configuration (shared across all servers)
@@ -346,89 +386,6 @@ secret_access_key = "${S3_SECRET_ACCESS_KEY}"   # Set via environment variable
 region = "us-east-1"
 
 # =============================================================================
-# Email Delivery Configuration
-# =============================================================================
-
-[delivery]
-# HTTP endpoint to POST emails to
-url = "https://your-worker.example.com/email"
-api_key = "${DELIVERY_API_KEY}"      # Set via environment variable (sent as Bearer token)
-
-max_retry_attempts = 3               # Retry up to 3 times on failure
-http_timeout_seconds = 30            # HTTP request timeout
-
-# Circuit Breaker for destination endpoint
-[delivery.circuit_breaker]
-failure_threshold = 5                # Open circuit after 5 consecutive failures
-success_threshold = 2                # Close circuit after 2 consecutive successes
-timeout_seconds = 30                 # Circuit opens for 30 seconds
-half_open_max_calls = 1              # Allow 1 call in half-open state
-reset_timeout_seconds = 60           # Reset failure count after 60 seconds
-
-# =============================================================================
-# Email Forwarding (optional, used with routing)
-# =============================================================================
-
-[forwarding]
-enabled = false
-url = "https://forward-worker.example.com/relay"
-api_key = "${FORWARDING_API_KEY}"    # Sent as Bearer token
-max_retry_attempts = 5
-http_timeout_seconds = 30
-
-# Circuit Breaker
-[forwarding.circuit_breaker]
-failure_threshold = 5
-success_threshold = 2
-timeout_seconds = 30
-half_open_max_calls = 1
-reset_timeout_seconds = 60
-
-# Sender Rewriting Scheme (SRS) for forwarding
-[forwarding.srs]
-enabled = false
-domain = "bounce.example.com"
-secret = "${SRS_SECRET}"             # Set via environment variable
-
-# =============================================================================
-# Routing / Aliasing System (optional)
-# =============================================================================
-
-[routing]
-enabled = false
-endpoint = "https://routing.example.workers.dev/resolve"
-api_key = "${ROUTING_API_KEY}"       # Sent as Bearer token
-timeout_ms = 100
-retry_attempts = 2
-
-# Routing Cache
-cache_ttl_seconds = 300              # Cache routing results for 5 minutes
-cache_negative_ttl_seconds = 60      # Cache negative results for 1 minute
-cache_max_entries = 50000            # Max entries in cache
-
-fallback_on_error = "tempfail"       # "tempfail" or "accept"
-validate_during_rcpt = true          # Validate during RCPT TO (recommended)
-
-# Circuit Breaker
-[routing.circuit_breaker]
-failure_threshold = 10
-success_threshold = 3
-timeout_seconds = 5
-half_open_max_calls = 2
-reset_timeout_seconds = 30
-
-# =============================================================================
-# Async Delivery Queue (optional, used with routing)
-# =============================================================================
-
-[queue]
-enabled = false
-data_dir = "./data/queue"
-workers = 10                         # Number of delivery workers
-max_retry_hours = 48                 # Retry for up to 48 hours
-shutdown_timeout_seconds = 30
-
-# =============================================================================
 # TLS Certificate Management
 # =============================================================================
 
@@ -445,17 +402,19 @@ enable_autocert = false              # Enable autocert with leader election (req
 # =============================================================================
 
 [health]
+enabled = true                       # Enable health endpoints (/health, /api/stats, /api/flush-cache)
 listen_addr = ":8080"
-username = "admin"
-password = "${HEALTH_PASSWORD}"      # Set via environment variable
+username = "admin"                   # HTTP Basic Auth username (empty = no auth)
+password = "${HEALTH_PASSWORD}"      # Set via environment variable (empty = no auth)
 
 # =============================================================================
 # Prometheus Metrics
 # =============================================================================
 
 [metrics]
+enabled = true                       # Enable Prometheus metrics endpoint (/metrics)
 path = "/metrics"
-username = ""                        # Optional HTTP Basic Auth
+username = ""                        # Optional HTTP Basic Auth (empty = no auth)
 password = ""
 
 # =============================================================================
@@ -463,23 +422,18 @@ password = ""
 # =============================================================================
 
 [stats]
-retention_seconds = 86400            # Keep stats for 24 hours
-max_ip_entries = 100000              # Max IPs to track
-max_domain_entries = 50000           # Max domains to track
-
-# Cross-cluster stats synchronization
-sync_enabled = false                 # Requires cluster.enabled
-sync_interval_seconds = 60           # Sync every minute
-
-# =============================================================================
-# Cluster Configuration (for distributed operation)
-# =============================================================================
+enabled = true                       # Enable statistics and reputation tracking (set to false to disable)
+retention_seconds = 86400            # How long to keep stats in memory (24 hours)
+max_ip_entries = 100000              # Maximum IP entries to track (0 = unlimited)
+max_domain_entries = 50000           # Maximum domain entries to track (0 = unlimited)
+sync_enabled = false                 # Enable distributed stats sync via S3 (requires cluster.enabled)
+sync_interval_seconds = 60           # How often to sync stats to S3           
 
 [cluster]
 enabled = false
-node_name = "mizu-01"                # Unique node name
-bind_addr = "0.0.0.0"                # Address to bind gossip protocol
-bind_port = 7946                     # Port for memberlist gossip
+node_name = "mizu-01"                
+bind_addr = "192.18.1.1"             
+bind_port = 7946                     
 
 # Seed nodes for cluster discovery
 peers = [
@@ -488,4 +442,4 @@ peers = [
 ]
 
 # Encryption key for cluster communication (32 bytes, base64 encoded)
-secret_key = "${CLUSTER_SECRET_KEY}" # Set via environment variable
+secret_key = "${CLUSTER_SECRET_KEY}" # Set via environment variable, generate with $ openssl rand -base64 32

@@ -44,7 +44,7 @@ func TestCircuitBreakerIntegration_OpenReturns451(t *testing.T) {
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 
 	cfg := testConfig()
-	cfg.Delivery = config.DeliveryConfig{
+	cfg.Servers[0].Delivery = config.DeliveryConfig{
 		URL:                failingServer.URL,
 		APIKey:             "test-key",
 		MaxRetryAttempts:   1, // Don't retry within the request
@@ -155,7 +155,7 @@ func TestCircuitBreakerIntegration_OpenReturns451(t *testing.T) {
 	defer successServer.Close()
 
 	// Update config to use successful backend
-	cfg.Delivery.URL = successServer.URL
+	cfg.Servers[0].Delivery.URL = successServer.URL
 
 	session = &Session{
 		ctx:            context.Background(),
@@ -214,7 +214,7 @@ func TestCircuitBreakerIntegration_PermanentFailureReturns550(t *testing.T) {
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 
 	cfg := testConfig()
-	cfg.Delivery = config.DeliveryConfig{
+	cfg.Servers[0].Delivery = config.DeliveryConfig{
 		URL:                badRequestServer.URL,
 		APIKey:             "test-key",
 		MaxRetryAttempts:   1,
@@ -287,7 +287,7 @@ func TestCircuitBreakerIntegration_4xxErrorsDoNotTriggerCircuit(t *testing.T) {
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 
 	cfg := testConfig()
-	cfg.Delivery = config.DeliveryConfig{
+	cfg.Servers[0].Delivery = config.DeliveryConfig{
 		URL:                notFoundServer.URL,
 		APIKey:             "test-key",
 		MaxRetryAttempts:   1,

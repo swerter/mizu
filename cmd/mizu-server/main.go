@@ -24,16 +24,13 @@ import (
 	"migadu/mizu/pkg/logging"
 	"migadu/mizu/pkg/metrics"
 	"migadu/mizu/pkg/poster"
-	"migadu/mizu/pkg/queue"
-	"migadu/mizu/pkg/routing"
+	"migadu/mizu/pkg/recipient"
 	"migadu/mizu/pkg/smtp"
-	"migadu/mizu/pkg/srs"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/storage"
 	tlsmgr "migadu/mizu/pkg/tls"
 	"migadu/mizu/pkg/validation"
 
-	"github.com/caddyserver/certmagic"
 	gosmtp "github.com/emersion/go-smtp"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -65,7 +62,8 @@ func main() {
 	if logFormat == "" {
 		logFormat = "console" // Default to console format
 	}
-	logger, err := logging.Setup(logFormat, cfg.TLS.CertMagicVerbose)
+	verbose := cfg.Logging.Level == "debug"
+	logger, err := logging.Setup(logFormat, verbose)
 	if err != nil {
 		log.Fatalf("Failed to setup logging: %v", err)
 	}
@@ -113,8 +111,8 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Start ACME challenge servers for autocert
-		if cfg.TLS.EnableAutocert && tlsMgr != nil {
+		// Start ACME challenge servers
+		if tlsMgr != nil {
 			// Start HTTPS server on port 443 for TLS-ALPN-01 challenges (primary method)
 			logging.SafeGo(logger, "acme-tls-alpn-server", func() {
 				logger.Info("Starting HTTPS server for ACME TLS-ALPN-01 challenges on :443")
@@ -137,13 +135,9 @@ func main() {
 			})
 		}
 	}
-	circuitBreaker := initCircuitBreaker(cfg, logger, metricsInstance)
-
-	// Create HTTP client with configured timeout for posting emails to destination
-	httpClient := poster.NewHTTPClient(time.Duration(cfg.Delivery.HTTPTimeoutSeconds) * time.Second)
 
 	// Initialize and start health check server (before starting SMTP servers)
-	healthServer := startHealthServer(cfg, logger, statsManager, circuitBreaker, nil, nil, s3Client)
+	healthServer := startHealthServer(cfg, logger, statsManager, nil, nil, s3Client)
 
 	// Set ACME handler on health server if autocert is enabled
 	if healthServer != nil && tlsMgr != nil {
@@ -167,129 +161,6 @@ func main() {
 	}
 	_ = dnsCache // Cache wrapper for future use
 
-	// Initialize routing client if enabled
-	var routingClient smtp.RoutingClient
-	if cfg.Routing.Enabled {
-		// Create circuit breaker for routing endpoint
-		var routingCircuitBreaker *poster.CircuitBreaker
-		if cfg.Routing.CircuitBreaker.Enabled {
-			cbConfig := poster.CircuitBreakerConfig{
-				Enabled:          true,
-				FailureThreshold: cfg.Routing.CircuitBreaker.FailureThreshold,
-				SuccessThreshold: cfg.Routing.CircuitBreaker.SuccessThreshold,
-				Timeout:          time.Duration(cfg.Routing.CircuitBreaker.TimeoutSeconds) * time.Second,
-				HalfOpenMaxCalls: cfg.Routing.CircuitBreaker.HalfOpenMaxCalls,
-				ResetTimeout:     time.Duration(cfg.Routing.CircuitBreaker.ResetTimeoutSeconds) * time.Second,
-			}
-			routingCircuitBreaker = poster.NewCircuitBreaker(cbConfig, logger, metricsInstance)
-			logger.Info("Routing circuit breaker enabled",
-				"failure_threshold", cfg.Routing.CircuitBreaker.FailureThreshold,
-				"timeout_seconds", cfg.Routing.CircuitBreaker.TimeoutSeconds)
-		}
-
-		routingClient, err = routing.NewClient(routing.ClientConfig{
-			Endpoint:                cfg.Routing.Endpoint,
-			APIKey:                  cfg.Routing.APIKey,
-			TimeoutMS:               cfg.Routing.TimeoutMS,
-			MaxRetries:              cfg.Routing.RetryAttempts,
-			CacheTTLSeconds:         cfg.Routing.CacheTTLSeconds,
-			CacheNegativeTTLSeconds: cfg.Routing.CacheNegativeTTLSeconds,
-			CacheMaxEntries:         cfg.Routing.CacheMaxEntries,
-			FallbackOnError:         cfg.Routing.FallbackOnError,
-			CircuitBreaker:          routingCircuitBreaker,
-			Logger:                  logger,
-		})
-		if err != nil {
-			logger.Error("Failed to initialize routing client", "error", err)
-			os.Exit(1)
-		}
-		logger.Info("Routing client initialized",
-			"endpoint", cfg.Routing.Endpoint,
-			"cache_max_entries", cfg.Routing.CacheMaxEntries,
-			"cache_ttl_seconds", cfg.Routing.CacheTTLSeconds)
-	}
-
-	// Initialize delivery queue if routing + queue enabled
-	var deliveryQueue smtp.DeliveryQueue
-	if cfg.Routing.Enabled && cfg.Queue.Enabled {
-		// Create circuit breaker for forwarding endpoint if enabled
-		var forwardingCircuitBreaker *poster.CircuitBreaker
-		if cfg.Forwarding.Enabled && cfg.Forwarding.CircuitBreaker.Enabled {
-			fwdCBConfig := poster.CircuitBreakerConfig{
-				Enabled:          true,
-				FailureThreshold: cfg.Forwarding.CircuitBreaker.FailureThreshold,
-				SuccessThreshold: cfg.Forwarding.CircuitBreaker.SuccessThreshold,
-				Timeout:          time.Duration(cfg.Forwarding.CircuitBreaker.TimeoutSeconds) * time.Second,
-				HalfOpenMaxCalls: cfg.Forwarding.CircuitBreaker.HalfOpenMaxCalls,
-				ResetTimeout:     time.Duration(cfg.Forwarding.CircuitBreaker.ResetTimeoutSeconds) * time.Second,
-			}
-			forwardingCircuitBreaker = poster.NewCircuitBreaker(fwdCBConfig, logger, metricsInstance)
-			logger.Info("Forwarding circuit breaker enabled",
-				"failure_threshold", cfg.Forwarding.CircuitBreaker.FailureThreshold,
-				"timeout_seconds", cfg.Forwarding.CircuitBreaker.TimeoutSeconds)
-		}
-
-		// Use persistent queue with BadgerDB (48-hour retry window)
-		dataDir := cfg.Queue.DataDir
-		if dataDir == "" {
-			dataDir = "./data/queue"
-		}
-
-		queueConfig := queue.QueueConfig{
-			Workers:         cfg.Queue.Workers,
-			MaxRetryHours:   cfg.Queue.MaxRetryHours,
-			DeliveryTimeout: time.Duration(cfg.Delivery.HTTPTimeoutSeconds) * time.Second,
-		}
-
-		persistentQueue, err := queue.NewPersistentQueue(
-			queueConfig,
-			dataDir,
-			httpClient,
-			circuitBreaker,
-			forwardingCircuitBreaker,
-			logger,
-			metricsInstance,
-		)
-		if err != nil {
-			logger.Error("Failed to create persistent delivery queue", "error", err)
-			os.Exit(1)
-		}
-
-		if err := persistentQueue.Start(); err != nil {
-			logger.Error("Failed to start persistent delivery queue", "error", err)
-			os.Exit(1)
-		}
-
-		deliveryQueue = persistentQueue
-
-		logger.Info("Persistent delivery queue started",
-			"workers", cfg.Queue.Workers,
-			"max_retry_hours", cfg.Queue.MaxRetryHours,
-			"data_dir", dataDir)
-	}
-
-	// Initialize SRS rewriter if forwarding + SRS enabled
-	var srsRewriter smtp.SRSRewriter
-	if cfg.Forwarding.Enabled && cfg.Forwarding.SRS.Enabled {
-		srsSecret := cfg.Forwarding.SRS.Secret
-		if srsSecret == "" {
-			// Try environment variable
-			srsSecret = os.Getenv("SRS_SECRET")
-		}
-		if srsSecret == "" {
-			logger.Error("SRS enabled but no secret provided (set forwarding.srs.secret or SRS_SECRET env var)")
-			os.Exit(1)
-		}
-		if cfg.Forwarding.SRS.Domain == "" {
-			logger.Error("SRS enabled but no domain provided (set forwarding.srs.domain)")
-			os.Exit(1)
-		}
-
-		srsRewriter = srs.NewRewriter(srsSecret, cfg.Forwarding.SRS.Domain)
-		logger.Info("SRS (Sender Rewriting Scheme) enabled for forwarding",
-			"domain", cfg.Forwarding.SRS.Domain)
-	}
-
 	// Track all server instances for coordinated shutdown
 	var serverWg sync.WaitGroup
 	type serverInstance struct {
@@ -309,18 +180,20 @@ func main() {
 			"listen_addr", serverCfg.ListenAddr,
 			"tls", serverCfg.TLS.Mode)
 
+		// Initialize recipient validator if enabled for this server
+		var recipientValidator smtp.RecipientValidator
+		if serverCfg.RecipientValidation.Enabled {
+			recipientValidator = initRecipientValidator(serverCfg, logger)
+		}
+
 		// Create server-specific backend
 		backend := createServerBackend(
 			serverCfg,
 			cfg,
 			statsManager,
-			circuitBreaker,
-			httpClient,
 			dnsResolver,
 			metricsInstance,
-			routingClient,
-			deliveryQueue,
-			srsRewriter,
+			recipientValidator,
 			clusterMgr,
 			s3Client,
 			logger,
@@ -379,23 +252,13 @@ func main() {
 		logger.Warn("Shutdown timeout reached, forcing exit")
 	}
 
-	// Phase 3: Stop delivery queue
-	if deliveryQueue != nil {
-		logger.Info("Stopping delivery queue...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Queue.ShutdownTimeoutSeconds)*time.Second)
-		defer cancel()
-		if err := deliveryQueue.Shutdown(shutdownCtx); err != nil {
-			logger.Warn("Queue shutdown error", "error", err)
-		}
-	}
-
-	// Phase 4: Stop stats manager
+	// Phase 3: Stop stats manager
 	if statsManager != nil {
 		logger.Info("Stopping stats manager...")
 		statsManager.Stop()
 	}
 
-	// Phase 5: Stop health server
+	// Phase 4: Stop health server
 	if healthServer != nil {
 		logger.Info("Stopping health server...")
 		healthServer.Stop(context.Background())
@@ -539,7 +402,7 @@ func initStorageBackend(cfg *config.Config, logger *slog.Logger) (storage.Backen
 	return backend, s3Client, nil
 }
 
-// initTLS sets up the storage backend and TLS certificate management (autocert or certmagic).
+// initTLS sets up the storage backend and TLS certificate management using autocert.
 func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logger) (*tls.Config, *minio.Client, *tlsmgr.Manager, error) {
 	storageBackend, s3Client, err := initStorageBackend(cfg, logger)
 	if err != nil {
@@ -551,113 +414,62 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logge
 	var tlsConfig *tls.Config
 	var tlsMgr *tlsmgr.Manager
 
-	// Use autocert if enabled (requires cluster for leader election)
-	if cfg.TLS.EnableAutocert {
-		logger.Info("Using autocert for TLS certificate management")
-
-		// Get leader function from cluster
-		var isLeaderF func() bool
-		if clusterMgr != nil {
-			isLeaderF = clusterMgr.IsLeader
-		} else {
-			// Fallback: always return true if no cluster (single-node mode)
-			isLeaderF = func() bool { return true }
-			logger.Warn("No cluster configured - autocert running in single-node mode")
-		}
-
-		// Create TLS manager with autocert
-		tlsMgr, err = tlsmgr.NewManager(tlsmgr.Config{
-			Enabled:   true,
-			Email:     cfg.TLS.Email,
-			Domains:   cfg.TLS.Domains,
-			S3Client:  s3Client,
-			S3Bucket:  cfg.Storage.Bucket,
-			S3Prefix:  cfg.Storage.Prefix,
-			IsLeaderF: isLeaderF,
-			Staging:   !cfg.TLS.UseProduction,
-		}, logger)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to create TLS manager: %w", err)
-		}
-
-		tlsConfig = tlsMgr.TLSConfig()
-		if tlsConfig == nil {
-			return nil, nil, nil, fmt.Errorf("TLS manager returned nil config")
-		}
-
-		logger.Info(fmt.Sprintf("Autocert initialized for domains: %v", cfg.TLS.Domains))
+	// Get leader function from cluster
+	var isLeaderF func() bool
+	if clusterMgr != nil {
+		isLeaderF = clusterMgr.IsLeader
 	} else {
-		// Use certmagic (existing behavior)
-		logger.Info("Using certmagic for TLS certificate management")
-
-		// Configure certmagic logging for debugging TLS certificate issues
-		// Note: certmagic expects zap.Logger, not slog.Logger
-		// TODO: Create adapter if verbose logging is needed
-		_ = cfg.TLS.CertMagicVerbose
-
-		// Set up Certmagic storage to use S3
-		certmagic.Default.Storage = storage.NewS3CertStorage(s3Client, cfg.Storage.Bucket, cfg.Storage.Prefix, logger)
-
-		// Configure Certmagic for ACME (Let's Encrypt)
-		if cfg.TLS.Email != "" {
-			certmagic.DefaultACME.Email = cfg.TLS.Email
-		}
-
-		if !cfg.TLS.UseProduction || cfg.TLS.UseLocalCA {
-			certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA
-			logger.Info("Using Let's Encrypt staging CA")
-		} else {
-			certmagic.DefaultACME.CA = certmagic.LetsEncryptProductionCA
-			logger.Info("Using Let's Encrypt production CA")
-		}
-
-		certmagic.Default.OnDemand = &certmagic.OnDemandConfig{} // Enable on-demand certs
-
-		// Load or issue initial certificate
-		// Get certificate for the first enabled server's domain
-		var primaryDomain string
-		for _, srv := range cfg.Servers {
-			primaryDomain = srv.Domain
-			break
-		}
-		if primaryDomain == "" {
-			primaryDomain = cfg.Defaults.Domain
-		}
-
-		logger.Info(fmt.Sprintf("Attempting to get TLS certificate for %s...", primaryDomain))
-		tlsConfig, err = certmagic.TLS([]string{primaryDomain})
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to get initial TLS certificate: %w", err)
-		}
-
-		logger.Info(fmt.Sprintf("Successfully configured TLS certificate for %s", primaryDomain))
+		// Fallback: always return true if no cluster (single-node mode)
+		isLeaderF = func() bool { return true }
+		logger.Warn("No cluster configured - autocert running in single-node mode")
 	}
+
+	// Calculate renewal window
+	var renewBefore time.Duration
+	if cfg.TLS.RenewBeforeDays > 0 {
+		renewBefore = time.Duration(cfg.TLS.RenewBeforeDays) * 24 * time.Hour
+	}
+
+	// Calculate sync interval
+	var syncInterval time.Duration
+	if cfg.TLS.SyncIntervalMinutes > 0 {
+		syncInterval = time.Duration(cfg.TLS.SyncIntervalMinutes) * time.Minute
+	} else if cfg.TLS.SyncIntervalMinutes == 0 && cfg.TLS.FallbackCacheDir != "" {
+		// Default to 5 minutes if fallback cache is enabled but interval not specified
+		syncInterval = 5 * time.Minute
+	}
+
+	// Create TLS manager with autocert
+	tlsMgr, err = tlsmgr.NewManager(tlsmgr.Config{
+		Enabled:       true,
+		Email:         cfg.TLS.Email,
+		Domains:       cfg.TLS.Domains,
+		DefaultDomain: cfg.TLS.DefaultDomain,
+		S3Client:      s3Client,
+		S3Bucket:      cfg.Storage.Bucket,
+		S3Prefix:      cfg.Storage.Prefix,
+		IsLeaderF:     isLeaderF,
+		Staging:       !cfg.TLS.UseProduction,
+		RenewBefore:   renewBefore,
+		FallbackDir:   cfg.TLS.FallbackCacheDir,
+		SyncInterval:  syncInterval,
+	}, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create TLS manager: %w", err)
+	}
+
+	tlsConfig = tlsMgr.TLSConfig()
+	if tlsConfig == nil {
+		return nil, nil, nil, fmt.Errorf("TLS manager returned nil config")
+	}
+
+	logger.Info(fmt.Sprintf("Autocert initialized for domains: %v", cfg.TLS.Domains))
 
 	// Set default minimum TLS version (can be overridden per-server)
 	tlsConfig.MinVersion = tls.VersionTLS12
 	logger.Info("Default TLS configuration ready (per-server min version can be set in [server.tls])")
 
 	return tlsConfig, s3Client, tlsMgr, nil
-}
-
-// initCircuitBreaker initializes the circuit breaker for the destination endpoint.
-func initCircuitBreaker(cfg *config.Config, logger *slog.Logger, metricsInstance *metrics.Metrics) *poster.CircuitBreaker {
-	if cfg.Local || !cfg.Delivery.CircuitBreaker.Enabled {
-		return nil
-	}
-
-	cb := poster.NewCircuitBreaker(poster.CircuitBreakerConfig{
-		Enabled:          cfg.Delivery.CircuitBreaker.Enabled,
-		FailureThreshold: cfg.Delivery.CircuitBreaker.FailureThreshold,
-		SuccessThreshold: cfg.Delivery.CircuitBreaker.SuccessThreshold,
-		Timeout:          time.Duration(cfg.Delivery.CircuitBreaker.TimeoutSeconds) * time.Second,
-		HalfOpenMaxCalls: cfg.Delivery.CircuitBreaker.HalfOpenMaxCalls,
-		ResetTimeout:     time.Duration(cfg.Delivery.CircuitBreaker.ResetTimeoutSeconds) * time.Second,
-	}, logger, metricsInstance)
-	logger.Info(fmt.Sprintf("Circuit breaker enabled: failure_threshold=%d, timeout=%v",
-		cfg.Delivery.CircuitBreaker.FailureThreshold,
-		time.Duration(cfg.Delivery.CircuitBreaker.TimeoutSeconds)*time.Second))
-	return cb
 }
 
 // initCluster initializes the memberlist cluster for distributed operations
@@ -701,8 +513,8 @@ func initCluster(cfg *config.Config, logger *slog.Logger) (*cluster.Cluster, err
 
 	clusterCfg := cluster.Config{
 		NodeName:  nodeName,
-		BindAddr:  cfg.Cluster.BindAddr,
-		BindPort:  cfg.Cluster.BindPort,
+		BindAddr:  cfg.Cluster.GetBindAddr(),
+		BindPort:  cfg.Cluster.GetBindPort(),
 		Peers:     cfg.Cluster.Peers,
 		SecretKey: secretKey,
 		Logger:    logger,
@@ -710,15 +522,15 @@ func initCluster(cfg *config.Config, logger *slog.Logger) (*cluster.Cluster, err
 
 	logger.Info("Initializing memberlist cluster",
 		"node_name", nodeName,
-		"bind_addr", cfg.Cluster.BindAddr,
-		"bind_port", cfg.Cluster.BindPort,
+		"bind_addr", cfg.Cluster.GetBindAddr(),
+		"bind_port", cfg.Cluster.GetBindPort(),
 		"peers", len(cfg.Cluster.Peers))
 
 	return cluster.NewCluster(clusterCfg)
 }
 
 // startHealthServer initializes and starts the health check server.
-func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *stats.Manager, cb *poster.CircuitBreaker, connTracker *smtp.ConnectionTracker, distTracker *smtp.DistributedTracker, s3Client *minio.Client) *health.Server {
+func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *stats.Manager, connTracker *smtp.ConnectionTracker, distTracker *smtp.DistributedTracker, s3Client *minio.Client) *health.Server {
 	if !cfg.Health.Enabled {
 		return nil
 	}
@@ -726,9 +538,6 @@ func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *st
 	var checkers []health.Checker
 	if statsManager != nil {
 		checkers = append(checkers, statsManager)
-	}
-	if cb != nil {
-		checkers = append(checkers, cb)
 	}
 	if distTracker != nil {
 		checkers = append(checkers, distTracker)
@@ -738,8 +547,15 @@ func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *st
 	if s3Client != nil {
 		checkers = append(checkers, health.NewCheckS3Connection(s3Client, cfg.Storage.Bucket))
 	}
-	if !cfg.Local && cfg.Delivery.URL != "" {
-		checkers = append(checkers, health.NewCheckDestination(cfg.Delivery.URL, 5*time.Second))
+	// Check delivery URLs for each server
+	if !cfg.Local {
+		deliveryURLsChecked := make(map[string]bool) // Track URLs to avoid duplicates
+		for _, srv := range cfg.Servers {
+			if srv.Delivery.URL != "" && !deliveryURLsChecked[srv.Delivery.URL] {
+				checkers = append(checkers, health.NewCheckDestination(srv.Delivery.URL, 5*time.Second))
+				deliveryURLsChecked[srv.Delivery.URL] = true
+			}
+		}
 	}
 	// Check TLS certificates for all enabled servers
 	if !cfg.Local {
@@ -760,20 +576,33 @@ func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *st
 		}
 	}
 
-	healthServer := health.NewServer(cfg.Health.ListenAddr, logger, checkers...)
-
-	// Configure HTTP Basic Auth for health endpoint
-	if cfg.Health.Username != "" {
-		healthServer.SetBasicAuth(cfg.Health.Username, cfg.Health.Password)
+	// Only start health server if at least one feature is enabled
+	if !cfg.Health.Enabled && !cfg.Metrics.Enabled {
+		logger.Info("Health and metrics endpoints disabled")
+		return nil
 	}
 
-	// Configure Prometheus metrics endpoint
-	healthServer.SetMetricsConfig(
-		cfg.Metrics.Enabled,
-		cfg.Metrics.Path,
-		cfg.Metrics.Username,
-		cfg.Metrics.Password,
-	)
+	healthServer := health.NewServer(cfg.Health.ListenAddr, logger, checkers...)
+
+	// Configure health endpoint (only if enabled)
+	healthServer.SetHealthEnabled(cfg.Health.Enabled)
+	if cfg.Health.Enabled {
+		// Configure HTTP Basic Auth for health endpoint
+		if cfg.Health.Username != "" {
+			healthServer.SetBasicAuth(cfg.Health.Username, cfg.Health.Password)
+		}
+		logger.Info("Health endpoint enabled", "listen_addr", cfg.Health.ListenAddr, "auth_enabled", cfg.Health.Username != "")
+	}
+
+	// Configure Prometheus metrics endpoint (only if enabled)
+	if cfg.Metrics.Enabled {
+		healthServer.SetMetricsConfig(
+			cfg.Metrics.Enabled,
+			cfg.Metrics.Path,
+			cfg.Metrics.Username,
+			cfg.Metrics.Password,
+		)
+	}
 
 	// Set stats provider
 	healthServer.SetStatsProvider(statsManager)
@@ -820,13 +649,9 @@ func createServerBackend(
 	serverCfg *config.ServerConfig,
 	globalCfg *config.Config,
 	statsManager *stats.Manager,
-	circuitBreaker *poster.CircuitBreaker,
-	httpClient *http.Client,
 	dnsResolver *net.Resolver,
 	metricsInstance *metrics.Metrics,
-	routingClient smtp.RoutingClient,
-	deliveryQueue smtp.DeliveryQueue,
-	srsRewriter smtp.SRSRewriter,
+	recipientValidator smtp.RecipientValidator,
 	clusterMgr *cluster.Cluster,
 	s3Client *minio.Client,
 	logger *slog.Logger,
@@ -907,17 +732,30 @@ func createServerBackend(
 			"selector", serverCfg.ARC.Selector)
 	}
 
-	// Initialize authenticator for submission servers
+	// Initialize authenticator if auth is enabled or required
 	var authenticator smtp.Authenticator
-	if serverCfg.IsSubmission() && serverCfg.Auth.Required {
+	if serverCfg.Auth.Enabled || serverCfg.Auth.Required {
 		authenticator = initAuthenticator(serverCfg, serverLogger)
 	}
 
-	// Initialize DKIM signer for submission servers
-	var dkimSigner smtp.DKIMSigner
-	if serverCfg.DKIM.Enabled {
-		dkimSigner = initDKIMSigner(serverCfg, serverLogger)
+	// Create per-server circuit breaker and HTTP client for delivery
+	var serverCircuitBreaker *poster.CircuitBreaker
+	if !globalCfg.Local && serverCfg.Delivery.CircuitBreaker.Enabled {
+		serverCircuitBreaker = poster.NewCircuitBreaker(poster.CircuitBreakerConfig{
+			Enabled:          serverCfg.Delivery.CircuitBreaker.Enabled,
+			FailureThreshold: serverCfg.Delivery.CircuitBreaker.FailureThreshold,
+			SuccessThreshold: serverCfg.Delivery.CircuitBreaker.SuccessThreshold,
+			Timeout:          time.Duration(serverCfg.Delivery.CircuitBreaker.TimeoutSeconds) * time.Second,
+			HalfOpenMaxCalls: serverCfg.Delivery.CircuitBreaker.HalfOpenMaxCalls,
+			ResetTimeout:     time.Duration(serverCfg.Delivery.CircuitBreaker.ResetTimeoutSeconds) * time.Second,
+		}, serverLogger, metricsInstance)
+		serverLogger.Info("Circuit breaker enabled",
+			"failure_threshold", serverCfg.Delivery.CircuitBreaker.FailureThreshold,
+			"timeout_seconds", serverCfg.Delivery.CircuitBreaker.TimeoutSeconds)
 	}
+
+	serverHTTPClient := poster.NewHTTPClient(time.Duration(serverCfg.Delivery.HTTPTimeoutSeconds) * time.Second)
+	serverLogger.Info("HTTP client created", "timeout_seconds", serverCfg.Delivery.HTTPTimeoutSeconds)
 
 	// Create Backend
 	var activeSessionsWg sync.WaitGroup
@@ -928,8 +766,8 @@ func createServerBackend(
 		ServerConfig:       serverCfg,
 		GlobalConfig:       globalCfg,
 		StatsManager:       statsManager,
-		CircuitBreaker:     circuitBreaker,
-		HTTPClient:         httpClient,
+		CircuitBreaker:     serverCircuitBreaker,
+		HTTPClient:         serverHTTPClient,
 		DNSResolver:        dnsResolver,
 		Metrics:            metricsInstance,
 		Logger:             serverLogger,
@@ -940,46 +778,51 @@ func createServerBackend(
 		DistTracker:        distTracker,
 		RateLimiter:        rateLimiter,
 		Authenticator:      authenticator,
-		DKIMSigner:         dkimSigner,
 		ARCSigner:          arcSigner,
-		RoutingClient:      routingClient,
-		DeliveryQueue:      deliveryQueue,
-		SRSRewriter:        srsRewriter,
+		RecipientValidator: recipientValidator,
 	}
 }
 
 // initAuthenticator initializes an HTTP authenticator for submission servers
 func initAuthenticator(serverCfg *config.ServerConfig, logger *slog.Logger) smtp.Authenticator {
-	if serverCfg.Auth.Endpoint == "" {
-		logger.Error("Authentication requires auth.endpoint")
+	if serverCfg.Auth.URL == "" {
+		logger.Error("Authentication requires auth.url")
 		os.Exit(1)
 	}
-	logger.Info("Using HTTP authenticator", "endpoint", serverCfg.Auth.Endpoint)
-	return smtp.NewHTTPAuthenticator(serverCfg.Auth.Endpoint, serverCfg.Auth.APIKey, logger)
+	logger.Info("Using HTTP authenticator", "url", serverCfg.Auth.URL)
+	return smtp.NewHTTPAuthenticator(serverCfg.Auth.URL, serverCfg.Auth.APIKey, logger)
 }
 
-// initDKIMSigner initializes a DKIM signer based on server config
-func initDKIMSigner(serverCfg *config.ServerConfig, logger *slog.Logger) smtp.DKIMSigner {
-	signer, err := validation.NewDKIMSigner(
-		serverCfg.DKIM.Domain,
-		serverCfg.DKIM.Selector,
-		serverCfg.DKIM.PrivateKeyPath,
-		logger,
-	)
+// initRecipientValidator initializes a recipient validator for a server
+func initRecipientValidator(serverCfg *config.ServerConfig, logger *slog.Logger) smtp.RecipientValidator {
+	if serverCfg.RecipientValidation.URL == "" {
+		logger.Error("Recipient validation requires recipient_validation.url")
+		os.Exit(1)
+	}
+
+	validator, err := recipient.NewValidator(recipient.ValidatorConfig{
+		URL:                serverCfg.RecipientValidation.URL,
+		APIKey:             serverCfg.RecipientValidation.APIKey,
+		HTTPTimeoutSeconds: serverCfg.RecipientValidation.HTTPTimeoutSeconds,
+		CacheTTLSeconds:    serverCfg.RecipientValidation.CacheTTLSeconds,
+		Logger:             logger,
+	})
 	if err != nil {
-		logger.Error("Failed to initialize DKIM signer",
-			"domain", serverCfg.DKIM.Domain,
-			"selector", serverCfg.DKIM.Selector,
-			"key_path", serverCfg.DKIM.PrivateKeyPath,
+		logger.Error("Failed to initialize recipient validator",
+			"url", serverCfg.RecipientValidation.URL,
 			"error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("DKIM signer initialized",
-		"domain", serverCfg.DKIM.Domain,
-		"selector", serverCfg.DKIM.Selector)
+	// Wrap in adapter to match smtp.RecipientValidator interface
+	adapter := recipient.NewSMTPAdapter(validator)
 
-	return signer
+	logger.Info("Recipient validator initialized",
+		"url", serverCfg.RecipientValidation.URL,
+		"timeout_seconds", serverCfg.RecipientValidation.HTTPTimeoutSeconds,
+		"cache_ttl_seconds", serverCfg.RecipientValidation.CacheTTLSeconds)
+
+	return adapter
 }
 
 // runSMTPServerInstance runs a single SMTP server instance

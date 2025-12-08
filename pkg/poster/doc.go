@@ -19,13 +19,13 @@
 // If the backend is unavailable, SMTP returns 4xx (temporary failure) and
 // the sending server will retry later.
 //
-// # Circuit Breaker
+// # Circuit Breaker and Retry Interaction
 //
-// The package includes a circuit breaker to protect the backend:
+// The circuit breaker protects each individual retry attempt (NOT the entire retry loop):
 //
 //	States:
 //	  - Closed: Normal operation, requests pass through
-//	  - Open: Too many failures, reject requests immediately
+//	  - Open: Too many failures, fail fast but still allow retries
 //	  - HalfOpen: Testing if backend has recovered
 //
 //	Transitions:
@@ -34,8 +34,15 @@
 //	  HalfOpen → Closed: After M successes (default: 2)
 //	  HalfOpen → Open: On any failure
 //
-// When the circuit is open, SMTP returns 451 (temporary failure) without
-// attempting delivery, allowing the backend to recover.
+// IMPORTANT: When the circuit is open, individual attempts fail fast with ErrCircuitOpen,
+// but this error is marked as retryable. This means:
+//
+//  1. Circuit breaker protects backend from being overwhelmed
+//  2. Retry logic continues attempting delivery (with exponential backoff)
+//  3. If backend recovers during retry window, message is delivered
+//  4. If all retries fail, SMTP returns 451 (temporary failure)
+//
+// This design prevents message loss while still protecting the backend.
 //
 // # Retry Logic
 //
@@ -58,20 +65,18 @@
 //
 // # HTTP Request Format
 //
-// Emails are posted as JSON:
+// Emails are posted as message/rfc822 with envelope information in headers:
 //
 //	POST /email HTTP/1.1
 //	Host: backend.example.com
-//	Content-Type: application/json
-//	X-API-Key: secret-key
+//	Content-Type: message/rfc822
+//	Authorization: Bearer secret-key
 //	X-Trace-ID: unique-trace-id
+//	X-Mail-From: sender@example.com
+//	X-Mail-To: recipient1@example.com, recipient2@example.com
+//	X-Junk: yes  # Only present if spam detected
 //
-//	{
-//	  "from": "sender@example.com",
-//	  "to": ["recipient@example.com"],
-//	  "raw_email": "base64-encoded-email-content",
-//	  "is_junk": false
-//	}
+//	[Raw RFC 822 email content]
 //
 // The backend should respond with:
 //

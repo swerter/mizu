@@ -10,20 +10,30 @@
 //
 // Configuration uses TOML format with nested sections:
 //
-//	[smtp]
-//	listen_addr = ":25"
+//	[defaults]
 //	domain = "mail.example.com"
 //	max_message_size = 10485760  # 10MB
 //
-//	[smtp.arc_sign]
-//	enabled = false
-//	domain = "mail.example.com"
-//	selector = "arc"
-//	private_key_path = "/etc/mizu/arc-private.pem"
+//	[[server]]
+//	name = "mx-primary"
+//	type = "relay"
+//	listen_addr = ":25"
 //
-//	[delivery]
+//	[server.dkim]
+//	enabled = true  # Validate DKIM signatures
+//
+//	[server.arc]
+//	enabled = true
+//	mode = "check"  # or "sign" for forwarding
+//
+//	[server.delivery]
 //	url = "https://backend.example.com/email"
 //	api_key = "${DELIVERY_API_KEY}"  # From environment
+//	max_retry_attempts = 3
+//
+//	[server.delivery.circuit_breaker]
+//	enabled = true
+//	failure_threshold = 5
 //
 //	[storage]
 //	backend = "s3"  # or "filesystem"
@@ -91,8 +101,8 @@
 //
 // Some features require cluster mode (cluster.enabled=true):
 //
-//	Distributed connection tracking (smtp.distributed.enabled)
-//	Rate limit gossip (smtp.rate_limit.gossip_enabled)
+//	Distributed connection tracking (server.distributed.enabled)
+//	Rate limit gossip (server.rate_limit.gossip_enabled)
 //	TLS certificate management with leader election
 //	Reputation stats sync across cluster
 //
@@ -107,16 +117,29 @@
 //
 // The Config struct has the following main sections:
 //
-//	SMTP: SMTP server settings (port, domain, limits, validation)
+//	Defaults: Default values inherited by all servers
+//	Servers: Array of SMTP server instances (relay/submission)
 //	DNS: DNS resolver configuration
 //	Storage: S3 or filesystem backend settings
-//	Destination: HTTP backend endpoint configuration
 //	TLS: Let's Encrypt and certificate management
-//	Blacklists: DNS blacklist (DNSBL) configuration
 //	Health: Health check endpoint settings
 //	Metrics: Prometheus metrics endpoint settings
 //	Stats: Reputation tracking configuration
 //	Cluster: Distributed coordination settings
+//
+// Each server has its own configuration:
+//
+//	Limits: Connection and rate limits
+//	TLS: TLS mode and requirements
+//	DNS Checks: rDNS, sender MX validation
+//	Junk: Spam detection settings
+//	SPF/DKIM/DMARC/ARC: Email authentication
+//	DNSBL: DNS blacklist checking
+//	Header Analysis: Advanced spam detection
+//	Rate Limiting: Multi-dimensional rate limits
+//	Distributed: Cluster-wide connection tracking
+//	Recipient Validation: HTTP-based validation
+//	Delivery: HTTP backend configuration with circuit breaker
 //
 // # Thread Safety
 //

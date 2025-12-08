@@ -60,22 +60,20 @@ func applyEnvironmentVariables(cfg *Config) {
 		cfg.Storage.SecretAccessKey = val
 	}
 
-	// Delivery credentials
+	// Delivery credentials (apply to all servers)
 	if val := os.Getenv("DESTINATION_API_KEY"); val != "" {
-		cfg.Delivery.APIKey = val
+		for i := range cfg.Servers {
+			if cfg.Servers[i].Delivery.APIKey == "" || cfg.Servers[i].Delivery.APIKey == "your-api-key-here" {
+				cfg.Servers[i].Delivery.APIKey = val
+			}
+		}
 	}
 	if val := os.Getenv("DELIVERY_API_KEY"); val != "" {
-		cfg.Delivery.APIKey = val
-	}
-
-	// Forwarding credentials
-	if val := os.Getenv("FORWARDING_API_KEY"); val != "" {
-		cfg.Forwarding.APIKey = val
-	}
-
-	// Routing credentials
-	if val := os.Getenv("ROUTING_API_KEY"); val != "" {
-		cfg.Routing.APIKey = val
+		for i := range cfg.Servers {
+			if cfg.Servers[i].Delivery.APIKey == "" || cfg.Servers[i].Delivery.APIKey == "your-api-key-here" {
+				cfg.Servers[i].Delivery.APIKey = val
+			}
+		}
 	}
 
 	// Health check credentials
@@ -86,11 +84,6 @@ func applyEnvironmentVariables(cfg *Config) {
 	// Cluster encryption key
 	if val := os.Getenv("CLUSTER_SECRET_KEY"); val != "" {
 		cfg.Cluster.SecretKey = val
-	}
-
-	// SRS secret
-	if val := os.Getenv("SRS_SECRET"); val != "" {
-		cfg.Forwarding.SRS.Secret = val
 	}
 
 	// Apply auth API key to all submission servers

@@ -1,6 +1,8 @@
 package smtp
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strings"
@@ -185,4 +187,83 @@ func modifySubject(rawEmail, pattern string) string {
 	}
 
 	return strings.Join(result, "\r\n")
+}
+
+// fixMissingHeaders adds missing Message-ID and Date headers if they don't exist
+// This is typically used for relay servers that accept mail from other systems
+func fixMissingHeaders(rawEmail, domain string) string {
+	lines := strings.Split(rawEmail, "\r\n")
+	hasMessageID := false
+	hasDate := false
+	headerEndIndex := -1
+
+	// Scan headers to check what's missing and find where headers end
+	for i, line := range lines {
+		// Empty line marks end of headers
+		if line == "" {
+			headerEndIndex = i
+			break
+		}
+
+		// Check for Message-ID header (case-insensitive)
+		if len(line) >= 11 && strings.EqualFold(line[:11], "Message-ID:") {
+			hasMessageID = true
+		}
+
+		// Check for Date header (case-insensitive)
+		if len(line) >= 5 && strings.EqualFold(line[:5], "Date:") {
+			hasDate = true
+		}
+	}
+
+	// If both headers exist, return unchanged
+	if hasMessageID && hasDate {
+		return rawEmail
+	}
+
+	// Build list of headers to add
+	var headersToAdd []string
+
+	if !hasDate {
+		// RFC 5322 date format: "Mon, 02 Jan 2006 15:04:05 -0700"
+		timestamp := time.Now().Format(time.RFC1123Z)
+		headersToAdd = append(headersToAdd, "Date: "+timestamp)
+	}
+
+	if !hasMessageID {
+		// Generate Message-ID: <random>@domain
+		// Format: <uniqueID.timestamp@domain>
+		messageID := generateMessageID(domain)
+		headersToAdd = append(headersToAdd, "Message-ID: "+messageID)
+	}
+
+	// Insert headers before the empty line (or at the end if no empty line found)
+	var result []string
+	if headerEndIndex == -1 {
+		// No empty line found - malformed email, append headers at the end
+		result = append(result, lines...)
+		result = append(result, headersToAdd...)
+		result = append(result, "") // Add empty line separator
+	} else {
+		// Insert headers before the empty line that separates headers from body
+		result = append(result, lines[:headerEndIndex]...)
+		result = append(result, headersToAdd...)
+		result = append(result, lines[headerEndIndex:]...)
+	}
+
+	return strings.Join(result, "\r\n")
+}
+
+// generateMessageID creates a unique Message-ID header value
+// Format: <16-char-hex.timestamp@domain>
+func generateMessageID(domain string) string {
+	// Generate 8 random bytes (16 hex characters)
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based ID if random fails
+		return fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), domain)
+	}
+	randomPart := hex.EncodeToString(b)
+	timestamp := time.Now().Unix()
+	return fmt.Sprintf("<%s.%d@%s>", randomPart, timestamp, domain)
 }

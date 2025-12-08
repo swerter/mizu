@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -54,13 +55,13 @@ domain = "mail.test.com"
 enabled = true
 mode = "starttls"
 
+[server.delivery]
+url = "https://destination.example.com/email"
+api_key = "test-api-key"
+
 [storage]
 backend = "filesystem"
 filesystem_path = "/tmp/mizu-test"
-
-[delivery]
-url = "https://destination.example.com/email"
-api_key = "test-api-key"
 
 log_format = "json"
 `
@@ -92,8 +93,8 @@ log_format = "json"
 		t.Errorf("Storage.Backend = %s; want filesystem", cfg.Storage.Backend)
 	}
 
-	if cfg.Delivery.URL != "https://destination.example.com/email" {
-		t.Errorf("Delivery.URL = %s; want https://destination.example.com/email", cfg.Delivery.URL)
+	if srv.Delivery.URL != "https://destination.example.com/email" {
+		t.Errorf("Server.Delivery.URL = %s; want https://destination.example.com/email", srv.Delivery.URL)
 	}
 }
 
@@ -123,8 +124,8 @@ func TestLoadEnvVars(t *testing.T) {
 		t.Errorf("Storage.SecretAccessKey = %s; want test-secret-key", cfg.Storage.SecretAccessKey)
 	}
 
-	if cfg.Delivery.APIKey != "test-dest-key" {
-		t.Errorf("Delivery.APIKey = %s; want test-dest-key", cfg.Delivery.APIKey)
+	if cfg.Servers[0].Delivery.APIKey != "test-dest-key" {
+		t.Errorf("Server.Delivery.APIKey = %s; want test-dest-key", cfg.Servers[0].Delivery.APIKey)
 	}
 
 	// Check that AUTH_API_KEY is applied to submission servers
@@ -195,7 +196,7 @@ func TestValidateConfig_ValidMultiServer(t *testing.T) {
 			},
 			Auth: ServerAuthConfig{
 				Required: true,
-				Endpoint: "https://auth.example.com",
+				URL:      "https://auth.example.com",
 				APIKey:   "test-api-key",
 			},
 		},
@@ -205,8 +206,14 @@ func TestValidateConfig_ValidMultiServer(t *testing.T) {
 	cfg.Local = true // Use local mode to skip some validations
 	cfg.Storage.Backend = "filesystem"
 	cfg.Storage.FilesystemPath = "/tmp/mizu"
-	cfg.Delivery.URL = "https://test.com"
-	cfg.Delivery.APIKey = "test-key"
+
+	// Set delivery config for all servers
+	for i := range cfg.Servers {
+		cfg.Servers[i].Delivery.URL = "https://test.com"
+		cfg.Servers[i].Delivery.APIKey = "test-key"
+		cfg.Servers[i].Delivery.MaxRetryAttempts = 3
+		cfg.Servers[i].Delivery.HTTPTimeoutSeconds = 30
+	}
 
 	err := cfg.Validate()
 	if err != nil {
@@ -262,4 +269,120 @@ func TestSaveExample(t *testing.T) {
 	if len(data) == 0 {
 		t.Error("example file is empty")
 	}
+}
+
+func TestValidateConfig_ClusterBindAddr(t *testing.T) {
+	tests := []struct {
+		name      string
+		addr      string
+		port      int
+		wantError bool
+		errorMsg  string
+	}{
+		{
+			name:      "valid IP address",
+			addr:      "10.0.1.5",
+			port:      7946,
+			wantError: false,
+		},
+		{
+			name:      "valid IP with port",
+			addr:      "10.0.1.5:7946",
+			port:      0,
+			wantError: false,
+		},
+		{
+			name:      "empty addr",
+			addr:      "",
+			port:      7946,
+			wantError: true,
+			errorMsg:  "cluster.addr must be set",
+		},
+		{
+			name:      "0.0.0.0 not allowed",
+			addr:      "0.0.0.0",
+			port:      7946,
+			wantError: true,
+			errorMsg:  "cluster.addr cannot be 0.0.0.0",
+		},
+		{
+			name:      ":: not allowed",
+			addr:      "::",
+			port:      7946,
+			wantError: true,
+			errorMsg:  "cluster.addr cannot be 0.0.0.0 or ::",
+		},
+		{
+			name:      "localhost not allowed",
+			addr:      "localhost",
+			port:      7946,
+			wantError: true,
+			errorMsg:  "cluster.addr cannot be localhost",
+		},
+		{
+			name:      "127.0.0.1 not allowed",
+			addr:      "127.0.0.1",
+			port:      7946,
+			wantError: true,
+			errorMsg:  "cluster.addr cannot be localhost/127.0.0.1",
+		},
+		{
+			name:      "::1 not allowed",
+			addr:      "::1",
+			port:      7946,
+			wantError: true,
+			errorMsg:  "cluster.addr cannot be localhost",
+		},
+		{
+			name:      "invalid port too high",
+			addr:      "10.0.1.5",
+			port:      70000,
+			wantError: true,
+			errorMsg:  "cluster bind port must be between 1 and 65535",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Local = false // Use production mode to trigger cluster validation
+			cfg.Storage.Backend = "filesystem"
+			cfg.Storage.FilesystemPath = "/tmp/mizu"
+			cfg.TLS.Email = "test@example.com"
+			cfg.TLS.Domains = []string{"test.example.com"}
+
+			// Enable cluster
+			cfg.Cluster.Enabled = true
+			cfg.Cluster.Addr = tt.addr
+			cfg.Cluster.Port = tt.port
+
+			// Set required fields for all servers
+			for i := range cfg.Servers {
+				cfg.Servers[i].Delivery.URL = "https://test.com"
+				cfg.Servers[i].Delivery.APIKey = "test-key"
+				cfg.Servers[i].Delivery.MaxRetryAttempts = 3
+				cfg.Servers[i].Delivery.HTTPTimeoutSeconds = 30
+			}
+
+			err := cfg.Validate()
+
+			if tt.wantError {
+				if err == nil {
+					t.Errorf("Expected validation error containing '%s', got nil", tt.errorMsg)
+					return
+				}
+				if tt.errorMsg != "" && !contains(err.Error(), tt.errorMsg) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }

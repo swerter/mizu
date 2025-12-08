@@ -252,3 +252,148 @@ func TestBuildAuthenticationSummary(t *testing.T) {
 		})
 	}
 }
+
+func TestFixMissingHeaders_BothMissing(t *testing.T) {
+	// Email missing both Date and Message-ID
+	email := "From: sender@example.com\r\n" +
+		"To: recipient@example.com\r\n" +
+		"Subject: Test\r\n" +
+		"\r\n" +
+		"Body content\r\n"
+
+	fixed := fixMissingHeaders(email, "mail.example.com")
+
+	// Should add Date header
+	if !strings.Contains(fixed, "Date:") {
+		t.Error("Expected Date header to be added")
+	}
+
+	// Should add Message-ID header
+	if !strings.Contains(fixed, "Message-ID:") {
+		t.Error("Expected Message-ID header to be added")
+	}
+
+	// Should contain domain in Message-ID
+	if !strings.Contains(fixed, "@mail.example.com>") {
+		t.Error("Expected Message-ID to contain domain")
+	}
+
+	// Original content should be preserved
+	if !strings.Contains(fixed, "Body content") {
+		t.Error("Original body content should be preserved")
+	}
+}
+
+func TestFixMissingHeaders_OnlyDateMissing(t *testing.T) {
+	// Email with Message-ID but no Date
+	email := "From: sender@example.com\r\n" +
+		"Message-ID: <existing123@example.com>\r\n" +
+		"Subject: Test\r\n" +
+		"\r\n" +
+		"Body\r\n"
+
+	fixed := fixMissingHeaders(email, "mail.example.com")
+
+	// Should add Date
+	if !strings.Contains(fixed, "Date:") {
+		t.Error("Expected Date header to be added")
+	}
+
+	// Should NOT add another Message-ID
+	messageIDCount := strings.Count(fixed, "Message-ID:")
+	if messageIDCount != 1 {
+		t.Errorf("Expected exactly 1 Message-ID header, found %d", messageIDCount)
+	}
+
+	// Original Message-ID should be preserved
+	if !strings.Contains(fixed, "<existing123@example.com>") {
+		t.Error("Original Message-ID should be preserved")
+	}
+}
+
+func TestFixMissingHeaders_OnlyMessageIDMissing(t *testing.T) {
+	// Email with Date but no Message-ID
+	email := "From: sender@example.com\r\n" +
+		"Date: Mon, 02 Jan 2006 15:04:05 -0700\r\n" +
+		"Subject: Test\r\n" +
+		"\r\n" +
+		"Body\r\n"
+
+	fixed := fixMissingHeaders(email, "mail.example.com")
+
+	// Should add Message-ID
+	if !strings.Contains(fixed, "Message-ID:") {
+		t.Error("Expected Message-ID header to be added")
+	}
+
+	// Should NOT add another Date
+	dateCount := strings.Count(fixed, "Date:")
+	if dateCount != 1 {
+		t.Errorf("Expected exactly 1 Date header, found %d", dateCount)
+	}
+
+	// Original Date should be preserved
+	if !strings.Contains(fixed, "Mon, 02 Jan 2006 15:04:05 -0700") {
+		t.Error("Original Date should be preserved")
+	}
+}
+
+func TestFixMissingHeaders_NothingMissing(t *testing.T) {
+	// Email with both Date and Message-ID
+	email := "From: sender@example.com\r\n" +
+		"Date: Mon, 02 Jan 2006 15:04:05 -0700\r\n" +
+		"Message-ID: <abc123@example.com>\r\n" +
+		"Subject: Test\r\n" +
+		"\r\n" +
+		"Body\r\n"
+
+	fixed := fixMissingHeaders(email, "mail.example.com")
+
+	// Should be unchanged
+	if fixed != email {
+		t.Error("Email with both headers should remain unchanged")
+	}
+}
+
+func TestFixMissingHeaders_CaseInsensitive(t *testing.T) {
+	// Test case-insensitive header detection
+	email := "From: sender@example.com\r\n" +
+		"date: Mon, 02 Jan 2006 15:04:05 -0700\r\n" +
+		"message-id: <abc123@example.com>\r\n" +
+		"Subject: Test\r\n" +
+		"\r\n" +
+		"Body\r\n"
+
+	fixed := fixMissingHeaders(email, "mail.example.com")
+
+	// Should be unchanged (lowercase headers should be detected)
+	if fixed != email {
+		t.Error("Lowercase header names should be recognized")
+	}
+}
+
+func TestGenerateMessageID(t *testing.T) {
+	domain := "mail.example.com"
+	messageID1 := generateMessageID(domain)
+	messageID2 := generateMessageID(domain)
+
+	// Should be different (contains random component)
+	if messageID1 == messageID2 {
+		t.Error("Generated Message-IDs should be unique")
+	}
+
+	// Should contain domain
+	if !strings.Contains(messageID1, domain) {
+		t.Errorf("Message-ID should contain domain: %s", messageID1)
+	}
+
+	// Should be in angle brackets
+	if !strings.HasPrefix(messageID1, "<") || !strings.HasSuffix(messageID1, ">") {
+		t.Errorf("Message-ID should be in angle brackets: %s", messageID1)
+	}
+
+	// Should contain @ symbol
+	if !strings.Contains(messageID1, "@") {
+		t.Errorf("Message-ID should contain @ symbol: %s", messageID1)
+	}
+}
