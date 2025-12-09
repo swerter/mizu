@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+
+	"migadu/mizu/pkg/metrics"
 )
 
 // CachingWrapper wraps a net.Resolver and adds application-level caching
@@ -25,7 +27,15 @@ func (c *CachingWrapper) LookupHost(ctx context.Context, host string) ([]string,
 	if c.rr != nil {
 		// Check cache first
 		if addrs, found := c.rr.getCached(host); found {
+			// Record cache hit
+			if c.rr.metrics != nil {
+				c.rr.metrics.DNSCacheHits.WithLabelValues("A").Inc()
+			}
 			return addrs, nil
+		}
+		// Record cache miss
+		if c.rr.metrics != nil {
+			c.rr.metrics.DNSCacheMisses.WithLabelValues("A").Inc()
 		}
 	}
 
@@ -38,6 +48,11 @@ func (c *CachingWrapper) LookupHost(ctx context.Context, host string) ([]string,
 	// Cache the result
 	if c.rr != nil {
 		c.rr.putCache(host, addrs)
+		// Update cache size metric
+		if c.rr.metrics != nil {
+			size, _ := c.rr.GetCacheStats()
+			c.rr.metrics.DNSCacheSize.WithLabelValues("A").Set(float64(size))
+		}
 	}
 
 	return addrs, nil
@@ -50,7 +65,15 @@ func (c *CachingWrapper) LookupAddr(ctx context.Context, addr string) ([]string,
 	if c.rr != nil {
 		// Check cache first
 		if names, found := c.rr.getCached(cacheKey); found {
+			// Record cache hit
+			if c.rr.metrics != nil {
+				c.rr.metrics.DNSCacheHits.WithLabelValues("PTR").Inc()
+			}
 			return names, nil
+		}
+		// Record cache miss
+		if c.rr.metrics != nil {
+			c.rr.metrics.DNSCacheMisses.WithLabelValues("PTR").Inc()
 		}
 	}
 
@@ -63,6 +86,11 @@ func (c *CachingWrapper) LookupAddr(ctx context.Context, addr string) ([]string,
 	// Cache the result
 	if c.rr != nil {
 		c.rr.putCache(cacheKey, names)
+		// Update cache size metric
+		if c.rr.metrics != nil {
+			size, _ := c.rr.GetCacheStats()
+			c.rr.metrics.DNSCacheSize.WithLabelValues("PTR").Set(float64(size))
+		}
 	}
 
 	return names, nil
@@ -85,8 +113,16 @@ func (c *CachingWrapper) LookupMX(ctx context.Context, name string) ([]*net.MX, 
 				}
 			}
 			if len(mxRecords) > 0 {
+				// Record cache hit
+				if c.rr.metrics != nil {
+					c.rr.metrics.DNSCacheHits.WithLabelValues("MX").Inc()
+				}
 				return mxRecords, nil
 			}
+		}
+		// Record cache miss
+		if c.rr.metrics != nil {
+			c.rr.metrics.DNSCacheMisses.WithLabelValues("MX").Inc()
 		}
 	}
 
@@ -103,6 +139,11 @@ func (c *CachingWrapper) LookupMX(ctx context.Context, name string) ([]*net.MX, 
 			cached[i] = fmt.Sprintf("%d:%s", mx.Pref, mx.Host)
 		}
 		c.rr.putCache(cacheKey, cached)
+		// Update cache size metric
+		if c.rr.metrics != nil {
+			size, _ := c.rr.GetCacheStats()
+			c.rr.metrics.DNSCacheSize.WithLabelValues("MX").Set(float64(size))
+		}
 	}
 
 	return mxRecords, nil
@@ -115,7 +156,15 @@ func (c *CachingWrapper) LookupTXT(ctx context.Context, name string) ([]string, 
 	if c.rr != nil {
 		// Check cache first
 		if txts, found := c.rr.getCached(cacheKey); found {
+			// Record cache hit
+			if c.rr.metrics != nil {
+				c.rr.metrics.DNSCacheHits.WithLabelValues("TXT").Inc()
+			}
 			return txts, nil
+		}
+		// Record cache miss
+		if c.rr.metrics != nil {
+			c.rr.metrics.DNSCacheMisses.WithLabelValues("TXT").Inc()
 		}
 	}
 
@@ -128,6 +177,11 @@ func (c *CachingWrapper) LookupTXT(ctx context.Context, name string) ([]string, 
 	// Cache the result
 	if c.rr != nil {
 		c.rr.putCache(cacheKey, txts)
+		// Update cache size metric
+		if c.rr.metrics != nil {
+			size, _ := c.rr.GetCacheStats()
+			c.rr.metrics.DNSCacheSize.WithLabelValues("TXT").Set(float64(size))
+		}
 	}
 
 	return txts, nil
@@ -151,5 +205,12 @@ func (c *CachingWrapper) GetCacheStats() (size int, ttl string) {
 func (c *CachingWrapper) FlushCache() {
 	if c.rr != nil {
 		c.rr.FlushCache()
+	}
+}
+
+// SetMetrics sets the metrics instance for DNS cache monitoring
+func (c *CachingWrapper) SetMetrics(m *metrics.Metrics) {
+	if c.rr != nil {
+		c.rr.SetMetrics(m)
 	}
 }

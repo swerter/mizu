@@ -297,7 +297,7 @@ local = false
 listen_addr = ":2525"
 [destination]
 url = "https://example.com/email"
-api_key = "test-key"
+auth_token = "test-token"
 [storage]
 backend = "filesystem"
 filesystem_path = "/tmp/mizu-test"

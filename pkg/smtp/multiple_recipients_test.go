@@ -41,7 +41,7 @@ func TestMultipleRecipients_DeliveryToBackend(t *testing.T) {
 	cfg := testConfig()
 	cfg.Servers[0].Delivery = config.DeliveryConfig{
 		URL:                backendServer.URL,
-		APIKey:             "test-key",
+		AuthToken:          "test-token",
 		MaxRetryAttempts:   1,
 		HTTPTimeoutSeconds: 5,
 	}
@@ -105,7 +105,7 @@ func TestMultipleRecipients_SingleRecipientStillWorks(t *testing.T) {
 	cfg := testConfig()
 	cfg.Servers[0].Delivery = config.DeliveryConfig{
 		URL:                backendServer.URL,
-		APIKey:             "test-key",
+		AuthToken:          "test-token",
 		MaxRetryAttempts:   1,
 		HTTPTimeoutSeconds: 5,
 	}
@@ -157,7 +157,7 @@ func TestMultipleRecipients_BackendFailureRejectsAll(t *testing.T) {
 	cfg := testConfig()
 	cfg.Servers[0].Delivery = config.DeliveryConfig{
 		URL:                backendServer.URL,
-		APIKey:             "test-key",
+		AuthToken:          "test-token",
 		MaxRetryAttempts:   1,
 		HTTPTimeoutSeconds: 5,
 	}

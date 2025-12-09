@@ -22,6 +22,7 @@ type MessageType byte
 const (
 	MessageTypeConnectionState MessageType = iota
 	MessageTypeRateLimit
+	MessageTypeAuthRateLimit
 )
 
 // GossipMessage is the envelope for all gossip messages
@@ -50,6 +51,7 @@ type Cluster struct {
 	logger                 *slog.Logger
 	connectionStateHandler func(data []byte)
 	rateLimitHandler       func(data []byte)
+	authRateLimitHandler   func(data []byte)
 	stateDelegate          StateDelegate
 	eventDelegate          EventDelegate
 
@@ -196,6 +198,11 @@ func (c *Cluster) RegisterRateLimitHandler(handler func(data []byte)) {
 	c.rateLimitHandler = handler
 }
 
+// RegisterAuthRateLimitHandler registers a handler for auth rate limit gossip
+func (c *Cluster) RegisterAuthRateLimitHandler(handler func(data []byte)) {
+	c.authRateLimitHandler = handler
+}
+
 // BroadcastConnectionState broadcasts connection state to the cluster
 func (c *Cluster) BroadcastConnectionState(data []byte) error {
 	msg := GossipMessage{
@@ -220,6 +227,26 @@ func (c *Cluster) BroadcastConnectionState(data []byte) error {
 func (c *Cluster) BroadcastRateLimit(data []byte) error {
 	msg := GossipMessage{
 		Type:    MessageTypeRateLimit,
+		Payload: json.RawMessage(data),
+	}
+
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	c.broadcasts.QueueBroadcast(&broadcast{
+		msg:    msgBytes,
+		notify: nil,
+	})
+
+	return nil
+}
+
+// BroadcastAuthRateLimit broadcasts auth rate limit data to the cluster
+func (c *Cluster) BroadcastAuthRateLimit(data []byte) error {
+	msg := GossipMessage{
+		Type:    MessageTypeAuthRateLimit,
 		Payload: json.RawMessage(data),
 	}
 
@@ -335,6 +362,10 @@ func (c *Cluster) NotifyMsg(data []byte) {
 	case MessageTypeRateLimit:
 		if c.rateLimitHandler != nil {
 			c.rateLimitHandler(msg.Payload)
+		}
+	case MessageTypeAuthRateLimit:
+		if c.authRateLimitHandler != nil {
+			c.authRateLimitHandler(msg.Payload)
 		}
 	default:
 		c.logger.Warn("Unknown gossip message type", "type", uint8(msg.Type))

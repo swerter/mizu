@@ -92,10 +92,77 @@ type ServerValidationConfig struct {
 // ServerAuthConfig holds authentication configuration for submission servers
 // Authentication is performed via HTTPS POST to the configured URL
 type ServerAuthConfig struct {
-	Enabled  bool   `toml:"enabled"`  // Enable SMTP AUTH (advertise AUTH in EHLO, default: false)
-	Required bool   `toml:"required"` // Require authentication before MAIL FROM (default: false, implies enabled=true)
-	URL      string `toml:"url"`      // HTTPS URL for authentication (must use https://)
-	APIKey   string `toml:"api_key"`  // API key for authentication (sent as Bearer token, can use env var: ${AUTH_API_KEY})
+	Enabled   bool                      `toml:"enabled"`    // Enable SMTP AUTH (advertise AUTH in EHLO, default: false)
+	Required  bool                      `toml:"required"`   // Require authentication before MAIL FROM (default: false, implies enabled=true)
+	URL       string                    `toml:"url"`        // HTTPS URL for authentication (must use https://)
+	AuthToken string                    `toml:"auth_token"` // Authentication token (sent as Bearer token, can use env var: ${AUTH_TOKEN})
+	Cache     ServerAuthCacheConfig     `toml:"cache"`      // Authentication caching configuration
+	RateLimit ServerAuthRateLimitConfig `toml:"rate_limit"` // Authentication rate limiting configuration
+}
+
+// ServerAuthRateLimitConfig holds authentication rate limiting configuration
+// Implements two-tier blocking system to protect against brute-force attacks
+type ServerAuthRateLimitConfig struct {
+	Enabled bool `toml:"enabled"` // Enable authentication rate limiting (default: true when auth is enabled)
+
+	// TIER 1: Fast IP+Username Blocking
+	// Protects shared IPs (corporate gateways) by blocking specific user+IP combinations
+	MaxAttemptsPerIPUsername int    `toml:"max_attempts_per_ip_username"` // Failures before blocking (default: 5)
+	IPUsernameBlockDuration  string `toml:"ip_username_block_duration"`   // Block duration (default: "15m")
+	IPUsernameWindowDuration string `toml:"ip_username_window_duration"`  // Sliding window for counting failures (default: "10m")
+
+	// TIER 2: Slow IP-Only Blocking
+	// Catches distributed attacks trying many usernames from same IP
+	MaxAttemptsPerIP int    `toml:"max_attempts_per_ip"` // Failures before blocking entire IP (default: 50)
+	IPBlockDuration  string `toml:"ip_block_duration"`   // Block duration (default: "30m")
+	IPWindowDuration string `toml:"ip_window_duration"`  // Sliding window for counting failures (default: "30m")
+
+	// USERNAME TRACKING (Statistics Only - No Blocking)
+	// Synchronized across cluster for detecting compromised accounts
+	MaxAttemptsPerUsername int    `toml:"max_attempts_per_username"` // Tracking threshold (default: 100, no blocking)
+	UsernameWindowDuration string `toml:"username_window_duration"`  // Tracking window (default: "1h")
+
+	// PROGRESSIVE DELAYS
+	// Adds delays before full IP blocking to slow attackers
+	DelayStartThreshold int     `toml:"delay_start_threshold"` // Failures before delays start (default: 3)
+	InitialDelay        string  `toml:"initial_delay"`         // First delay (default: "1s")
+	MaxDelay            string  `toml:"max_delay"`             // Maximum delay (default: "30s")
+	DelayMultiplier     float64 `toml:"delay_multiplier"`      // Delay growth factor (default: 2.0)
+
+	// MAINTENANCE
+	CacheCleanupInterval string `toml:"cache_cleanup_interval"` // In-memory cleanup interval (default: "5m")
+
+	// MEMORY SAFETY LIMITS
+	// Prevents unbounded memory growth during massive attacks
+	MaxIPUsernameEntries int `toml:"max_ip_username_entries"` // Max IP+username tracking entries (default: 100000, 0 = unlimited)
+	MaxIPEntries         int `toml:"max_ip_entries"`          // Max IP tracking entries (default: 50000, 0 = unlimited)
+	MaxUsernameEntries   int `toml:"max_username_entries"`    // Max username tracking entries (default: 50000, 0 = unlimited)
+
+	// CLUSTER SYNCHRONIZATION
+	// Syncs auth failures and blocks across cluster via gossip
+	ClusterSyncEnabled bool `toml:"cluster_sync_enabled"` // Enable cluster-wide sync (default: true when cluster enabled)
+	SyncBlocks         bool `toml:"sync_blocks"`          // Sync IP blocks across cluster (default: true)
+	SyncFailureCounts  bool `toml:"sync_failure_counts"`  // Sync progressive delay counts across cluster (default: true)
+}
+
+// ServerAuthCacheConfig holds authentication caching configuration
+// Reduces load on authentication backend and protects against DoS attacks
+type ServerAuthCacheConfig struct {
+	Enabled bool `toml:"enabled"` // Enable authentication caching (default: true when auth is enabled)
+
+	// CACHE TTL SETTINGS
+	PositiveTTL string `toml:"positive_ttl"` // Cache duration for successful auth (default: "5m")
+	NegativeTTL string `toml:"negative_ttl"` // Cache duration for failed auth (default: "1m")
+
+	// MEMORY SAFETY
+	MaxSize int `toml:"max_size"` // Maximum cache entries (default: 50000)
+
+	// MAINTENANCE
+	CleanupInterval string `toml:"cleanup_interval"` // Cleanup interval (default: "5m")
+
+	// PASSWORD CHANGE DETECTION
+	// Allows detecting password changes while maintaining cache benefits
+	PositiveRevalidationWindow string `toml:"positive_revalidation_window"` // Revalidate successful auth after this duration (default: "30s")
 }
 
 // ServerSPFConfig holds SPF validation configuration
@@ -292,7 +359,7 @@ type StorageConfig struct {
 type RecipientValidationConfig struct {
 	Enabled            bool   `toml:"enabled"`              // Enable recipient validation (default: false)
 	URL                string `toml:"url"`                  // HTTP endpoint for recipient validation
-	APIKey             string `toml:"api_key"`              // API key for authentication (sent as Bearer token)
+	AuthToken          string `toml:"auth_token"`           // Authentication token (sent as Bearer token)
 	HTTPTimeoutSeconds int    `toml:"http_timeout_seconds"` // HTTP client timeout in seconds (default: 5)
 	CacheTTLSeconds    int    `toml:"cache_ttl_seconds"`    // Cache TTL for successful validations (default: 300 = 5min)
 }
@@ -300,7 +367,7 @@ type RecipientValidationConfig struct {
 // DeliveryConfig holds configuration for the HTTP delivery endpoint
 type DeliveryConfig struct {
 	URL                string               `toml:"url"`
-	APIKey             string               `toml:"api_key"`
+	AuthToken          string               `toml:"auth_token"`
 	MaxRetryAttempts   int                  `toml:"max_retry_attempts"`
 	HTTPTimeoutSeconds int                  `toml:"http_timeout_seconds"` // HTTP client timeout in seconds (default: 30)
 	CircuitBreaker     CircuitBreakerConfig `toml:"circuit_breaker"`
@@ -448,13 +515,13 @@ func DefaultConfig() Config {
 				RecipientValidation: RecipientValidationConfig{
 					Enabled:            false, // Disabled by default
 					URL:                "",
-					APIKey:             "",
+					AuthToken:          "",
 					HTTPTimeoutSeconds: 5,   // 5s timeout for recipient validation
 					CacheTTLSeconds:    300, // 5min cache
 				},
 				Delivery: DeliveryConfig{
 					URL:                "https://your-worker.example.com/email",
-					APIKey:             "your-api-key-here",
+					AuthToken:          "your-auth-token-here",
 					MaxRetryAttempts:   3,
 					HTTPTimeoutSeconds: 30,
 					CircuitBreaker: CircuitBreakerConfig{

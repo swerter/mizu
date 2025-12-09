@@ -3,8 +3,6 @@ package tls
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -145,19 +143,4 @@ func (c *S3Cache) Delete(ctx context.Context, key string) error {
 
 	c.logger.Debug("S3-Cache: Successfully deleted certificate", "key", key)
 	return nil
-}
-
-// hashKey creates a deterministic hash of the certificate key for S3 storage.
-// This prevents issues with special characters in certificate domain names.
-func hashKey(key string) string {
-	// Normalize the key
-	key = strings.ToLower(strings.TrimSpace(key))
-
-	// Hash the key for safe S3 storage
-	h := sha256.New()
-	h.Write([]byte(key))
-	hash := hex.EncodeToString(h.Sum(nil))
-
-	// Return hash with a readable prefix for debugging
-	return fmt.Sprintf("cert-%s", hash)
 }

@@ -61,17 +61,17 @@ func applyEnvironmentVariables(cfg *Config) {
 	}
 
 	// Delivery credentials (apply to all servers)
-	if val := os.Getenv("DESTINATION_API_KEY"); val != "" {
+	if val := os.Getenv("DESTINATION_AUTH_TOKEN"); val != "" {
 		for i := range cfg.Servers {
-			if cfg.Servers[i].Delivery.APIKey == "" || cfg.Servers[i].Delivery.APIKey == "your-api-key-here" {
-				cfg.Servers[i].Delivery.APIKey = val
+			if cfg.Servers[i].Delivery.AuthToken == "" || cfg.Servers[i].Delivery.AuthToken == "your-auth-token-here" {
+				cfg.Servers[i].Delivery.AuthToken = val
 			}
 		}
 	}
-	if val := os.Getenv("DELIVERY_API_KEY"); val != "" {
+	if val := os.Getenv("DELIVERY_AUTH_TOKEN"); val != "" {
 		for i := range cfg.Servers {
-			if cfg.Servers[i].Delivery.APIKey == "" || cfg.Servers[i].Delivery.APIKey == "your-api-key-here" {
-				cfg.Servers[i].Delivery.APIKey = val
+			if cfg.Servers[i].Delivery.AuthToken == "" || cfg.Servers[i].Delivery.AuthToken == "your-auth-token-here" {
+				cfg.Servers[i].Delivery.AuthToken = val
 			}
 		}
 	}
@@ -86,11 +86,11 @@ func applyEnvironmentVariables(cfg *Config) {
 		cfg.Cluster.SecretKey = val
 	}
 
-	// Apply auth API key to all submission servers
-	if val := os.Getenv("AUTH_API_KEY"); val != "" {
+	// Apply auth token to all submission servers
+	if val := os.Getenv("AUTH_TOKEN"); val != "" {
 		for i := range cfg.Servers {
-			if cfg.Servers[i].IsSubmission() && cfg.Servers[i].Auth.APIKey == "" {
-				cfg.Servers[i].Auth.APIKey = val
+			if cfg.Servers[i].IsSubmission() && cfg.Servers[i].Auth.AuthToken == "" {
+				cfg.Servers[i].Auth.AuthToken = val
 			}
 		}
 	}

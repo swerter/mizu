@@ -46,7 +46,7 @@ func TestCircuitBreakerIntegration_OpenReturns451(t *testing.T) {
 	cfg := testConfig()
 	cfg.Servers[0].Delivery = config.DeliveryConfig{
 		URL:                failingServer.URL,
-		APIKey:             "test-key",
+		AuthToken:          "test-token",
 		MaxRetryAttempts:   1, // Don't retry within the request
 		HTTPTimeoutSeconds: 5,
 	}
@@ -216,7 +216,7 @@ func TestCircuitBreakerIntegration_PermanentFailureReturns550(t *testing.T) {
 	cfg := testConfig()
 	cfg.Servers[0].Delivery = config.DeliveryConfig{
 		URL:                badRequestServer.URL,
-		APIKey:             "test-key",
+		AuthToken:          "test-token",
 		MaxRetryAttempts:   1,
 		HTTPTimeoutSeconds: 5,
 	}
@@ -289,7 +289,7 @@ func TestCircuitBreakerIntegration_4xxErrorsDoNotTriggerCircuit(t *testing.T) {
 	cfg := testConfig()
 	cfg.Servers[0].Delivery = config.DeliveryConfig{
 		URL:                notFoundServer.URL,
-		APIKey:             "test-key",
+		AuthToken:          "test-token",
 		MaxRetryAttempts:   1,
 		HTTPTimeoutSeconds: 5,
 	}

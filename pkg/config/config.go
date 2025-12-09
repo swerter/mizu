@@ -58,8 +58,8 @@ func (c *Config) Validate() error {
 			if srv.Delivery.URL == "" {
 				return fmt.Errorf("server[%s].delivery.url must be set", srv.Name)
 			}
-			if srv.Delivery.APIKey == "" || srv.Delivery.APIKey == "your-api-key-here" {
-				return fmt.Errorf("server[%s].delivery.api_key must be set", srv.Name)
+			if srv.Delivery.AuthToken == "" || srv.Delivery.AuthToken == "your-auth-token-here" {
+				return fmt.Errorf("server[%s].delivery.auth_token must be set", srv.Name)
 			}
 		}
 	}

@@ -1,151 +1,225 @@
 package smtp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 )
 
-// HTTPAuthenticator authenticates users via HTTPS API
+// HTTPAuthenticator authenticates users via HTTPS GET API with local password verification
 type HTTPAuthenticator struct {
-	url        string
-	apiKey     string
-	httpClient *http.Client
-	logger     *slog.Logger
+	urlTemplate string // URL template with $email and $ip placeholders
+	apiKey      string
+	httpClient  *http.Client
+	logger      *slog.Logger
 
-	// Cache for successful authentications (username -> cached data)
-	cache      map[string]*authCacheEntry
-	cacheMu    sync.RWMutex
-	cacheTTL   time.Duration
-	cacheClean time.Duration
+	// Auth result cache (password-aware, separate positive/negative TTL)
+	authCache *AuthCache
+
+	// Credentials cache (stores password hashes and allowed_from for successful auth)
+	credCache      map[string]*credCacheEntry
+	credCacheMu    sync.RWMutex
+	credCacheTTL   time.Duration
+	credCacheClean time.Duration
 }
 
-type authCacheEntry struct {
-	allowedFromAddresses []string
+type credCacheEntry struct {
+	passwordHashes       []string // Password hashes from backend
+	allowedFromAddresses []string // Email addresses user can send as
 	expiresAt            time.Time
 }
 
-// NewHTTPAuthenticator creates a new HTTPS-based authenticator
-func NewHTTPAuthenticator(url, apiKey string, logger *slog.Logger) *HTTPAuthenticator {
+// NewHTTPAuthenticator creates a new HTTPS-based authenticator with GET requests
+func NewHTTPAuthenticator(urlTemplate, apiKey string, logger *slog.Logger, authCache *AuthCache) *HTTPAuthenticator {
 	auth := &HTTPAuthenticator{
-		url:    url,
-		apiKey: apiKey,
+		urlTemplate: urlTemplate,
+		apiKey:      apiKey,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		logger:     logger,
-		cache:      make(map[string]*authCacheEntry),
-		cacheTTL:   5 * time.Minute,  // Cache successful auth for 5 minutes
-		cacheClean: 10 * time.Minute, // Cleanup every 10 minutes
+		logger:         logger,
+		authCache:      authCache,
+		credCache:      make(map[string]*credCacheEntry),
+		credCacheTTL:   5 * time.Minute,  // Cache credentials for 5 minutes
+		credCacheClean: 10 * time.Minute, // Cleanup every 10 minutes
 	}
 
-	// Start cache cleanup goroutine
-	go auth.cleanupCache()
+	// Start credentials cache cleanup goroutine
+	go auth.cleanupCredCache()
 
 	return auth
 }
 
-// AuthRequest represents the authentication request payload
-type AuthRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-// AuthResponse represents the authentication response
+// AuthResponse represents the authentication response from the backend
 type AuthResponse struct {
-	Success      bool     `json:"success"`
-	User         string   `json:"user,omitempty"`
-	AllowedFrom  []string `json:"allowed_from,omitempty"` // Email addresses user can send as
-	ErrorMessage string   `json:"error,omitempty"`
+	PasswordHashes []string `json:"password_hashes"` // List of hashed passwords (bcrypt, SSHA512, etc.)
+	AllowedFrom    []string `json:"allowed_from"`    // Email addresses user can send as
 }
 
-// Authenticate verifies username and password via HTTP endpoint
+// Authenticate verifies username and password by fetching hash from backend and verifying locally
+// The remoteIP parameter is used for URL interpolation ($ip placeholder)
 func (a *HTTPAuthenticator) Authenticate(username, password string) (bool, error) {
-	// Check cache first (for username only, not password)
-	// This is safe because we only cache successful authentications
-	// and password changes will expire after cacheTTL
-	if entry := a.getCached(username); entry != nil {
-		a.logger.Debug("authentication cache hit", "username", username)
-		return true, nil
+	return a.AuthenticateWithIP(username, password, "")
+}
+
+// AuthenticateWithIP verifies username and password with client IP for URL interpolation
+func (a *HTTPAuthenticator) AuthenticateWithIP(username, password, remoteIP string) (bool, error) {
+	// Check auth cache first (if enabled)
+	if a.authCache != nil {
+		isAuthenticated, found, err := a.authCache.CheckAuth(username, password)
+		if err != nil {
+			// Cached failure - don't check backend
+			return false, nil
+		}
+		if found && isAuthenticated {
+			// Cache hit - authentication successful
+			// Still need to check credentials cache for CanSendAs
+			if entry := a.getCredCached(username); entry == nil {
+				// Creds not in cache - fetch them for CanSendAs later
+				creds, fetchErr := a.fetchCredentials(username, remoteIP)
+				if fetchErr == nil && len(creds.PasswordHashes) > 0 {
+					a.cacheCredentials(username, creds.PasswordHashes, creds.AllowedFrom)
+				}
+			}
+			return true, nil
+		}
+		// Cache miss or needs revalidation - continue to backend check
+	} else {
+		// Auth cache disabled - check credentials cache
+		if entry := a.getCredCached(username); entry != nil {
+			a.logger.Debug("credentials cache hit", "username", username)
+			// Verify password against cached hashes (try all until one matches)
+			if a.verifyAgainstHashes(entry.passwordHashes, password) {
+				return true, nil
+			}
+			// Password doesn't match any cached hash - could be password change
+			a.logger.Warn("cached password verification failed", "username", username)
+			a.clearCredCacheEntry(username)
+		}
 	}
 
-	reqBody := AuthRequest{
-		Username: username,
-		Password: password,
-	}
-
-	jsonData, err := json.Marshal(reqBody)
+	// Fetch credentials from backend
+	creds, err := a.fetchCredentials(username, remoteIP)
 	if err != nil {
-		a.logger.Error("Failed to marshal auth request", "error", err)
-		return false, fmt.Errorf("internal error")
+		// Cache negative result if auth cache enabled
+		if a.authCache != nil {
+			a.authCache.SetFailure(username, password, AuthFailed)
+		}
+		return false, err
 	}
+
+	// No password hashes means user not found
+	if len(creds.PasswordHashes) == 0 {
+		a.logger.Warn("user not found", "username", username)
+		if a.authCache != nil {
+			a.authCache.SetFailure(username, password, AuthUserNotFound)
+		}
+		return false, nil
+	}
+
+	// Verify password against fetched hashes (try all until one matches)
+	if !a.verifyAgainstHashes(creds.PasswordHashes, password) {
+		a.logger.Warn("password verification failed", "username", username)
+		if a.authCache != nil {
+			a.authCache.SetFailure(username, password, AuthInvalidPassword)
+		}
+		return false, nil
+	}
+
+	// Cache successful authentication
+	a.cacheCredentials(username, creds.PasswordHashes, creds.AllowedFrom)
+	if a.authCache != nil {
+		a.authCache.SetSuccess(username, password)
+	}
+	a.logger.Info("authentication successful", "username", username)
+	return true, nil
+}
+
+// verifyAgainstHashes tries to verify the password against a list of hashes
+// Returns true if any hash matches
+func (a *HTTPAuthenticator) verifyAgainstHashes(hashes []string, password string) bool {
+	for _, hash := range hashes {
+		if err := VerifyPassword(hash, password); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchCredentials fetches user credentials from the backend via GET request
+func (a *HTTPAuthenticator) fetchCredentials(username, remoteIP string) (*AuthResponse, error) {
+	// Build URL with interpolation
+	requestURL := a.buildURL(username, remoteIP)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", a.url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
 	if err != nil {
-		a.logger.Error("Failed to create auth request", "error", err)
-		return false, fmt.Errorf("internal error")
+		a.logger.Error("failed to create auth request", "error", err)
+		return nil, fmt.Errorf("internal error")
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	// Add API key if configured
 	if a.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+a.apiKey)
 	}
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		a.logger.Error("Auth request failed", "url", a.url, "error", err)
-		return false, fmt.Errorf("authentication service unavailable")
+		a.logger.Error("auth request failed", "url", requestURL, "error", err)
+		return nil, fmt.Errorf("authentication service unavailable")
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		a.logger.Error("Failed to read auth response", "error", err)
-		return false, fmt.Errorf("internal error")
+	// 404 means user not found - this is not an error, just auth failure
+	if resp.StatusCode == http.StatusNotFound {
+		return &AuthResponse{}, nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		a.logger.Warn("Auth request failed",
+		body, _ := io.ReadAll(resp.Body)
+		a.logger.Warn("auth request failed",
 			"username", username,
 			"status", resp.StatusCode,
 			"response", string(body))
-		return false, nil // Failed auth is not an error
+		return nil, fmt.Errorf("authentication service error: %d", resp.StatusCode)
 	}
 
 	var authResp AuthResponse
-	if err := json.Unmarshal(body, &authResp); err != nil {
-		a.logger.Error("Failed to parse auth response", "error", err, "body", string(body))
-		return false, fmt.Errorf("internal error")
+	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+		a.logger.Error("failed to parse auth response", "error", err)
+		return nil, fmt.Errorf("internal error")
 	}
 
-	if authResp.Success {
-		// Cache successful authentication with allowed FROM addresses
-		a.cacheAuth(username, authResp.AllowedFrom)
-		a.logger.Info("Authentication successful", "username", username, "user", authResp.User)
-		return true, nil
-	}
+	return &authResp, nil
+}
 
-	a.logger.Info("Authentication failed", "username", username, "reason", authResp.ErrorMessage)
-	return false, nil
+// buildURL builds the request URL by interpolating $email and $ip placeholders
+func (a *HTTPAuthenticator) buildURL(email, ip string) string {
+	result := a.urlTemplate
+
+	// URL-encode the values
+	result = strings.ReplaceAll(result, "$email", url.QueryEscape(email))
+	result = strings.ReplaceAll(result, "$ip", url.QueryEscape(ip))
+
+	return result
 }
 
 // CanSendAs checks if authenticated user can send as a specific FROM address
 func (a *HTTPAuthenticator) CanSendAs(authenticatedUser, fromAddress string) bool {
-	// Get cached entry to check allowed FROM addresses
-	entry := a.getCached(authenticatedUser)
+	// Get cached credentials entry to check allowed FROM addresses
+	entry := a.getCredCached(authenticatedUser)
 	if entry == nil {
 		// Not in cache - shouldn't happen if Authenticate was called first
-		a.logger.Warn("CanSendAs called but user not in cache", "user", authenticatedUser)
+		a.logger.Warn("CanSendAs called but user credentials not in cache", "user", authenticatedUser)
 		return false
 	}
 
@@ -195,12 +269,12 @@ func extractEmail(address string) string {
 	return strings.ToLower(strings.TrimSpace(addr))
 }
 
-// getCached retrieves a cached authentication entry
-func (a *HTTPAuthenticator) getCached(username string) *authCacheEntry {
-	a.cacheMu.RLock()
-	defer a.cacheMu.RUnlock()
+// getCredCached retrieves cached credentials entry
+func (a *HTTPAuthenticator) getCredCached(username string) *credCacheEntry {
+	a.credCacheMu.RLock()
+	defer a.credCacheMu.RUnlock()
 
-	entry, ok := a.cache[username]
+	entry, ok := a.credCache[username]
 	if !ok {
 		return nil
 	}
@@ -213,40 +287,53 @@ func (a *HTTPAuthenticator) getCached(username string) *authCacheEntry {
 	return entry
 }
 
-// cacheAuth stores a successful authentication in cache
-func (a *HTTPAuthenticator) cacheAuth(username string, allowedFromAddresses []string) {
-	a.cacheMu.Lock()
-	defer a.cacheMu.Unlock()
+// cacheCredentials stores credentials in cache
+func (a *HTTPAuthenticator) cacheCredentials(username string, passwordHashes []string, allowedFromAddresses []string) {
+	a.credCacheMu.Lock()
+	defer a.credCacheMu.Unlock()
 
-	a.cache[username] = &authCacheEntry{
+	a.credCache[username] = &credCacheEntry{
+		passwordHashes:       passwordHashes,
 		allowedFromAddresses: allowedFromAddresses,
-		expiresAt:            time.Now().Add(a.cacheTTL),
+		expiresAt:            time.Now().Add(a.credCacheTTL),
 	}
 }
 
-// cleanupCache periodically removes expired entries
-func (a *HTTPAuthenticator) cleanupCache() {
-	ticker := time.NewTicker(a.cacheClean)
+// clearCredCacheEntry removes a specific entry from the credentials cache
+func (a *HTTPAuthenticator) clearCredCacheEntry(username string) {
+	a.credCacheMu.Lock()
+	defer a.credCacheMu.Unlock()
+	delete(a.credCache, username)
+}
+
+// cleanupCredCache periodically removes expired credentials entries
+func (a *HTTPAuthenticator) cleanupCredCache() {
+	ticker := time.NewTicker(a.credCacheClean)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		a.cacheMu.Lock()
+		a.credCacheMu.Lock()
 		now := time.Now()
-		for username, entry := range a.cache {
+		for username, entry := range a.credCache {
 			if now.After(entry.expiresAt) {
-				delete(a.cache, username)
+				delete(a.credCache, username)
 			}
 		}
-		a.cacheMu.Unlock()
+		a.credCacheMu.Unlock()
 	}
 }
 
-// FlushCache clears the authentication cache
+// FlushCache clears both authentication and credentials caches
 func (a *HTTPAuthenticator) FlushCache() {
-	a.cacheMu.Lock()
-	defer a.cacheMu.Unlock()
-	a.cache = make(map[string]*authCacheEntry)
-	a.logger.Info("authentication cache flushed")
+	a.credCacheMu.Lock()
+	a.credCache = make(map[string]*credCacheEntry)
+	a.credCacheMu.Unlock()
+
+	if a.authCache != nil {
+		a.authCache.Clear()
+	}
+
+	a.logger.Info("authentication caches flushed")
 }
 
 // LoginServer implements the LOGIN SASL mechanism server

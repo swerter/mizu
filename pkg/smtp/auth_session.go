@@ -2,6 +2,8 @@ package smtp
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
@@ -76,8 +78,52 @@ func (s *Session) Auth(mech string) (sasl.Server, error) {
 
 		s.Logger.Debug("Authentication attempt", "username", user, "mechanism", mech)
 
-		// Call the HTTP authenticator
-		authenticated, err := s.authenticator.Authenticate(user, password)
+		// Extract IP from remoteAddr (format: "ip:port")
+		remoteIP := s.remoteAddr
+		if idx := strings.LastIndex(remoteIP, ":"); idx != -1 {
+			remoteIP = remoteIP[:idx]
+		}
+
+		// Check auth rate limit before attempting authentication
+		if s.authRateLimiter != nil {
+			if err := s.authRateLimiter.CanAttemptAuth(s.ctx, remoteIP, user); err != nil {
+				s.Logger.Warn("Authentication blocked by rate limiter",
+					"username", user,
+					"ip", remoteIP,
+					"error", err)
+				return fmt.Errorf("authentication rate limit exceeded")
+			}
+
+			// Apply progressive delay if configured
+			delay := s.authRateLimiter.GetAuthenticationDelay(remoteIP)
+			if delay > 0 {
+				s.Logger.Debug("Applying progressive authentication delay",
+					"username", user,
+					"ip", remoteIP,
+					"delay", delay)
+				select {
+				case <-s.ctx.Done():
+					return fmt.Errorf("authentication cancelled")
+				case <-time.After(delay):
+					// Delay complete, continue
+				}
+			}
+		}
+
+		// Try to use AuthenticateWithIP if available, otherwise fallback to Authenticate
+		var authenticated bool
+		var err error
+		if httpAuth, ok := s.authenticator.(*HTTPAuthenticator); ok {
+			authenticated, err = httpAuth.AuthenticateWithIP(user, password, remoteIP)
+		} else {
+			authenticated, err = s.authenticator.Authenticate(user, password)
+		}
+
+		// Record auth attempt result in rate limiter
+		if s.authRateLimiter != nil {
+			s.authRateLimiter.RecordAuthAttempt(s.ctx, remoteIP, user, authenticated && err == nil)
+		}
+
 		if err != nil {
 			s.Logger.Error("Authentication error", "username", user, "error", err)
 			return fmt.Errorf("authentication service error")

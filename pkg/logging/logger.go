@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"io"
 	"log/slog"
 	"os"
 )
@@ -29,4 +30,11 @@ func Setup(format string, verbose bool) (*slog.Logger, error) {
 	slog.SetDefault(logger)
 
 	return logger, nil
+}
+
+// NewTestLogger creates a logger for testing that discards output
+func NewTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
 }

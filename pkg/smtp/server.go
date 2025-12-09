@@ -67,6 +67,7 @@ func NewDNSResolver(dnsServers []string, timeout time.Duration, cacheTTL time.Du
 // RecipientValidator defines the interface for recipient validation during RCPT TO
 type RecipientValidator interface {
 	Validate(ctx context.Context, clientIP, from, to string) (*RecipientValidationResponse, error)
+	ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from, to string) (*RecipientValidationResponse, error)
 	FlushCache()
 	GetStats() map[string]interface{}
 }
@@ -98,8 +99,9 @@ type Backend struct {
 	RateLimiter        *RateLimiter        // Rate limiter to prevent rapid connection attempts
 
 	// Authentication and signing (for submission servers)
-	Authenticator Authenticator         // Optional: Authenticates users (submission servers)
-	ARCSigner     *validation.ARCSigner // Optional: ARC signer for adding ARC headers
+	Authenticator   Authenticator         // Optional: Authenticates users (submission servers)
+	AuthRateLimiter *AuthRateLimiter      // Optional: Auth rate limiter for brute-force protection
+	ARCSigner       *validation.ARCSigner // Optional: ARC signer for adding ARC headers
 
 	// Recipient validation
 	RecipientValidator RecipientValidator // Optional: Recipient validator (validates during RCPT TO)
@@ -244,6 +246,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 	ipStr := stats.GetIPFromRemoteAddr(remoteAddr)
 	hasRDNS := true
+	var ptrRecord string // Store PTR (reverse DNS) record for use in validation
 
 	// Perform security checks in production mode (skip for submission servers with relaxed validation)
 	// Relay servers should validate, submission servers with skip_rdns/skip_dnsbl will skip
@@ -336,7 +339,11 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 				Message:      "no reverse DNS record for IP address",
 			}
 		}
-		be.Logger.Debug("Reverse DNS lookup", "host", host, "names", names)
+		// Store first PTR record for use in recipient validation
+		if len(names) > 0 {
+			ptrRecord = names[0]
+		}
+		be.Logger.Debug("Reverse DNS lookup", "host", host, "names", names, "ptr", ptrRecord)
 
 		// Record connection in stats
 		if be.StatsManager != nil {
@@ -377,6 +384,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	session := &Session{
 		conn:               c,
 		helo:               "",
+		ptr:                ptrRecord,
 		from:               "",
 		to:                 make([]string, 0),
 		remoteAddr:         c.Conn().RemoteAddr().String(),
@@ -401,6 +409,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		isAuthenticated:    false,                 // Not authenticated initially
 		authenticatedUser:  "",                    // No user yet
 		authenticator:      be.Authenticator,      // Authenticator (nil if not submission)
+		authRateLimiter:    be.AuthRateLimiter,    // Auth rate limiter (nil if disabled)
 		arcSigner:          be.ARCSigner,          // ARC signer (nil if disabled)
 		recipientValidator: be.RecipientValidator, // Recipient validator (nil if disabled)
 	}
@@ -414,6 +423,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 type Session struct {
 	conn           *smtp.Conn             // The underlying SMTP connection
 	helo           string                 // HELO/EHLO domain from the client
+	ptr            string                 // Reverse DNS (PTR) record for client IP
 	from           string                 // Sender's email address (MAIL FROM)
 	to             []string               // Recipient email addresses (RCPT TO)
 	remoteAddr     string                 // Remote IP:port of the client
@@ -436,9 +446,10 @@ type Session struct {
 	sessionCount   *atomic.Int64          // Pointer to active session counter for observability
 
 	// Authentication (for submission servers)
-	isAuthenticated   bool          // Whether user has authenticated via SMTP AUTH
-	authenticatedUser string        // Username from successful authentication
-	authenticator     Authenticator // Authenticator for this session
+	isAuthenticated   bool             // Whether user has authenticated via SMTP AUTH
+	authenticatedUser string           // Username from successful authentication
+	authenticator     Authenticator    // Authenticator for this session
+	authRateLimiter   *AuthRateLimiter // Auth rate limiter for brute-force protection
 
 	// Anti-spam tracking
 	isJunk       bool     // Whether this message is considered junk/spam
@@ -877,7 +888,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	// Perform recipient validation if enabled
 	if s.recipientValidator != nil && s.serverConfig.RecipientValidation.Enabled {
 		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-		result, err := s.recipientValidator.Validate(s.ctx, ipStr, s.from, to)
+		result, err := s.recipientValidator.ValidateWithContext(s.ctx, ipStr, s.ptr, s.helo, s.from, to)
 		if err != nil {
 			s.Logger.Warn("Recipient validation failed", "to", to, "error", err)
 			// Treat validation errors as temporary failures
@@ -1246,7 +1257,7 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 		s.ctx,
 		signedEmail,
 		s.serverConfig.Delivery.URL,
-		s.serverConfig.Delivery.APIKey,
+		s.serverConfig.Delivery.AuthToken,
 		s.serverConfig.Delivery.MaxRetryAttempts,
 		s.isJunk,
 		s.from,

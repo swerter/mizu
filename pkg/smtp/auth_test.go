@@ -6,52 +6,43 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestHTTPAuthenticator_Authenticate(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
+	// Generate bcrypt hash for "testpass"
+	bcryptHash, _ := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.DefaultCost)
+
 	// Test successful authentication
 	t.Run("successful authentication", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Verify request
-			if r.Method != "POST" {
-				t.Errorf("expected POST, got %s", r.Method)
+			if r.Method != "GET" {
+				t.Errorf("expected GET, got %s", r.Method)
 			}
-			if r.Header.Get("Authorization") != "Bearer test-api-key" {
+			if r.Header.Get("Authorization") != "Bearer test-auth-token" {
 				t.Errorf("expected Bearer token, got %s", r.Header.Get("Authorization"))
 			}
 
-			// Decode request
-			var req AuthRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("failed to decode request: %v", err)
-			}
-
-			if req.Username != "testuser" || req.Password != "testpass" {
-				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(AuthResponse{
-					Success: false,
-				})
-				return
-			}
-
-			// Return success with allowed addresses
+			// Return password hashes (can support multiple passwords)
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(AuthResponse{
-				Success:     true,
-				User:        "testuser",
-				AllowedFrom: []string{"testuser@example.com", "alias@example.com"},
+				PasswordHashes: []string{string(bcryptHash)},
+				AllowedFrom:    []string{"testuser@example.com", "alias@example.com"},
 			})
 		}))
 		defer server.Close()
 
-		auth := NewHTTPAuthenticator(server.URL, "test-api-key", logger)
+		auth := NewHTTPAuthenticator(server.URL+"?email=$email&ip=$ip", "test-auth-token", logger, nil)
 
-		// Test authentication
-		authenticated, err := auth.Authenticate("testuser", "testpass")
+		// Test authentication with correct password
+		authenticated, err := auth.Authenticate("testuser@example.com", "testpass")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -60,36 +51,54 @@ func TestHTTPAuthenticator_Authenticate(t *testing.T) {
 		}
 
 		// Test CanSendAs
-		if !auth.CanSendAs("testuser", "testuser@example.com") {
+		if !auth.CanSendAs("testuser@example.com", "testuser@example.com") {
 			t.Error("expected user to be able to send from testuser@example.com")
 		}
-		if !auth.CanSendAs("testuser", "alias@example.com") {
+		if !auth.CanSendAs("testuser@example.com", "alias@example.com") {
 			t.Error("expected user to be able to send from alias@example.com")
 		}
-		if auth.CanSendAs("testuser", "other@example.com") {
+		if auth.CanSendAs("testuser@example.com", "other@example.com") {
 			t.Error("expected user NOT to be able to send from other@example.com")
 		}
 	})
 
-	// Test failed authentication
+	// Test failed authentication (wrong password)
 	t.Run("failed authentication", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(AuthResponse{
-				Success:      false,
-				ErrorMessage: "invalid credentials",
+				PasswordHashes: []string{string(bcryptHash)},
+				AllowedFrom:    []string{"testuser@example.com"},
 			})
 		}))
 		defer server.Close()
 
-		auth := NewHTTPAuthenticator(server.URL, "test-api-key", logger)
+		auth := NewHTTPAuthenticator(server.URL, "test-auth-token", logger, nil)
 
-		authenticated, err := auth.Authenticate("testuser", "wrongpass")
+		authenticated, err := auth.Authenticate("testuser@example.com", "wrongpass")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if authenticated {
 			t.Error("expected authentication to fail")
+		}
+	})
+
+	// Test user not found (404)
+	t.Run("user not found", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		auth := NewHTTPAuthenticator(server.URL, "test-auth-token", logger, nil)
+
+		authenticated, err := auth.Authenticate("nonexistent@example.com", "testpass")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if authenticated {
+			t.Error("expected authentication to fail for non-existent user")
 		}
 	})
 
@@ -100,11 +109,11 @@ func TestHTTPAuthenticator_Authenticate(t *testing.T) {
 		}))
 		defer server.Close()
 
-		auth := NewHTTPAuthenticator(server.URL, "test-api-key", logger)
+		auth := NewHTTPAuthenticator(server.URL, "test-auth-token", logger, nil)
 
-		authenticated, err := auth.Authenticate("testuser", "testpass")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		authenticated, err := auth.Authenticate("testuser@example.com", "testpass")
+		if err == nil {
+			t.Error("expected error on service failure")
 		}
 		if authenticated {
 			t.Error("expected authentication to fail on service error")
@@ -118,35 +127,100 @@ func TestHTTPAuthenticator_Authenticate(t *testing.T) {
 			callCount++
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(AuthResponse{
-				Success:     true,
-				User:        "testuser",
-				AllowedFrom: []string{"testuser@example.com"},
+				PasswordHashes: []string{string(bcryptHash)},
+				AllowedFrom:    []string{"testuser@example.com"},
 			})
 		}))
 		defer server.Close()
 
-		auth := NewHTTPAuthenticator(server.URL, "test-api-key", logger)
-		auth.cacheTTL = 1 * time.Second
+		auth := NewHTTPAuthenticator(server.URL, "test-auth-token", logger, nil)
+		auth.credCacheTTL = 1 * time.Second
 
 		// First authentication should hit the server
-		auth.Authenticate("testuser", "testpass")
+		auth.Authenticate("testuser@example.com", "testpass")
 		if callCount != 1 {
 			t.Errorf("expected 1 call, got %d", callCount)
 		}
 
-		// Second authentication should use cache
-		auth.Authenticate("testuser", "testpass")
+		// Second authentication should use cache (credentials cached)
+		auth.Authenticate("testuser@example.com", "testpass")
 		if callCount != 1 {
 			t.Errorf("expected 1 call (cached), got %d", callCount)
 		}
 
-		// Wait for cache to expire
+		// Wait for credentials cache to expire
 		time.Sleep(1100 * time.Millisecond)
 
-		// Third authentication should hit the server again
-		auth.Authenticate("testuser", "testpass")
+		// Third authentication should hit the server again (credentials expired)
+		auth.Authenticate("testuser@example.com", "testpass")
 		if callCount != 2 {
-			t.Errorf("expected 2 calls (cache expired), got %d", callCount)
+			t.Errorf("expected 2 calls (credentials cache expired), got %d", callCount)
+		}
+	})
+
+	// Test URL interpolation
+	t.Run("URL interpolation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Verify URL contains interpolated values
+			if !strings.Contains(r.URL.String(), "testuser%40example.com") {
+				t.Errorf("expected URL to contain encoded email, got %s", r.URL.String())
+			}
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(AuthResponse{
+				PasswordHashes: []string{string(bcryptHash)},
+				AllowedFrom:    []string{"testuser@example.com"},
+			})
+		}))
+		defer server.Close()
+
+		auth := NewHTTPAuthenticator(server.URL+"?email=$email", "test-auth-token", logger, nil)
+		auth.Authenticate("testuser@example.com", "testpass")
+	})
+
+	// Test multiple password hashes
+	t.Run("multiple password hashes", func(t *testing.T) {
+		// Generate multiple password hashes
+		hash1, _ := bcrypt.GenerateFromPassword([]byte("password1"), bcrypt.DefaultCost)
+		hash2, _ := bcrypt.GenerateFromPassword([]byte("password2"), bcrypt.DefaultCost)
+		hash3, _ := bcrypt.GenerateFromPassword([]byte("password3"), bcrypt.DefaultCost)
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(AuthResponse{
+				PasswordHashes: []string{string(hash1), string(hash2), string(hash3)},
+				AllowedFrom:    []string{"testuser@example.com"},
+			})
+		}))
+		defer server.Close()
+
+		auth := NewHTTPAuthenticator(server.URL, "test-auth-token", logger, nil)
+
+		// All three passwords should work
+		authenticated, err := auth.Authenticate("testuser@example.com", "password1")
+		if err != nil || !authenticated {
+			t.Error("expected password1 to authenticate")
+		}
+
+		// Clear cache to test fresh fetch
+		auth.clearCredCacheEntry("testuser@example.com")
+
+		authenticated, err = auth.Authenticate("testuser@example.com", "password2")
+		if err != nil || !authenticated {
+			t.Error("expected password2 to authenticate")
+		}
+
+		auth.clearCredCacheEntry("testuser@example.com")
+
+		authenticated, err = auth.Authenticate("testuser@example.com", "password3")
+		if err != nil || !authenticated {
+			t.Error("expected password3 to authenticate")
+		}
+
+		// Wrong password should fail
+		auth.clearCredCacheEntry("testuser@example.com")
+		authenticated, err = auth.Authenticate("testuser@example.com", "wrongpassword")
+		if err != nil || authenticated {
+			t.Error("expected wrong password to fail")
 		}
 	})
 }

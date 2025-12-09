@@ -28,7 +28,7 @@
 //
 //	[server.delivery]
 //	url = "https://backend.example.com/email"
-//	api_key = "${DELIVERY_API_KEY}"  # From environment
+//	auth_token = "${DELIVERY_AUTH_TOKEN}"  # From environment
 //	max_retry_attempts = 3
 //
 //	[server.delivery.circuit_breaker]
@@ -47,7 +47,7 @@
 //
 // Sensitive values can be provided via environment variables:
 //
-//	DELIVERY_API_KEY: API key for HTTP backend
+//	DELIVERY_AUTH_TOKEN: Authentication token for HTTP backend
 //	S3_ACCESS_KEY_ID: AWS access key ID
 //	S3_SECRET_ACCESS_KEY: AWS secret access key
 //	HEALTH_PASSWORD: Password for health endpoint

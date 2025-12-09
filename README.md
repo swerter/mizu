@@ -11,7 +11,9 @@ Mizu is a production-ready, high-performance SMTP relay server designed for reli
 
 - **Mandatory STARTTLS** with automatic Let's Encrypt certificate management.
 - **SMTP Authentication** (AUTH PLAIN, AUTH LOGIN) for submission servers (ports 587/465):
-  - HTTP-based authentication with customizable backend
+  - GET-based authentication API with local password verification (passwords never sent over network)
+  - Supports bcrypt, SSHA512, and SHA512 password hashes
+  - Multiple passwords per user (backend returns array of hashes, tries all until match)
   - Per-user rate limiting and sender address validation
   - 5-minute authentication caching to reduce API load
   - Authenticated username passed to delivery backend via `X-Auth-User` header
@@ -91,7 +93,7 @@ listen_addr = ":25"
 
 [server.delivery]
 url = "https://your-backend.example.com/email"
-api_key = "${DELIVERY_API_KEY}"  # Use env var in production
+auth_token = "${DELIVERY_AUTH_TOKEN}"  # Use env var in production
 max_retry_attempts = 3
 http_timeout_seconds = 30
 
@@ -121,14 +123,14 @@ listen_addr = ":465"
 enabled = true
 required = true  # Require authentication before sending
 url = "https://auth.example.com/api/validate"
-api_key = "${AUTH_API_KEY}"
+auth_token = "${AUTH_TOKEN}"
 
 [server.tls]
 mode = "implicit"  # Always-on TLS for port 465
 
 [server.delivery]
 url = "https://your-backend.example.com/email"
-api_key = "${DELIVERY_API_KEY}"
+auth_token = "${DELIVERY_AUTH_TOKEN}"
 # Authenticated user passed as X-Auth-User header
 
 [[server.rate_limit.dimensions]]
@@ -167,9 +169,9 @@ Quick links:
 
 For enhanced security, critical secrets like API keys and S3 credentials can be provided via environment variables.
 
-- `DELIVERY_API_KEY`: API key for the backend delivery endpoint
-- `AUTH_API_KEY`: API key for the authentication endpoint (submission servers)
-- `RECIPIENT_VALIDATION_API_KEY`: API key for recipient validation endpoint (if enabled)
+- `DELIVERY_AUTH_TOKEN`: Authentication token for the backend delivery endpoint
+- `AUTH_TOKEN`: Authentication token for the authentication endpoint (submission servers)
+- `RECIPIENT_VALIDATION_AUTH_TOKEN`: Authentication token for recipient validation endpoint (if enabled)
 - `S3_ACCESS_KEY_ID`: AWS/S3 access key ID
 - `S3_SECRET_ACCESS_KEY`: AWS/S3 secret access key
 - `HEALTH_PASSWORD`: Password for the health/API endpoints if basic auth is enabled

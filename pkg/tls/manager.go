@@ -9,7 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/minio/minio-go/v7"
+	"migadu/mizu/pkg/storage"
+
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -23,21 +24,20 @@ type Manager struct {
 
 // Config holds configuration for TLS manager
 type Config struct {
-	Enabled       bool
-	Email         string
-	Domains       []string
-	DefaultDomain string // Default domain for SNI-less connections
-	S3Client      *minio.Client
-	S3Bucket      string
-	S3Prefix      string
-	IsLeaderF     func() bool
-	Staging       bool          // Use Let's Encrypt staging environment
-	RenewBefore   time.Duration // How long before expiry to renew (0 = default 30 days)
-	FallbackDir   string        // Local fallback directory for certificates (empty = no fallback)
-	SyncInterval  time.Duration // How often to sync certificates (0 = no sync)
+	Enabled        bool
+	Email          string
+	Domains        []string
+	DefaultDomain  string          // Default domain for SNI-less connections
+	StorageBackend storage.Backend // Storage backend for certificates (S3 or filesystem)
+	StoragePrefix  string          // Prefix for certificate storage
+	IsLeaderF      func() bool     // Cluster leader function
+	Staging        bool            // Use Let's Encrypt staging environment
+	RenewBefore    time.Duration   // How long before expiry to renew (0 = default 30 days)
+	FallbackDir    string          // Local fallback directory for certificates (empty = no fallback)
+	SyncInterval   time.Duration   // How often to sync certificates (0 = no sync)
 }
 
-// NewManager creates a new TLS manager with autocert and S3 storage
+// NewManager creates a new TLS manager with autocert and storage backend
 // Returns nil if TLS is not enabled or cluster/leader function is not available
 func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 	if !cfg.Enabled {
@@ -60,14 +60,19 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		return nil, nil
 	}
 
-	// Create S3 cache
-	s3Cache, err := NewS3Cache(cfg.S3Client, cfg.S3Bucket, cfg.S3Prefix, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize S3 cache: %w", err)
+	// Require storage backend
+	if cfg.StorageBackend == nil {
+		return nil, fmt.Errorf("storage backend is required for TLS manager")
 	}
 
-	// Wrap S3 cache with cluster-aware wrapper
-	var cache autocert.Cache = NewClusterAwareCache(s3Cache, cfg.IsLeaderF, logger)
+	// Create storage-backed cache
+	storageCache, err := NewStorageCache(cfg.StorageBackend, cfg.StoragePrefix, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize storage cache: %w", err)
+	}
+
+	// Wrap storage cache with cluster-aware wrapper
+	var cache autocert.Cache = NewClusterAwareCache(storageCache, cfg.IsLeaderF, logger)
 	logger.Info("Cluster-aware certificate cache enabled - only leader can request certificates")
 
 	// Optionally wrap with fallback cache if directory is provided
@@ -170,7 +175,7 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		logger.Info("Default domain for SNI-less connections", "domain", defaultDomain)
 	}
 
-	logger.Info("Certificates will be stored in S3 bucket", "bucket", cfg.S3Bucket)
+	logger.Info("Certificates will be stored using storage backend", "prefix", cfg.StoragePrefix)
 
 	// Start certificate sync worker if configured
 	if cfg.SyncInterval > 0 {

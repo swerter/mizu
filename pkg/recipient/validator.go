@@ -1,12 +1,13 @@
 package recipient
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,10 +17,10 @@ import (
 
 // Validator handles recipient validation with caching
 type Validator struct {
-	endpoint   string
-	apiKey     string
-	httpClient *http.Client
-	logger     *slog.Logger
+	urlTemplate string // URL template with $ip, $ptr, $helo, $email placeholders
+	apiKey      string
+	httpClient  *http.Client
+	logger      *slog.Logger
 
 	// Caching
 	cache    *expirable.LRU[string, *ValidateResponse]
@@ -31,7 +32,7 @@ type Validator struct {
 // ValidatorConfig holds configuration for the recipient validator
 type ValidatorConfig struct {
 	URL                string
-	APIKey             string
+	AuthToken          string
 	HTTPTimeoutSeconds int
 	CacheTTLSeconds    int
 	Logger             *slog.Logger
@@ -67,18 +68,24 @@ func NewValidator(cfg ValidatorConfig) (*Validator, error) {
 	)
 
 	return &Validator{
-		endpoint:   cfg.URL,
-		apiKey:     cfg.APIKey,
-		httpClient: httpClient,
-		logger:     cfg.Logger,
-		cache:      cache,
-		cacheTTL:   time.Duration(cfg.CacheTTLSeconds) * time.Second,
+		urlTemplate: cfg.URL,
+		apiKey:      cfg.AuthToken,
+		httpClient:  httpClient,
+		logger:      cfg.Logger,
+		cache:       cache,
+		cacheTTL:    time.Duration(cfg.CacheTTLSeconds) * time.Second,
 	}, nil
 }
 
 // Validate checks if a recipient should be accepted during RCPT TO
+// Parameters can include PTR (reverse DNS) and HELO hostname if available
 func (v *Validator) Validate(ctx context.Context, clientIP, from, to string) (*ValidateResponse, error) {
-	cacheKey := v.buildCacheKey(clientIP, from, to)
+	return v.ValidateWithContext(ctx, clientIP, "", "", from, to)
+}
+
+// ValidateWithContext checks recipient with additional context (PTR, HELO)
+func (v *Validator) ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from, to string) (*ValidateResponse, error) {
+	cacheKey := v.buildCacheKey(clientIP, ptr, helo, from, to)
 
 	// Check cache first
 	if cached, ok := v.cache.Get(cacheKey); ok {
@@ -92,15 +99,9 @@ func (v *Validator) Validate(ctx context.Context, clientIP, from, to string) (*V
 	// Cache miss - query the endpoint
 	v.logger.Debug("Recipient validation cache miss - querying endpoint",
 		"to", to,
-		"endpoint", v.endpoint)
+		"url_template", v.urlTemplate)
 
-	req := ValidateRequest{
-		ClientIP:     clientIP,
-		EnvelopeFrom: from,
-		EnvelopeTo:   to,
-	}
-
-	resp, err := v.queryEndpoint(ctx, req)
+	resp, err := v.queryEndpoint(ctx, clientIP, ptr, helo, from, to)
 	if err != nil {
 		v.logger.Warn("Recipient validation failed",
 			"to", to,
@@ -119,21 +120,28 @@ func (v *Validator) Validate(ctx context.Context, clientIP, from, to string) (*V
 	return resp, nil
 }
 
-// queryEndpoint makes the HTTP request to the validation endpoint
-func (v *Validator) queryEndpoint(ctx context.Context, req ValidateRequest) (*ValidateResponse, error) {
-	// Marshal request
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
+// buildURL builds the request URL with interpolated parameters
+func (v *Validator) buildURL(clientIP, ptr, helo, from, to string) string {
+	result := v.urlTemplate
+	result = strings.ReplaceAll(result, "$ip", url.QueryEscape(clientIP))
+	result = strings.ReplaceAll(result, "$ptr", url.QueryEscape(ptr))
+	result = strings.ReplaceAll(result, "$helo", url.QueryEscape(helo))
+	result = strings.ReplaceAll(result, "$from", url.QueryEscape(from))
+	result = strings.ReplaceAll(result, "$email", url.QueryEscape(to))
+	return result
+}
+
+// queryEndpoint makes the HTTP GET request to the validation endpoint
+func (v *Validator) queryEndpoint(ctx context.Context, clientIP, ptr, helo, from, to string) (*ValidateResponse, error) {
+	// Build URL with interpolation
+	requestURL := v.buildURL(clientIP, ptr, helo, from, to)
 
 	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", v.endpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
 	if v.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+v.apiKey)
 	}
@@ -145,7 +153,7 @@ func (v *Validator) queryEndpoint(ctx context.Context, req ValidateRequest) (*Va
 	}
 	defer httpResp.Body.Close()
 
-	// Read response
+	// Read response body
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
@@ -156,9 +164,11 @@ func (v *Validator) queryEndpoint(ctx context.Context, req ValidateRequest) (*Va
 	case http.StatusOK:
 		// 200 OK - recipient accepted
 		var resp ValidateResponse
-		if err := json.Unmarshal(respBody, &resp); err != nil {
-			// If body is not JSON, treat as accepted with empty message
-			return &ValidateResponse{Accepted: true}, nil
+		if len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, &resp); err != nil {
+				// If body is not JSON, use it as plain message
+				resp.Message = string(respBody)
+			}
 		}
 		resp.Accepted = true
 		return &resp, nil
@@ -166,12 +176,17 @@ func (v *Validator) queryEndpoint(ctx context.Context, req ValidateRequest) (*Va
 	case http.StatusNotFound:
 		// 404 Not Found - recipient does not exist
 		var resp ValidateResponse
-		if err := json.Unmarshal(respBody, &resp); err != nil {
-			// Default message if body is not JSON
-			return &ValidateResponse{
-				Accepted: false,
-				Message:  "User unknown",
-			}, nil
+		if len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, &resp); err != nil {
+				// If body is not JSON, use it as plain message or default
+				if len(respBody) > 0 {
+					resp.Message = string(respBody)
+				} else {
+					resp.Message = "User unknown"
+				}
+			}
+		} else {
+			resp.Message = "User unknown"
 		}
 		resp.Accepted = false
 		return &resp, nil
@@ -179,12 +194,17 @@ func (v *Validator) queryEndpoint(ctx context.Context, req ValidateRequest) (*Va
 	case http.StatusForbidden:
 		// 403 Forbidden - sender blocked by recipient
 		var resp ValidateResponse
-		if err := json.Unmarshal(respBody, &resp); err != nil {
-			// Default message if body is not JSON
-			return &ValidateResponse{
-				Accepted: false,
-				Message:  "Delivery not authorized",
-			}, nil
+		if len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, &resp); err != nil {
+				// If body is not JSON, use it as plain message or default
+				if len(respBody) > 0 {
+					resp.Message = string(respBody)
+				} else {
+					resp.Message = "Delivery not authorized"
+				}
+			}
+		} else {
+			resp.Message = "Delivery not authorized"
 		}
 		resp.Accepted = false
 		return &resp, nil
@@ -193,16 +213,24 @@ func (v *Validator) queryEndpoint(ctx context.Context, req ValidateRequest) (*Va
 		// 429 Too Many Requests - rate limit exceeded
 		return nil, fmt.Errorf("rate limit exceeded (HTTP 429)")
 
+	case http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusBadGateway:
+		// 503, 504, 502 - temporary failures
+		return nil, fmt.Errorf("temporary failure (HTTP %d)", httpResp.StatusCode)
+
 	default:
 		// All other status codes are treated as errors
-		return nil, fmt.Errorf("validation endpoint returned status %d: %s", httpResp.StatusCode, string(respBody))
+		msg := string(respBody)
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", httpResp.StatusCode)
+		}
+		return nil, fmt.Errorf("validation endpoint error: %s", msg)
 	}
 }
 
 // buildCacheKey creates a cache key from request parameters
-func (v *Validator) buildCacheKey(clientIP, from, to string) string {
+func (v *Validator) buildCacheKey(clientIP, ptr, helo, from, to string) string {
 	// Include all parameters in cache key for granular caching
-	return fmt.Sprintf("%s:%s:%s", clientIP, from, to)
+	return fmt.Sprintf("%s:%s:%s:%s:%s", clientIP, ptr, helo, from, to)
 }
 
 // GetStats returns cache statistics
@@ -212,7 +240,7 @@ func (v *Validator) GetStats() map[string]interface{} {
 
 	return map[string]interface{}{
 		"cache_entries": v.cache.Len(),
-		"endpoint":      v.endpoint,
+		"url_template":  v.urlTemplate,
 	}
 }
 

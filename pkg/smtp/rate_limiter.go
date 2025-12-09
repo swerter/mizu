@@ -403,12 +403,67 @@ func (rl *RateLimiter) cleanup() {
 	maxWindow := rl.getMaxWindow()
 	staleThreshold := maxWindow * 2 // Keep windows for 2x max window
 
+	removed := 0
 	for compositeKey, window := range rl.windows {
 		// Remove windows that haven't been updated recently and have no counts
 		if window.localCount == 0 && window.peerCount == 0 && now.Sub(window.lastUpdate) > staleThreshold {
 			delete(rl.windows, compositeKey)
+			removed++
 		}
 	}
+
+	// Proactive memory management: if still above threshold, remove oldest windows
+	const maxWindows = 100000 // Maximum number of windows to keep in memory
+	if len(rl.windows) > maxWindows {
+		rl.proactiveEvictWindows(maxWindows)
+	}
+
+	if removed > 0 {
+		rl.logger.Debug("cleaned up stale rate limit windows",
+			"removed", removed,
+			"remaining", len(rl.windows))
+	}
+}
+
+// proactiveEvictWindows evicts oldest windows when memory limit is exceeded
+// This prevents unbounded memory growth under attack scenarios
+func (rl *RateLimiter) proactiveEvictWindows(targetSize int) {
+	// Already holding lock from cleanup()
+
+	toEvict := len(rl.windows) - targetSize + (targetSize / 10) // Evict extra 10% for headroom
+	if toEvict <= 0 {
+		return
+	}
+
+	// Sort windows by last update time (oldest first)
+	type windowEntry struct {
+		key        string
+		lastUpdate time.Time
+	}
+
+	entries := make([]windowEntry, 0, len(rl.windows))
+	for key, window := range rl.windows {
+		entries = append(entries, windowEntry{
+			key:        key,
+			lastUpdate: window.lastUpdate,
+		})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].lastUpdate.Before(entries[j].lastUpdate)
+	})
+
+	// Evict oldest entries
+	evicted := 0
+	for i := 0; i < toEvict && i < len(entries); i++ {
+		delete(rl.windows, entries[i].key)
+		evicted++
+	}
+
+	rl.logger.Warn("proactively evicted rate limit windows to prevent memory exhaustion",
+		"evicted", evicted,
+		"remaining", len(rl.windows),
+		"target", targetSize)
 }
 
 // Shutdown stops the rate limiter's background goroutines

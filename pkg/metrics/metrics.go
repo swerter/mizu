@@ -60,6 +60,20 @@ type Metrics struct {
 	RecipientCacheHits   *prometheus.CounterVec
 	RecipientCacheMisses prometheus.Counter
 	RecipientCacheSize   *prometheus.GaugeVec
+
+	// Auth rate limiter metrics
+	AuthRateLimitIPBlocks         *prometheus.CounterVec   // Labels: ip
+	AuthRateLimitIPUsernameBlocks *prometheus.CounterVec   // Labels: ip, username
+	AuthRateLimitDelays           *prometheus.HistogramVec // Labels: type (ip, ip_username)
+	AuthRateLimitEvictions        *prometheus.CounterVec   // Labels: type (ip, ip_username, username, blocked_ips)
+	AuthRateLimitCacheSize        *prometheus.GaugeVec     // Labels: type
+
+	// DNS cache metrics
+	DNSCacheHits      *prometheus.CounterVec // Labels: record_type
+	DNSCacheMisses    *prometheus.CounterVec // Labels: record_type
+	DNSCacheSize      *prometheus.GaugeVec   // Labels: record_type
+	DNSQueryDuration  *prometheus.HistogramVec
+	DNSResolverErrors *prometheus.CounterVec // Labels: resolver, error_type
 }
 
 // New creates and registers all Prometheus metrics
@@ -307,5 +321,71 @@ func New(namespace string) *Metrics {
 			Name:      "size",
 			Help:      "Current size of recipient cache",
 		}, []string{"type"}),
+
+		// Auth rate limiter metrics
+		AuthRateLimitIPBlocks: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "auth_rate_limit",
+			Name:      "ip_blocks_total",
+			Help:      "Total number of IPs blocked due to authentication failures",
+		}, []string{"ip"}),
+		AuthRateLimitIPUsernameBlocks: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "auth_rate_limit",
+			Name:      "ip_username_blocks_total",
+			Help:      "Total number of IP+username combinations blocked",
+		}, []string{"ip", "username"}),
+		AuthRateLimitDelays: promauto.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: "auth_rate_limit",
+			Name:      "delay_seconds",
+			Help:      "Authentication delay durations in seconds",
+			Buckets:   prometheus.ExponentialBuckets(0.1, 2, 10), // 0.1s to 51.2s
+		}, []string{"type"}),
+		AuthRateLimitEvictions: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "auth_rate_limit",
+			Name:      "evictions_total",
+			Help:      "Total number of LRU evictions by cache type",
+		}, []string{"type"}),
+		AuthRateLimitCacheSize: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: "auth_rate_limit",
+			Name:      "cache_size",
+			Help:      "Current size of auth rate limit caches",
+		}, []string{"type"}),
+
+		// DNS cache metrics
+		DNSCacheHits: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "dns_cache",
+			Name:      "hits_total",
+			Help:      "Total number of DNS cache hits",
+		}, []string{"record_type"}),
+		DNSCacheMisses: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "dns_cache",
+			Name:      "misses_total",
+			Help:      "Total number of DNS cache misses",
+		}, []string{"record_type"}),
+		DNSCacheSize: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: "dns_cache",
+			Name:      "size",
+			Help:      "Current size of DNS cache by record type",
+		}, []string{"record_type"}),
+		DNSQueryDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: "dns",
+			Name:      "query_duration_seconds",
+			Help:      "DNS query duration in seconds",
+			Buckets:   prometheus.DefBuckets,
+		}, []string{"record_type"}),
+		DNSResolverErrors: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "dns",
+			Name:      "resolver_errors_total",
+			Help:      "Total number of DNS resolver errors",
+		}, []string{"resolver", "error_type"}),
 	}
 }

@@ -30,6 +30,20 @@ func (a *SMTPAdapter) Validate(ctx context.Context, clientIP, from, to string) (
 	}, nil
 }
 
+// ValidateWithContext validates a recipient with additional context (PTR, HELO)
+func (a *SMTPAdapter) ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from, to string) (*smtp.RecipientValidationResponse, error) {
+	resp, err := a.validator.ValidateWithContext(ctx, clientIP, ptr, helo, from, to)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to smtp.RecipientValidationResponse
+	return &smtp.RecipientValidationResponse{
+		Accepted: resp.Accepted,
+		Message:  resp.Message,
+	}, nil
+}
+
 // FlushCache flushes the validation cache
 func (a *SMTPAdapter) FlushCache() {
 	a.validator.FlushCache()

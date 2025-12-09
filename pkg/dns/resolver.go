@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"migadu/mizu/pkg/metrics"
 )
 
 // cacheEntry represents a cached DNS response
@@ -25,6 +27,7 @@ type ResilientResolver struct {
 	cache    map[string]*cacheEntry // DNS response cache
 	cacheMu  sync.RWMutex           // Protects cache
 	cacheTTL time.Duration          // How long to cache responses
+	metrics  *metrics.Metrics       // Prometheus metrics (optional)
 }
 
 // NewResilientResolver creates a new resilient DNS resolver with caching.
@@ -44,6 +47,7 @@ func NewResilientResolver(servers []string, timeout time.Duration, cacheTTL time
 		timeout:  timeout,
 		cache:    make(map[string]*cacheEntry),
 		cacheTTL: cacheTTL,
+		metrics:  nil, // Will be set via SetMetrics()
 	}
 
 	// Start cache cleanup goroutine
@@ -125,6 +129,11 @@ func (r *ResilientResolver) UpdateServers(servers []string) {
 
 	r.servers = make([]string, len(servers))
 	copy(r.servers, servers)
+}
+
+// SetMetrics sets the metrics instance for DNS cache monitoring
+func (r *ResilientResolver) SetMetrics(m *metrics.Metrics) {
+	r.metrics = m
 }
 
 // getCached retrieves a cached DNS response if it exists and hasn't expired

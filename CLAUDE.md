@@ -132,7 +132,7 @@ Key packages:
 
 - TOML-based configuration ([pkg/config/](pkg/config/))
 - `Config` struct in [pkg/config/types.go](pkg/config/types.go) defines all settings
-- Environment variables supported for secrets: `DESTINATION_API_KEY`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `HEALTH_PASSWORD`, `CLUSTER_SECRET_KEY`
+- Environment variables supported for secrets: `DESTINATION_AUTH_TOKEN`, `DELIVERY_AUTH_TOKEN`, `AUTH_TOKEN`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `HEALTH_PASSWORD`, `CLUSTER_SECRET_KEY`
 - Default values defined in `DefaultConfig()`
 
 **Message Validation Configuration:**
@@ -148,20 +148,41 @@ Key packages:
 - `enabled`: Enable SMTP AUTH (advertise AUTH in EHLO response)
 - `required`: Require authentication before MAIL FROM (implies enabled=true)
 - `url`: HTTPS endpoint for authentication (must use https://)
-- `api_key`: Bearer token for authentication API (supports env var: `${AUTH_API_KEY}`)
-- Authentication API contract:
-  ```json
-  // Request
-  {"username": "user@example.com", "password": "secret"}
-
-  // Response (success)
-  {"success": true, "user": "user@example.com", "allowed_from": ["user@example.com", "alias@example.com"]}
-
-  // Response (failure)
-  {"success": false, "error": "invalid credentials"}
+- `auth_token`: Bearer token for authentication API (supports env var: `${AUTH_TOKEN}`)
+- Authentication API contract (GET request with URL interpolation):
   ```
+  GET /api/users/{email}?ip={ip}
+  Authorization: Bearer {auth_token}
+
+  // Response (user found)
+  {
+    "password_hashes": ["$2a$10$...", "$2a$10$..."],  // Array of password hashes (bcrypt, SSHA512, SHA512)
+    "allowed_from": ["user@example.com", "alias@example.com"]
+  }
+
+  // Response (user not found)
+  404 Not Found
+  ```
+- Password verification happens **locally** (never send passwords over network)
+- Supports multiple password hashes per user (tries all until one matches)
+- URL supports `$email` and `$ip` placeholders for interpolation
 - Authenticated messages include `X-Auth-User` header in delivery to backend
 - Rate limiting supports `AUTHENTICATED_USER` dimension for per-user limits
+
+**Recipient Validation Configuration:**
+- `[server.recipient_validation]` section enables validation during RCPT TO phase
+- `enabled`: Enable recipient validation before accepting message body
+- `url`: HTTPS GET endpoint with URL interpolation (supports `$ip`, `$ptr`, `$helo`, `$from`, `$email`)
+- `auth_token`: Bearer token for validation API
+- HTTP status code semantics:
+  - **200 OK**: Recipient accepted (optional JSON body with `message` field)
+  - **404 Not Found**: User unknown (reject with "User unknown")
+  - **403 Forbidden**: Delivery not authorized (sender blocked by recipient)
+  - **429 Too Many Requests**: Rate limit exceeded (temporary failure)
+  - **502/503/504**: Temporary backend failures (retry later)
+- Response body can be JSON `{"message": "custom text"}` or plain text
+- Successful validations cached for 5 minutes (configurable)
+- Provides early rejection before DATA phase, reducing bandwidth and processing
 
 ### Storage Backend Configuration
 

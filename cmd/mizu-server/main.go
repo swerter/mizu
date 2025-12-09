@@ -159,7 +159,12 @@ func main() {
 	} else {
 		logger.Info("Using system default DNS resolver")
 	}
-	_ = dnsCache // Cache wrapper for future use
+
+	// Set metrics on DNS cache for monitoring
+	if dnsCache != nil {
+		dnsCache.SetMetrics(metricsInstance)
+		logger.Info("DNS cache metrics enabled")
+	}
 
 	// Track all server instances for coordinated shutdown
 	var serverWg sync.WaitGroup
@@ -409,8 +414,6 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logge
 		return nil, nil, nil, err
 	}
 
-	_ = storageBackend // TODO: Update TLS manager to use storage abstraction
-
 	var tlsConfig *tls.Config
 	var tlsMgr *tlsmgr.Manager
 
@@ -439,20 +442,19 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logge
 		syncInterval = 5 * time.Minute
 	}
 
-	// Create TLS manager with autocert
+	// Create TLS manager with autocert using storage backend abstraction
 	tlsMgr, err = tlsmgr.NewManager(tlsmgr.Config{
-		Enabled:       true,
-		Email:         cfg.TLS.Email,
-		Domains:       cfg.TLS.Domains,
-		DefaultDomain: cfg.TLS.DefaultDomain,
-		S3Client:      s3Client,
-		S3Bucket:      cfg.Storage.Bucket,
-		S3Prefix:      cfg.Storage.Prefix,
-		IsLeaderF:     isLeaderF,
-		Staging:       !cfg.TLS.UseProduction,
-		RenewBefore:   renewBefore,
-		FallbackDir:   cfg.TLS.FallbackCacheDir,
-		SyncInterval:  syncInterval,
+		Enabled:        true,
+		Email:          cfg.TLS.Email,
+		Domains:        cfg.TLS.Domains,
+		DefaultDomain:  cfg.TLS.DefaultDomain,
+		StorageBackend: storageBackend,
+		StoragePrefix:  cfg.Storage.Prefix,
+		IsLeaderF:      isLeaderF,
+		Staging:        !cfg.TLS.UseProduction,
+		RenewBefore:    renewBefore,
+		FallbackDir:    cfg.TLS.FallbackCacheDir,
+		SyncInterval:   syncInterval,
 	}, logger)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create TLS manager: %w", err)
@@ -734,8 +736,67 @@ func createServerBackend(
 
 	// Initialize authenticator if auth is enabled or required
 	var authenticator smtp.Authenticator
+	var authRateLimiter *smtp.AuthRateLimiter
 	if serverCfg.Auth.Enabled || serverCfg.Auth.Required {
 		authenticator = initAuthenticator(serverCfg, serverLogger)
+
+		// Initialize auth rate limiter with default values if not configured
+		cfg := serverCfg.Auth.RateLimit
+		if cfg.MaxAttemptsPerIPUsername == 0 {
+			cfg.MaxAttemptsPerIPUsername = 5
+		}
+		if cfg.MaxAttemptsPerIP == 0 {
+			cfg.MaxAttemptsPerIP = 50
+		}
+		if cfg.MaxAttemptsPerUsername == 0 {
+			cfg.MaxAttemptsPerUsername = 100
+		}
+		if cfg.DelayStartThreshold == 0 {
+			cfg.DelayStartThreshold = 3
+		}
+		if cfg.DelayMultiplier == 0 {
+			cfg.DelayMultiplier = 2.0
+		}
+		if cfg.MaxIPUsernameEntries == 0 {
+			cfg.MaxIPUsernameEntries = 100000
+		}
+		if cfg.MaxIPEntries == 0 {
+			cfg.MaxIPEntries = 50000
+		}
+		if cfg.MaxUsernameEntries == 0 {
+			cfg.MaxUsernameEntries = 50000
+		}
+
+		// Enable auth rate limiting by default when auth is required
+		if !cfg.Enabled && serverCfg.Auth.Required {
+			cfg.Enabled = true
+		}
+
+		if cfg.Enabled {
+			limiter, err := smtp.NewAuthRateLimiter(cfg, serverLogger, metricsInstance)
+			if err != nil {
+				serverLogger.Error("Failed to create auth rate limiter", "error", err)
+				os.Exit(1)
+			}
+			authRateLimiter = limiter
+
+			// Set up cluster sync if cluster is enabled and sync is configured
+			if clusterMgr != nil && cfg.ClusterSyncEnabled {
+				clusterLimiter := smtp.NewClusterAuthRateLimiter(limiter, clusterMgr, serverLogger)
+				limiter.SetClusterLimiter(clusterLimiter)
+
+				// Register handler with cluster
+				clusterMgr.RegisterAuthRateLimitHandler(clusterLimiter.HandleClusterEvent)
+
+				serverLogger.Info("Auth rate limiter cluster sync enabled")
+			}
+
+			serverLogger.Info("Auth rate limiter enabled",
+				"max_ip_username", cfg.MaxAttemptsPerIPUsername,
+				"max_ip", cfg.MaxAttemptsPerIP,
+				"max_username", cfg.MaxAttemptsPerUsername,
+				"cluster_sync", cfg.ClusterSyncEnabled)
+		}
 	}
 
 	// Create per-server circuit breaker and HTTP client for delivery
@@ -778,6 +839,7 @@ func createServerBackend(
 		DistTracker:        distTracker,
 		RateLimiter:        rateLimiter,
 		Authenticator:      authenticator,
+		AuthRateLimiter:    authRateLimiter,
 		ARCSigner:          arcSigner,
 		RecipientValidator: recipientValidator,
 	}
@@ -789,8 +851,68 @@ func initAuthenticator(serverCfg *config.ServerConfig, logger *slog.Logger) smtp
 		logger.Error("Authentication requires auth.url")
 		os.Exit(1)
 	}
-	logger.Info("Using HTTP authenticator", "url", serverCfg.Auth.URL)
-	return smtp.NewHTTPAuthenticator(serverCfg.Auth.URL, serverCfg.Auth.APIKey, logger)
+
+	// Initialize auth cache if enabled
+	var authCache *smtp.AuthCache
+	cacheCfg := serverCfg.Auth.Cache
+	if cacheCfg.Enabled {
+		// Set defaults
+		if cacheCfg.PositiveTTL == "" {
+			cacheCfg.PositiveTTL = "5m"
+		}
+		if cacheCfg.NegativeTTL == "" {
+			cacheCfg.NegativeTTL = "1m"
+		}
+		if cacheCfg.MaxSize == 0 {
+			cacheCfg.MaxSize = 50000
+		}
+		if cacheCfg.CleanupInterval == "" {
+			cacheCfg.CleanupInterval = "5m"
+		}
+		if cacheCfg.PositiveRevalidationWindow == "" {
+			cacheCfg.PositiveRevalidationWindow = "30s"
+		}
+
+		// Parse durations
+		positiveTTL, err := time.ParseDuration(cacheCfg.PositiveTTL)
+		if err != nil {
+			logger.Error("Invalid auth cache positive_ttl", "value", cacheCfg.PositiveTTL, "error", err)
+			os.Exit(1)
+		}
+		negativeTTL, err := time.ParseDuration(cacheCfg.NegativeTTL)
+		if err != nil {
+			logger.Error("Invalid auth cache negative_ttl", "value", cacheCfg.NegativeTTL, "error", err)
+			os.Exit(1)
+		}
+		cleanupInterval, err := time.ParseDuration(cacheCfg.CleanupInterval)
+		if err != nil {
+			logger.Error("Invalid auth cache cleanup_interval", "value", cacheCfg.CleanupInterval, "error", err)
+			os.Exit(1)
+		}
+		revalidationWindow, err := time.ParseDuration(cacheCfg.PositiveRevalidationWindow)
+		if err != nil {
+			logger.Error("Invalid auth cache positive_revalidation_window", "value", cacheCfg.PositiveRevalidationWindow, "error", err)
+			os.Exit(1)
+		}
+
+		authCache = smtp.NewAuthCache(
+			positiveTTL,
+			negativeTTL,
+			cacheCfg.MaxSize,
+			cleanupInterval,
+			revalidationWindow,
+			logger.With("component", "auth_cache"),
+		)
+
+		logger.Info("Auth cache initialized",
+			"positive_ttl", cacheCfg.PositiveTTL,
+			"negative_ttl", cacheCfg.NegativeTTL,
+			"max_size", cacheCfg.MaxSize,
+			"revalidation_window", cacheCfg.PositiveRevalidationWindow)
+	}
+
+	logger.Info("Using HTTP authenticator", "url", serverCfg.Auth.URL, "cache_enabled", cacheCfg.Enabled)
+	return smtp.NewHTTPAuthenticator(serverCfg.Auth.URL, serverCfg.Auth.AuthToken, logger, authCache)
 }
 
 // initRecipientValidator initializes a recipient validator for a server
@@ -802,7 +924,7 @@ func initRecipientValidator(serverCfg *config.ServerConfig, logger *slog.Logger)
 
 	validator, err := recipient.NewValidator(recipient.ValidatorConfig{
 		URL:                serverCfg.RecipientValidation.URL,
-		APIKey:             serverCfg.RecipientValidation.APIKey,
+		AuthToken:          serverCfg.RecipientValidation.AuthToken,
 		HTTPTimeoutSeconds: serverCfg.RecipientValidation.HTTPTimeoutSeconds,
 		CacheTTLSeconds:    serverCfg.RecipientValidation.CacheTTLSeconds,
 		Logger:             logger,
@@ -928,6 +1050,14 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 			logger.Info("Server shut down gracefully", "server", serverCfg.Name)
 		case <-time.After(time.Duration(serverCfg.ShutdownTimeoutSeconds) * time.Second):
 			logger.Warn("Server shutdown timeout", "server", serverCfg.Name)
+		}
+
+		// Shutdown rate limiters and cleanup background goroutines
+		if be.AuthRateLimiter != nil {
+			be.AuthRateLimiter.Shutdown()
+		}
+		if be.RateLimiter != nil {
+			be.RateLimiter.Shutdown()
 		}
 
 	case err := <-serverErrors:

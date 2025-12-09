@@ -102,14 +102,14 @@ func TestLoadEnvVars(t *testing.T) {
 	// Set environment variables
 	os.Setenv("S3_ACCESS_KEY_ID", "test-access-key")
 	os.Setenv("S3_SECRET_ACCESS_KEY", "test-secret-key")
-	os.Setenv("DELIVERY_API_KEY", "test-dest-key")
-	os.Setenv("AUTH_API_KEY", "test-auth-key")
+	os.Setenv("DELIVERY_AUTH_TOKEN", "test-dest-token")
+	os.Setenv("AUTH_TOKEN", "test-auth-token")
 
 	defer func() {
 		os.Unsetenv("S3_ACCESS_KEY_ID")
 		os.Unsetenv("S3_SECRET_ACCESS_KEY")
-		os.Unsetenv("DELIVERY_API_KEY")
-		os.Unsetenv("AUTH_API_KEY")
+		os.Unsetenv("DELIVERY_AUTH_TOKEN")
+		os.Unsetenv("AUTH_TOKEN")
 	}()
 
 	defaultCfg := DefaultConfig()
@@ -124,14 +124,14 @@ func TestLoadEnvVars(t *testing.T) {
 		t.Errorf("Storage.SecretAccessKey = %s; want test-secret-key", cfg.Storage.SecretAccessKey)
 	}
 
-	if cfg.Servers[0].Delivery.APIKey != "test-dest-key" {
-		t.Errorf("Server.Delivery.APIKey = %s; want test-dest-key", cfg.Servers[0].Delivery.APIKey)
+	if cfg.Servers[0].Delivery.AuthToken != "test-dest-token" {
+		t.Errorf("Server.Delivery.AuthToken = %s; want test-dest-token", cfg.Servers[0].Delivery.AuthToken)
 	}
 
-	// Check that AUTH_API_KEY is applied to submission servers
+	// Check that AUTH_TOKEN is applied to submission servers
 	for i := range cfg.Servers {
-		if cfg.Servers[i].IsSubmission() && cfg.Servers[i].Auth.APIKey == "" {
-			t.Errorf("Submission server %s should have auth API key set", cfg.Servers[i].Name)
+		if cfg.Servers[i].IsSubmission() && cfg.Servers[i].Auth.AuthToken == "" {
+			t.Errorf("Submission server %s should have auth token set", cfg.Servers[i].Name)
 		}
 	}
 }
@@ -195,9 +195,9 @@ func TestValidateConfig_ValidMultiServer(t *testing.T) {
 				Required: true,
 			},
 			Auth: ServerAuthConfig{
-				Required: true,
-				URL:      "https://auth.example.com",
-				APIKey:   "test-api-key",
+				Required:  true,
+				URL:       "https://auth.example.com",
+				AuthToken: "test-auth-token",
 			},
 		},
 	}
@@ -210,7 +210,7 @@ func TestValidateConfig_ValidMultiServer(t *testing.T) {
 	// Set delivery config for all servers
 	for i := range cfg.Servers {
 		cfg.Servers[i].Delivery.URL = "https://test.com"
-		cfg.Servers[i].Delivery.APIKey = "test-key"
+		cfg.Servers[i].Delivery.AuthToken = "test-token"
 		cfg.Servers[i].Delivery.MaxRetryAttempts = 3
 		cfg.Servers[i].Delivery.HTTPTimeoutSeconds = 30
 	}
@@ -359,7 +359,7 @@ func TestValidateConfig_ClusterBindAddr(t *testing.T) {
 			// Set required fields for all servers
 			for i := range cfg.Servers {
 				cfg.Servers[i].Delivery.URL = "https://test.com"
-				cfg.Servers[i].Delivery.APIKey = "test-key"
+				cfg.Servers[i].Delivery.AuthToken = "test-token"
 				cfg.Servers[i].Delivery.MaxRetryAttempts = 3
 				cfg.Servers[i].Delivery.HTTPTimeoutSeconds = 30
 			}

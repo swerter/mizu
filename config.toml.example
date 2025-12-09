@@ -127,17 +127,19 @@ recipient_cache_ttl_seconds = 900
 
 # Recipient Validation (per-server)
 # Validates recipients during RCPT TO phase before accepting the message body
+# Uses GET requests with URL interpolation - supports $ip, $ptr, $helo, $from, $email placeholders
 [server.recipient_validation]
 enabled = false                              # Enable recipient validation (default: false)
-url = "https://api.example.com/validate"     # HTTP endpoint for validation
-api_key = "${RECIPIENT_VALIDATION_API_KEY}"  # API key (sent as Bearer token)
+url = "https://api.example.com/validate?ip=$ip&ptr=$ptr&helo=$helo&from=$from&to=$email"  # GET endpoint with interpolation
+auth_token = "${RECIPIENT_VALIDATION_AUTH_TOKEN}"  # Authentication token (sent as Bearer token)
 http_timeout_seconds = 5                     # HTTP request timeout (default: 5)
 cache_ttl_seconds = 300                      # Cache TTL for successful validations (default: 300 = 5min)
+# HTTP status codes: 200=accept, 404=user unknown, 403=blocked, 429=rate limit, 5xx=temp failure
 
 # Email Delivery Configuration (per-server)
 [server.delivery]
 url = "https://your-worker.example.com/email"  # HTTP endpoint to POST emails to
-api_key = "${DELIVERY_API_KEY}"                # API key (sent as Bearer token)
+auth_token = "${DELIVERY_AUTH_TOKEN}"                # Authentication token (sent as Bearer token)
 max_retry_attempts = 3                         # Retry up to 3 times on failure
 http_timeout_seconds = 30                      # HTTP request timeout
 
@@ -198,11 +200,67 @@ check_headers = []                   # Don't check headers for authenticated use
 apply_action = "warn"
 
 # Authentication Configuration
+# Uses GET requests with URL interpolation - supports $email, $ip placeholders
 [server.auth]
 enabled = true                                     # Enable SMTP AUTH (advertise AUTH in EHLO)
 required = true                                    # Require authentication before MAIL FROM (implies enabled=true)
-url = "https://auth.example.com/api/validate"     # HTTPS URL (https:// required)
-api_key = "${AUTH_API_KEY}"                        # API key (sent as Bearer token)
+url = "https://auth.example.com/api/users/$email?ip=$ip"  # GET endpoint with interpolation
+auth_token = "${AUTH_TOKEN}"                        # Authentication token (sent as Bearer token)
+# Backend returns: {"password_hashes": ["$2a$10$...", ...], "allowed_from": ["user@example.com"]}
+
+# Authentication Caching - Reduces load on authentication backend
+# Implements password-aware caching with separate positive/negative TTL
+[server.auth.cache]
+enabled = true                                     # Enable authentication caching (default: true when auth.enabled=true)
+positive_ttl = "5m"                                # Cache duration for successful auth (default: "5m")
+negative_ttl = "1m"                                # Cache duration for failed auth (default: "1m")
+max_size = 50000                                   # Maximum cache entries (default: 50000, ~10MB memory)
+cleanup_interval = "5m"                            # Cleanup interval (default: "5m")
+positive_revalidation_window = "30s"               # Revalidate successful auth after this duration to detect password changes (default: "30s")
+
+# Authentication Rate Limiting - Protects against brute-force attacks
+# Two-tier blocking system: IP+username (fast) and IP-only (slow)
+[server.auth.rate_limit]
+enabled = true                                     # Enable auth rate limiting (default: true when auth.required=true)
+
+# TIER 1: Fast IP+Username Blocking
+# Protects shared IPs (corporate gateways) by blocking specific user+IP combinations
+max_attempts_per_ip_username = 5                   # Failures before blocking (default: 5)
+ip_username_block_duration = "15m"                 # Block duration (default: "15m")
+ip_username_window_duration = "10m"                # Sliding window for counting failures (default: "10m")
+
+# TIER 2: Slow IP-Only Blocking
+# Catches distributed attacks trying many usernames from same IP
+max_attempts_per_ip = 50                           # Failures before blocking entire IP (default: 50)
+ip_block_duration = "30m"                          # Block duration (default: "30m")
+ip_window_duration = "30m"                         # Sliding window for counting failures (default: "30m")
+
+# USERNAME TRACKING (Statistics Only - No Blocking)
+# Synchronized across cluster for detecting compromised accounts
+max_attempts_per_username = 100                    # Tracking threshold (default: 100, no blocking)
+username_window_duration = "1h"                    # Tracking window (default: "1h")
+
+# PROGRESSIVE DELAYS
+# Adds delays before full IP blocking to slow attackers
+delay_start_threshold = 3                          # Failures before delays start (default: 3)
+initial_delay = "1s"                               # First delay (default: "1s")
+max_delay = "30s"                                  # Maximum delay (default: "30s")
+delay_multiplier = 2.0                             # Delay growth factor (default: 2.0)
+
+# MAINTENANCE
+cache_cleanup_interval = "5m"                      # In-memory cleanup interval (default: "5m")
+
+# MEMORY SAFETY LIMITS
+# Prevents unbounded memory growth during massive attacks
+max_ip_username_entries = 100000                   # Max IP+username tracking entries (default: 100000, 0 = unlimited)
+max_ip_entries = 50000                             # Max IP tracking entries (default: 50000, 0 = unlimited)
+max_username_entries = 50000                       # Max username tracking entries (default: 50000, 0 = unlimited)
+
+# CLUSTER SYNCHRONIZATION
+# Syncs auth failures and blocks across cluster via gossip (requires cluster.enabled=true)
+cluster_sync_enabled = true                        # Enable cluster-wide sync (default: true when cluster enabled)
+sync_blocks = true                                 # Sync IP blocks across cluster (default: true)
+sync_failure_counts = true                         # Sync progressive delay counts across cluster (default: true)
 
 # SPF - Disabled for submission (users are authenticated)
 [server.spf]
@@ -243,7 +301,7 @@ window_seconds = 86400
 # Email Delivery Configuration (per-server)
 [server.delivery]
 url = "https://your-worker.example.com/email"
-api_key = "${DELIVERY_API_KEY}"
+auth_token = "${DELIVERY_AUTH_TOKEN}"
 max_retry_attempts = 3
 http_timeout_seconds = 30
 
@@ -300,11 +358,33 @@ check_headers = []
 apply_action = "warn"
 
 # Authentication Configuration
+# Uses GET requests with URL interpolation - supports $email, $ip placeholders
 [server.auth]
 enabled = true                                     # Enable SMTP AUTH (advertise AUTH in EHLO)
 required = true                                    # Require authentication before MAIL FROM
-url = "https://auth.example.com/api/validate"     # HTTPS URL (https:// required)
-api_key = "${AUTH_API_KEY}"                        # API key (sent as Bearer token)
+url = "https://auth.example.com/api/users/$email?ip=$ip"  # GET endpoint with interpolation
+auth_token = "${AUTH_TOKEN}"                        # Authentication token (sent as Bearer token)
+# Backend returns: {"password_hashes": ["$2a$10$...", ...], "allowed_from": ["user@example.com"]}
+
+# Authentication Caching
+# (Same configuration as port 465 - see above for detailed comments)
+[server.auth.cache]
+enabled = true
+positive_ttl = "5m"
+negative_ttl = "1m"
+max_size = 50000
+cleanup_interval = "5m"
+positive_revalidation_window = "30s"
+
+# Authentication Rate Limiting - Protects against brute-force attacks
+# (Same configuration as port 465 - see above for detailed comments)
+[server.auth.rate_limit]
+enabled = true                                     # Enable auth rate limiting
+max_attempts_per_ip_username = 5                   # Failures before blocking user+IP
+ip_username_block_duration = "15m"                 # Block duration for user+IP
+max_attempts_per_ip = 50                           # Failures before blocking entire IP
+ip_block_duration = "30m"                          # Block duration for IP
+cluster_sync_enabled = true                        # Sync blocks across cluster
 
 [server.spf]
 enabled = false
@@ -340,7 +420,7 @@ window_seconds = 86400
 # Email Delivery Configuration (per-server)
 [server.delivery]
 url = "https://your-worker.example.com/email"
-api_key = "${DELIVERY_API_KEY}"
+auth_token = "${DELIVERY_AUTH_TOKEN}"
 max_retry_attempts = 3
 http_timeout_seconds = 30
 
