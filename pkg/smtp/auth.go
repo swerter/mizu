@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"migadu/mizu/pkg/concurrency"
 	"net/http"
 	"net/url"
 	"strings"
@@ -52,7 +53,7 @@ func NewHTTPAuthenticator(urlTemplate, apiKey string, logger *slog.Logger, authC
 	}
 
 	// Start credentials cache cleanup goroutine
-	go auth.cleanupCredCache()
+	concurrency.SafeGo(logger, "auth-credentials-cache-cleanup", auth.cleanupCredCache)
 
 	return auth
 }

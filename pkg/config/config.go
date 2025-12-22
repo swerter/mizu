@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -11,6 +12,29 @@ func (c *Config) Validate() error {
 	// Check that at least one server is configured
 	if len(c.Servers) == 0 {
 		return errors.New("no [[server]] sections defined - at least one server is required")
+	}
+
+	// Handle duplicate server names (warn and de-duplicate)
+	seenNames := make(map[string]int)
+	for i := range c.Servers {
+		name := c.Servers[i].Name
+		if name == "" {
+			// Assign default name
+			c.Servers[i].Name = fmt.Sprintf("server-%d", i+1)
+			name = c.Servers[i].Name
+		}
+
+		if count, exists := seenNames[name]; exists {
+			// Duplicate name found - append suffix
+			count++
+			seenNames[name] = count
+			newName := fmt.Sprintf("%s-%d", name, count)
+			// Note: Using fmt.Fprintf to stderr since logger not available yet
+			fmt.Fprintf(os.Stderr, "WARNING: Duplicate server name '%s' renamed to '%s'\n", name, newName)
+			c.Servers[i].Name = newName
+		} else {
+			seenNames[name] = 1
+		}
 	}
 
 	// Apply defaults and validate each server
@@ -89,13 +113,25 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid storage backend: %s (must be 's3' or 'filesystem')", c.Storage.Backend)
 	}
 
-	if c.TLS.Email == "" || c.TLS.Email == "admin@example.com" {
-		return errors.New("tls.email must be set for Let's Encrypt certificate management")
-	}
-
-	// Validate TLS domains
-	if len(c.TLS.Domains) == 0 {
-		return errors.New("tls.domains must be set for automatic certificate management")
+	// Validate TLS configuration
+	if c.TLS.Enabled {
+		switch c.TLS.Provider {
+		case "file":
+			if c.TLS.File.CertFile == "" || c.TLS.File.KeyFile == "" {
+				return errors.New("tls.file.cert_file and tls.file.key_file must be set when tls.provider=file")
+			}
+		case "letsencrypt":
+			if c.TLS.LetsEncrypt.Email == "" || c.TLS.LetsEncrypt.Email == "admin@example.com" {
+				return errors.New("tls.letsencrypt.email must be set for Let's Encrypt certificate management")
+			}
+			if len(c.TLS.LetsEncrypt.Domains) == 0 {
+				return errors.New("tls.letsencrypt.domains must be set for automatic certificate management")
+			}
+		case "":
+			return errors.New("tls.provider must be set when tls.enabled=true (must be 'file' or 'letsencrypt')")
+		default:
+			return fmt.Errorf("invalid tls.provider: %s (must be 'file' or 'letsencrypt')", c.TLS.Provider)
+		}
 	}
 
 	// Validate cluster configuration

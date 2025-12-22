@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"log/slog"
+	"migadu/mizu/pkg/concurrency"
 	"migadu/mizu/pkg/config"
 )
 
@@ -107,11 +108,11 @@ func NewRateLimiter(rlConfig config.RateLimitConfig, cluster RateLimiterCluster,
 	// Register handler for rate limit gossip from peers
 	if rlConfig.GossipEnabled && cluster != nil {
 		cluster.RegisterRateLimitHandler(rl.handleGossipMessage)
-		go rl.gossipLoop()
+		concurrency.SafeGo(logger, "rate-limiter-gossip", rl.gossipLoop)
 	}
 
 	// Start cleanup loop
-	go rl.cleanupLoop()
+	concurrency.SafeGo(logger, "rate-limiter-cleanup", rl.cleanupLoop)
 
 	return rl
 }

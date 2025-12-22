@@ -400,11 +400,24 @@ type LoggingConfig struct {
 
 // TLSConfig holds TLS/certificate configuration
 type TLSConfig struct {
-	Email               string   `toml:"email"`                 // Email for Let's Encrypt
+	Enabled     bool                 `toml:"enabled"`     // Enable TLS certificate management
+	Provider    string               `toml:"provider"`    // TLS provider: "file" or "letsencrypt" (default: "file")
+	File        TLSFileConfig        `toml:"file"`        // File-based certificate configuration
+	LetsEncrypt TLSLetsEncryptConfig `toml:"letsencrypt"` // Let's Encrypt configuration
+}
+
+// TLSFileConfig holds configuration for file-based TLS certificates
+type TLSFileConfig struct {
+	CertFile string `toml:"cert_file"` // Path to certificate file
+	KeyFile  string `toml:"key_file"`  // Path to private key file
+}
+
+// TLSLetsEncryptConfig holds Let's Encrypt automatic certificate configuration
+type TLSLetsEncryptConfig struct {
+	Email               string   `toml:"email"`                 // Email for Let's Encrypt notifications
 	Domains             []string `toml:"domains"`               // Domains to obtain certificates for
 	DefaultDomain       string   `toml:"default_domain"`        // Default domain for SNI-less connections (optional, defaults to first domain)
-	UseProduction       bool     `toml:"use_production"`        // Use Let's Encrypt production (vs staging)
-	UseLocalCA          bool     `toml:"use_local_ca"`          // Use local CA for testing
+	Staging             bool     `toml:"staging"`               // Use Let's Encrypt staging environment (for testing)
 	RenewBeforeDays     int      `toml:"renew_before_days"`     // Days before expiry to renew (default: 30)
 	FallbackCacheDir    string   `toml:"fallback_cache_dir"`    // Local fallback directory for certificates (optional, empty = no fallback)
 	SyncIntervalMinutes int      `toml:"sync_interval_minutes"` // How often to sync certificates in minutes (default: 5, 0 = no sync)
@@ -443,14 +456,24 @@ func DefaultConfig() Config {
 			FilesystemPath: "/var/lib/mizu/storage", // Default filesystem path
 			S3Endpoint:     "s3.amazonaws.com",
 			S3Bucket:       "email-mx-certs",
-			S3Prefix:       "certs/",
+			S3Prefix:       "", // Base prefix (subdirectories added automatically: certs/, stats/, connections/)
 			S3Region:       "us-east-1",
 		},
 		TLS: TLSConfig{
-			Email:         "admin@example.com",
-			Domains:       []string{},
-			UseProduction: true,
-			UseLocalCA:    false,
+			Enabled:  false,
+			Provider: "file",
+			File: TLSFileConfig{
+				CertFile: "",
+				KeyFile:  "",
+			},
+			LetsEncrypt: TLSLetsEncryptConfig{
+				Email:               "admin@example.com",
+				Domains:             []string{},
+				Staging:             false,
+				RenewBeforeDays:     30,
+				FallbackCacheDir:    "",
+				SyncIntervalMinutes: 5,
+			},
 		},
 		Blacklists: BlacklistsConfig{
 			Enabled:           true,

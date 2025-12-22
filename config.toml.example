@@ -1,543 +1,78 @@
-# Mizu SMTP Server Configuration
-# https://github.com/migadu/mizu
-
-# =============================================================================
-# Global Settings
-# =============================================================================
-
-# Local development mode (disables TLS, dumps emails to terminal)
+server = []
 local = false
 
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-
-[logging]
-level = "info"                       # Log level: debug, info, warn, error
-format = "console"                   # Output format: console (human-readable) or json (structured)
-
-# =============================================================================
-# Default Values (inherited by all servers unless overridden)
-# =============================================================================
-
 [defaults]
-hostname = "mail.example.com"        # Default hostname (FQDN) for all servers
-max_message_size = 26214400          # 25MB
+hostname = "mail.example.com"
+max_message_size = 26214400
 timeout_seconds = 10
 shutdown_timeout_seconds = 60
 max_connections = 100
 
-# =============================================================================
-# SMTP Server Instances (can define multiple)
-# =============================================================================
-
-# MX Server (Port 25) - Receives mail from other mail servers
-[[server]]
-name = "mx-primary"
-type = "relay"                       # Server type: "relay" (MX) or "submission" (MSA)
-listen_addr = ":25"
-hostname = "mail.example.com"        # Server hostname/FQDN (overrides defaults.hostname if set)
-
-# Message Processing
-max_message_size = 10485760          # 10MB maximum message size
-max_recipients_per_message = 100     # Maximum recipients per message (default: 100)
-
-# Timeouts
-timeout_seconds = 10
-shutdown_timeout_seconds = 60
-
-# Debugging
-debug = false                        # Enable SMTP protocol debug logging (shows all SMTP commands and responses)
-
-# Connection Limits
-[server.limits]
-max_connections = 100                # Total connections for this server
-max_connections_per_ip = 10          # Per-IP connection limit (for DoS protection)
-# max_connections_per_user = 0       # Per-user connection limit (for submission servers only, 0 = unlimited)
-
-# TLS Configuration
-[server.tls]
-enabled = true                       # Enable TLS for this server
-mode = "starttls"                    # TLS mode: "starttls" or "implicit"
-required = true                      # Enforce TLS (false for compatibility with old servers)
-min_tls_version = "1.2"              # Minimum TLS version: "1.2" or "1.3"
-
-# DNS Checks
-[server.dns_checks]
-require_rdns = true                  # Require reverse DNS for sender IP
-require_sender_mx = true             # Require sender domain to have MX records
-
-# Junk/Spam Detection
-[server.junk]
-reject_null_sender = true                  # Reject bounce messages (<>)
-check_headers = ["X-Spam-Flag", "X-Junk"]  # Headers that mark email as junk
-apply_action = "header"                    # Action when junk detected: "header", "reject", "warn", "subject"
-subject_pattern = "[spam] %s"              # Subject pattern for "subject" action (original subject replaces %s)
-header = "X-Spam"                          # Header to add for "header" action
-
-# Email Authentication Checks
-spf_check = true                     # Enable SPF validation
-dkim_check = true                    # Enable DKIM validation
-arc_check = true                     # Enable ARC validation
-dmarc_check = true                   # Enable DMARC validation
-dmarc_reject_action = "reject"       # Action for DMARC policy=reject: "none" (no action), "reject" (reject email), "junk" (mark as junk)
-dmarc_quarantine_action = "junk"     # Action for DMARC policy=quarantine: "none" (no action), "reject" (reject email), "junk" (mark as junk)
-
-# DNS Blacklist Checking
-[server.dnsbl]
-enabled = true                       # Enable DNS blacklist (RBL) checking
-ipv4_lists = [                       # DNS blacklist servers for IPv4 addresses
-    "zen.spamhaus.org",              # Comprehensive Spamhaus blocklist
-    "bl.spamcop.net",                # SpamCop spam reports
-    "b.barracudacentral.org"         # Barracuda reputation-based list
-]
-ipv6_lists = [                       # DNS blacklist servers for IPv6 addresses
-    # "ipv6.bl.spamcop.net",         # SpamCop IPv6 spam reports
-    # "dnsbl-3.uceprotect.net"       # UCEProtect IPv6 blocklist
-]
-timeout_seconds = 3                  # Timeout for blacklist queries
-check_helo_resolves = true           # Check if HELO hostname resolves
-action = "reject"                    # Action when blacklisted: "reject", "junk", "none"
-
-# Rate Limiting
-# Multi-dimensional rate limiting supports combining keys to create sophisticated limits
-# Available keys: IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN, AUTHENTICATED_USER
-# Examples:
-#   keys = ["IP"] - Limit per client IP
-#   keys = ["FROM"] - Limit per sender email address
-#   keys = ["FROM_DOMAIN"] - Limit per sender domain
-#   keys = ["TO"] - Limit per recipient email address
-#   keys = ["TO_DOMAIN"] - Limit per recipient domain
-#   keys = ["AUTHENTICATED_USER"] - Limit per authenticated user
-#   keys = ["IP", "FROM"] - Limit per IP+sender combination
-#   keys = ["FROM_DOMAIN", "TO_DOMAIN"] - Limit per sender/recipient domain pair
-[server.rate_limit]
-gossip_enabled = false               # Share rate limits across cluster (requires cluster.enabled)
-gossip_interval_seconds = 5
-
-[[server.rate_limit.dimensions]]
-name = "per_ip"
-keys = ["IP"]                        # Supported keys: IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN, AUTHENTICATED_USER
-limit = 60                           # Max 60 messages per IP per minute
-window_seconds = 60
-
-# Distributed Connection Tracking (optional, requires cluster)
-[server.distributed]
-enabled = false
-global_max_per_ip = 50               # Global limit across all cluster nodes
-gossip_interval_seconds = 5
-s3_sync_interval_seconds = 30
-recipient_cache_ttl_seconds = 900
-
-# Recipient Validation (per-server)
-# Validates recipients during RCPT TO phase before accepting the message body
-# Uses GET requests with URL interpolation - supports $ip, $ptr, $helo, $from, $email placeholders
-[server.recipient_validation]
-enabled = false                              # Enable recipient validation (default: false)
-url = "https://api.example.com/validate?ip=$ip&ptr=$ptr&helo=$helo&from=$from&to=$email"  # GET endpoint with interpolation
-auth_token = "${RECIPIENT_VALIDATION_AUTH_TOKEN}"  # Authentication token (sent as Bearer token)
-http_timeout_seconds = 5                     # HTTP request timeout (default: 5)
-cache_ttl_seconds = 300                      # Cache TTL for successful validations (default: 300 = 5min)
-# HTTP status codes: 200=accept, 404=user unknown, 403=blocked, 429=rate limit, 5xx=temp failure
-
-# Email Delivery Configuration (per-server)
-[server.delivery]
-url = "https://your-worker.example.com/email"  # HTTP endpoint to POST emails to
-auth_token = "${DELIVERY_AUTH_TOKEN}"                # Authentication token (sent as Bearer token)
-max_retry_attempts = 3                         # Retry up to 3 times on failure
-http_timeout_seconds = 30                      # HTTP request timeout
-
-# Circuit Breaker for destination endpoint
-[server.delivery.circuit_breaker]
-enabled = true
-failure_threshold = 5                # Open circuit after 5 consecutive failures
-success_threshold = 2                # Close circuit after 2 consecutive successes
-timeout_seconds = 30                 # Circuit opens for 30 seconds
-half_open_max_calls = 1              # Allow 1 call in half-open state
-reset_timeout_seconds = 60           # Reset failure count after 60 seconds
-
-# =============================================================================
-# Submission Server (Port 465) - Accepts mail from authenticated users
-# =============================================================================
-
-[[server]]
-name = "submission-tls"
-type = "submission"
-listen_addr = ":465"
-hostname = "submit.example.com"
-
-# Timeouts
-timeout_seconds = 10
-shutdown_timeout_seconds = 60
-
-# Debugging
-debug = false                        # Enable SMTP protocol debug logging
-
-# Message Processing
-max_message_size = 52428800          # 50MB (larger for user submissions)
-
-# Message Validation Settings
-[server.validation]
-allow_null_sender = false            # Allow bounce messages with null sender (<>) - false for submission (reject), true for relay (accept bounces)
-missing_headers_action = "reject"    # Action for missing Message-ID/Date headers: "reject", "fix", "none" - "reject" for submission, "fix" for relay
-
-# Connection Limits
-[server.limits]
-max_connections = 50                 # Total connections for this server
-max_connections_per_user = 5         # Limit per authenticated user
-
-# TLS Configuration - Port 465 uses implicit TLS
-[server.tls]
-enabled = true
-mode = "implicit"                    # Port 465 uses implicit TLS (always on)
-required = true                      # Always enforce TLS for submission
-min_tls_version = "1.2"
-deferred_handshake = true            # Defer TLS handshake to prevent head-of-line blocking (implicit TLS only)
-handshake_timeout_secs = 10          # Timeout for TLS handshake (0 = no timeout)
-
-# DNS Checks - Disabled for submission (users are authenticated)
-[server.dns_checks]
-require_rdns = false
-require_sender_mx = false
-
-# Junk/Spam Detection
-[server.junk]
-reject_null_sender = false
-check_headers = []                   # Don't check headers for authenticated users
-apply_action = "warn"
-
-# Authentication Configuration
-# Uses GET requests with URL interpolation - supports $email, $ip placeholders
-[server.auth]
-enabled = true                                     # Enable SMTP AUTH (advertise AUTH in EHLO)
-required = true                                    # Require authentication before MAIL FROM (implies enabled=true)
-url = "https://auth.example.com/api/users/$email?ip=$ip"  # GET endpoint with interpolation
-auth_token = "${AUTH_TOKEN}"                        # Authentication token (sent as Bearer token)
-# Backend returns: {"password_hashes": ["$2a$10$...", ...], "allowed_from": ["user@example.com"]}
-
-# Authentication Caching - Reduces load on authentication backend
-# Implements password-aware caching with separate positive/negative TTL
-[server.auth.cache]
-enabled = true                                     # Enable authentication caching (default: true when auth.enabled=true)
-positive_ttl = "5m"                                # Cache duration for successful auth (default: "5m")
-negative_ttl = "1m"                                # Cache duration for failed auth (default: "1m")
-max_size = 50000                                   # Maximum cache entries (default: 50000, ~10MB memory)
-cleanup_interval = "5m"                            # Cleanup interval (default: "5m")
-positive_revalidation_window = "30s"               # Revalidate successful auth after this duration to detect password changes (default: "30s")
-
-# Authentication Rate Limiting - Protects against brute-force attacks
-# Two-tier blocking system: IP+username (fast) and IP-only (slow)
-[server.auth.rate_limit]
-enabled = true                                     # Enable auth rate limiting (default: true when auth.required=true)
-
-# TIER 1: Fast IP+Username Blocking
-# Protects shared IPs (corporate gateways) by blocking specific user+IP combinations
-max_attempts_per_ip_username = 5                   # Failures before blocking (default: 5)
-ip_username_block_duration = "15m"                 # Block duration (default: "15m")
-ip_username_window_duration = "10m"                # Sliding window for counting failures (default: "10m")
-
-# TIER 2: Slow IP-Only Blocking
-# Catches distributed attacks trying many usernames from same IP
-max_attempts_per_ip = 50                           # Failures before blocking entire IP (default: 50)
-ip_block_duration = "30m"                          # Block duration (default: "30m")
-ip_window_duration = "30m"                         # Sliding window for counting failures (default: "30m")
-
-# USERNAME TRACKING (Statistics Only - No Blocking)
-# Synchronized across cluster for detecting compromised accounts
-max_attempts_per_username = 100                    # Tracking threshold (default: 100, no blocking)
-username_window_duration = "1h"                    # Tracking window (default: "1h")
-
-# PROGRESSIVE DELAYS
-# Adds delays before full IP blocking to slow attackers
-delay_start_threshold = 3                          # Failures before delays start (default: 3)
-initial_delay = "1s"                               # First delay (default: "1s")
-max_delay = "30s"                                  # Maximum delay (default: "30s")
-delay_multiplier = 2.0                             # Delay growth factor (default: 2.0)
-
-# MAINTENANCE
-cache_cleanup_interval = "5m"                      # In-memory cleanup interval (default: "5m")
-
-# MEMORY SAFETY LIMITS
-# Prevents unbounded memory growth during massive attacks
-max_ip_username_entries = 100000                   # Max IP+username tracking entries (default: 100000, 0 = unlimited)
-max_ip_entries = 50000                             # Max IP tracking entries (default: 50000, 0 = unlimited)
-max_username_entries = 50000                       # Max username tracking entries (default: 50000, 0 = unlimited)
-
-# CLUSTER SYNCHRONIZATION
-# Syncs auth failures and blocks across cluster via gossip (requires cluster.enabled=true)
-cluster_sync_enabled = true                        # Enable cluster-wide sync (default: true when cluster enabled)
-sync_blocks = true                                 # Sync IP blocks across cluster (default: true)
-sync_failure_counts = true                         # Sync progressive delay counts across cluster (default: true)
-
-# Email Authentication - Disabled for submission (users are authenticated)
-spf_check = false
-dkim_check = false
-arc_check = false
-dmarc_check = false
-
-# DNSBL - Disabled for submission (users are authenticated)
-[server.dnsbl]
-enabled = false
-
-# Per-User Rate Limiting
-[server.rate_limit]
-gossip_enabled = false
-
-[[server.rate_limit.dimensions]]
-name = "per_user_hourly"
-keys = ["AUTHENTICATED_USER"]
-limit = 100                          # 100 emails per hour per user
-window_seconds = 3600
-
-[[server.rate_limit.dimensions]]
-name = "per_user_daily"
-keys = ["AUTHENTICATED_USER"]
-limit = 1000                         # 1000 emails per day per user
-window_seconds = 86400
-
-# Email Delivery Configuration (per-server)
-[server.delivery]
-url = "https://your-worker.example.com/email"
-auth_token = "${DELIVERY_AUTH_TOKEN}"
-max_retry_attempts = 3
-http_timeout_seconds = 30
-
-[server.delivery.circuit_breaker]
-enabled = true
-failure_threshold = 5
-success_threshold = 2
-timeout_seconds = 30
-half_open_max_calls = 1
-reset_timeout_seconds = 60
-
-# =============================================================================
-# Submission Server (Port 587) - STARTTLS variant
-# =============================================================================
-
-[[server]]
-name = "submission-starttls"
-type = "submission"
-listen_addr = ":587"
-
-# Timeouts
-timeout_seconds = 10
-shutdown_timeout_seconds = 60
-
-# Debugging
-debug = false                        # Enable SMTP protocol debug logging
-
-# Message Processing
-max_message_size = 52428800          # 50MB
-
-# Message Validation Settings
-[server.validation]
-allow_null_sender = false            # Allow bounce messages with null sender (<>)
-missing_headers_action = "reject"    # Action for missing Message-ID/Date headers: "reject", "fix", "none"
-
-# Connection Limits
-[server.limits]
-max_connections = 50
-max_connections_per_user = 5
-
-# TLS Configuration - Port 587 uses STARTTLS
-[server.tls]
-enabled = true
-mode = "starttls"                    # STARTTLS on port 587
-required = true                      # Require STARTTLS before AUTH
-min_tls_version = "1.2"
-
-# DNS Checks - Disabled for submission
-[server.dns_checks]
-require_rdns = false
-require_sender_mx = false
-
-# Junk/Spam Detection
-[server.junk]
-reject_null_sender = false
-check_headers = []
-apply_action = "warn"
-
-# Authentication Configuration
-# Uses GET requests with URL interpolation - supports $email, $ip placeholders
-[server.auth]
-enabled = true                                     # Enable SMTP AUTH (advertise AUTH in EHLO)
-required = true                                    # Require authentication before MAIL FROM
-url = "https://auth.example.com/api/users/$email?ip=$ip"  # GET endpoint with interpolation
-auth_token = "${AUTH_TOKEN}"                        # Authentication token (sent as Bearer token)
-# Backend returns: {"password_hashes": ["$2a$10$...", ...], "allowed_from": ["user@example.com"]}
-
-# Authentication Caching
-# (Same configuration as port 465 - see above for detailed comments)
-[server.auth.cache]
-enabled = true
-positive_ttl = "5m"
-negative_ttl = "1m"
-max_size = 50000
-cleanup_interval = "5m"
-positive_revalidation_window = "30s"
-
-# Authentication Rate Limiting - Protects against brute-force attacks
-# (Same configuration as port 465 - see above for detailed comments)
-[server.auth.rate_limit]
-enabled = true                                     # Enable auth rate limiting
-max_attempts_per_ip_username = 5                   # Failures before blocking user+IP
-ip_username_block_duration = "15m"                 # Block duration for user+IP
-ip_username_window_duration = "10m"                # Sliding window for counting failures
-max_attempts_per_ip = 50                           # Failures before blocking entire IP
-ip_block_duration = "30m"                          # Block duration for IP
-ip_window_duration = "30m"                         # Sliding window for IP failures
-max_attempts_per_username = 100                    # Username tracking threshold (no blocking)
-username_window_duration = "1h"                    # Tracking window for usernames
-delay_start_threshold = 3                          # Failures before delays start
-initial_delay = "1s"                               # First delay
-max_delay = "30s"                                  # Maximum delay
-delay_multiplier = 2.0                             # Delay growth factor
-cache_cleanup_interval = "5m"                      # In-memory cleanup interval
-max_ip_username_entries = 100000                   # Max IP+username tracking entries
-max_ip_entries = 50000                             # Max IP tracking entries
-max_username_entries = 50000                       # Max username tracking entries
-cluster_sync_enabled = true                        # Sync blocks across cluster
-sync_blocks = true                                 # Sync IP blocks across cluster
-sync_failure_counts = true                         # Sync progressive delay counts
-
-# Email Authentication - Disabled for submission (users are authenticated)
-spf_check = false
-dkim_check = false
-arc_check = false
-dmarc_check = false
-
-[server.dnsbl]
-enabled = false
-
-# Per-User Rate Limiting
-[server.rate_limit]
-gossip_enabled = false
-
-[[server.rate_limit.dimensions]]
-name = "per_user_hourly"
-keys = ["AUTHENTICATED_USER"]
-limit = 100
-window_seconds = 3600
-
-[[server.rate_limit.dimensions]]
-name = "per_user_daily"
-keys = ["AUTHENTICATED_USER"]
-limit = 1000
-window_seconds = 86400
-
-# Email Delivery Configuration (per-server)
-[server.delivery]
-url = "https://your-worker.example.com/email"
-auth_token = "${DELIVERY_AUTH_TOKEN}"
-max_retry_attempts = 3
-http_timeout_seconds = 30
-
-[server.delivery.circuit_breaker]
-enabled = true
-failure_threshold = 5
-success_threshold = 2
-timeout_seconds = 30
-half_open_max_calls = 1
-reset_timeout_seconds = 60
-
-# =============================================================================
-# DNS Configuration (shared across all servers)
-# =============================================================================
+[logging]
+level = "info"
+format = "console"
 
 [dns]
-# Custom DNS resolvers (empty = use system DNS)
 resolvers = []
-# Example with Cloudflare:
-# resolvers = ["1.1.1.1:53", "1.0.0.1:53"]
-
 timeout_seconds = 5
-cache_ttl_seconds = 300              # Cache DNS results for 5 minutes
-cache_negative_ttl = 60              # Cache negative results for 1 minute
-
-# =============================================================================
-# Storage Configuration (for TLS certificates and stats sync)
-# =============================================================================
+cache_ttl_seconds = 300
+cache_negative_ttl = 60
 
 [storage]
-# Backend: "s3" (production) or "filesystem" (single-node)
 backend = "s3"
-
-# Filesystem backend (single-node only)
 filesystem_path = "/var/lib/mizu/storage"
-
-# S3 backend settings
 s3_endpoint = "s3.amazonaws.com"
-s3_bucket = "mizu-storage"
-s3_prefix = "certs/"
-s3_access_key = "${S3_ACCESS_KEY}"           # Set via environment variable
-s3_secret_key = "${S3_SECRET_KEY}"           # Set via environment variable
+s3_bucket = "email-mx-certs"
+s3_prefix = ""
+s3_access_key = ""
+s3_secret_key = ""
 s3_region = "us-east-1"
 
-# =============================================================================
-# TLS Certificate Management
-# =============================================================================
-# REQUIRED if any server has [server.tls] enabled.
-# Configures Let's Encrypt automatic certificate provisioning via ACME.
-# When enabled, mizu-server will:
-#   - Start HTTP server on port 80 for ACME HTTP-01 challenges
-#   - Start HTTPS server on port 443 for ACME TLS-ALPN-01 challenges
-#   - Automatically provision certificates for all domains listed below
-#   - Certificates are provisioned on-demand when clients connect (STARTTLS or implicit TLS)
-# =============================================================================
-
 [tls]
-email = "admin@example.com"          # Email for Let's Encrypt notifications (REQUIRED)
-domains = ["mail.example.com", "submit.example.com"]  # Domains to provision certificates for (REQUIRED)
-default_domain = ""                  # Default domain for SNI-less connections (optional, defaults to first domain)
-use_production = true                # Use Let's Encrypt production (false = staging for testing)
-use_local_ca = false                 # Use local CA (for development only)
-renew_before_days = 30               # Days before expiry to renew (default: 30)
-fallback_cache_dir = ""              # Local fallback directory for certificates (optional, empty = no fallback)
-sync_interval_minutes = 5            # How often to sync certificates in minutes (default: 5, 0 = no sync)
+enabled = false
+provider = "file"
+[tls.file]
+cert_file = ""
+key_file = ""
+[tls.letsencrypt]
+email = "admin@example.com"
+domains = []
+default_domain = ""
+staging = false
+renew_before_days = 30
+fallback_cache_dir = ""
+sync_interval_minutes = 5
 
-# =============================================================================
-# Health Check HTTP Server
-# =============================================================================
+[blacklists]
+enabled = true
+lists = ["zen.spamhaus.org"]
+timeout_seconds = 3
+check_helo_resolves = false
 
 [health]
-enabled = true                       # Enable health endpoints (/health, /api/stats, /api/flush-cache)
+enabled = true
 listen_addr = ":8080"
-username = "admin"                   # HTTP Basic Auth username (empty = no auth)
-password = "${HEALTH_PASSWORD}"      # Set via environment variable (empty = no auth)
-
-# =============================================================================
-# Prometheus Metrics
-# =============================================================================
-
-[metrics]
-enabled = true                       # Enable Prometheus metrics endpoint (/metrics)
-path = "/metrics"
-username = ""                        # Optional HTTP Basic Auth (empty = no auth)
+username = ""
 password = ""
 
-# =============================================================================
-# Statistics & Reputation Tracking
-# =============================================================================
+[metrics]
+enabled = true
+path = "/metrics"
+username = ""
+password = ""
 
 [stats]
-enabled = true                       # Enable statistics and reputation tracking (set to false to disable)
-retention_seconds = 86400            # How long to keep stats in memory (24 hours)
-max_ip_entries = 100000              # Maximum IP entries to track (0 = unlimited)
-max_domain_entries = 50000           # Maximum domain entries to track (0 = unlimited)
-sync_enabled = false                 # Enable distributed stats sync via S3 (requires cluster.enabled)
-sync_interval_seconds = 60           # How often to sync stats to S3           
+enabled = true
+retention_seconds = 86400
+sync_enabled = false
+sync_interval_seconds = 60
+max_ip_entries = 100000
+max_domain_entries = 50000
 
 [cluster]
-enabled = false                      # Enable cluster mode (memberlist)
-node_name = "mizu-01"                # This node's name (defaults to hostname)
-addr = "192.168.1.1:7946"            # Gossip listen address (can be "IP:port" or just "IP", must be specific IP, NOT 0.0.0.0 or localhost)
-port = 7946                          # Gossip port (used if not specified in addr, default: 7946)
-
-# Seed nodes for cluster discovery
-peers = [
-    "192.168.1.2:7946",              # Other cluster nodes to connect to
-    "192.168.1.3:7946"
-]
-
-# Encryption key for cluster communication (32 bytes, base64 encoded)
-secret_key = "${CLUSTER_SECRET_KEY}" # Set via environment variable, generate with: openssl rand -base64 32
+enabled = false
+addr = ""
+port = 7946
+node_name = ""
+peers = []
+secret_key = ""

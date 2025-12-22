@@ -14,7 +14,7 @@ import (
 
 	"github.com/hashicorp/memberlist"
 
-	"migadu/mizu/pkg/logging"
+	"migadu/mizu/pkg/concurrency"
 )
 
 // MessageType identifies the type of gossip message
@@ -160,7 +160,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 	cluster.updateLeader()
 
 	// Start periodic leader check to handle failures (every second)
-	logging.SafeGo(cfg.Logger, "cluster-leader-ticker", func() {
+	concurrency.SafeGo(cfg.Logger, "cluster-leader-ticker", func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
@@ -403,7 +403,7 @@ func (c *Cluster) NotifyJoin(node *memberlist.Node) {
 
 	// Re-evaluate leader asynchronously to avoid deadlock
 	// (memberlist holds a read lock when calling this)
-	go c.updateLeader()
+	concurrency.SafeGo(c.logger, "cluster-update-leader-join", c.updateLeader)
 
 	if c.eventDelegate != nil {
 		c.eventDelegate.NotifyJoin(node)
@@ -418,7 +418,7 @@ func (c *Cluster) NotifyLeave(node *memberlist.Node) {
 
 	// Re-evaluate leader asynchronously to avoid deadlock
 	// (memberlist holds a read lock when calling this)
-	go c.updateLeader()
+	concurrency.SafeGo(c.logger, "cluster-update-leader-leave", c.updateLeader)
 
 	if c.eventDelegate != nil {
 		c.eventDelegate.NotifyLeave(node)

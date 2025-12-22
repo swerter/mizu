@@ -8,13 +8,14 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"migadu/mizu/pkg/logging"
+	"migadu/mizu/pkg/concurrency"
 	"net/http"
 	"time"
 
+	"log/slog"
+
 	"github.com/minio/minio-go/v7"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"log/slog"
 )
 
 // Checker defines an interface for components that can report their health status.
@@ -246,7 +247,7 @@ func (s *Server) Start() {
 	}
 
 	s.logger.Info(fmt.Sprintf("Starting health/metrics server on %s", s.listenAddr))
-	logging.SafeGo(s.logger, "health-server", func() {
+	concurrency.SafeGo(s.logger, "health-server", func() {
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			s.logger.Error("Health/metrics server error", "error", err)
 		}
@@ -279,7 +280,7 @@ func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
 
 	for _, checker := range s.checkers {
 		c := checker // Capture loop variable
-		logging.SafeGo(s.logger, "health-checker-"+c.Name(), func() {
+		concurrency.SafeGo(s.logger, "health-checker-"+c.Name(), func() {
 			status := c.CheckHealth()
 			resultsChan <- struct {
 				Name   string

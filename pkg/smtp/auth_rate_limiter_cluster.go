@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/gob"
 	"log/slog"
+	"migadu/mizu/pkg/cluster"
+	"migadu/mizu/pkg/concurrency"
 	"sync"
 	"time"
-
-	"migadu/mizu/pkg/cluster"
 )
 
 // AuthRateLimitEventType identifies the type of auth rate limit event
@@ -65,7 +65,7 @@ func NewClusterAuthRateLimiter(limiter *AuthRateLimiter, clusterMgr *cluster.Clu
 	}
 
 	// Start broadcast routine
-	go cl.broadcastRoutine()
+	concurrency.SafeGo(logger, "auth-rate-limiter-cluster-broadcast", cl.broadcastRoutine)
 
 	return cl
 }

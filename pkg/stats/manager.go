@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"migadu/mizu/pkg/concurrency"
 	"migadu/mizu/pkg/health"
 
 	"log/slog"
@@ -121,10 +122,10 @@ func (m *Manager) Start() {
 	m.logger.Info(fmt.Sprintf("Starting stats manager with %v retention", m.retentionDuration))
 
 	// Start cleanup goroutine
-	go m.cleanupLoop()
+	concurrency.SafeGo(m.logger, "stats-manager-cleanup", m.cleanupLoop)
 
 	// Start event processing goroutine
-	go m.processEventsLoop()
+	concurrency.SafeGo(m.logger, "stats-manager-events", m.processEventsLoop)
 }
 
 // Stop stops the cleanup goroutine
@@ -162,7 +163,7 @@ func (m *Manager) processEventsLoop() {
 			)
 			// Critical: restart the loop if it panics
 			m.logger.Warn("Restarting stats event processing loop after panic")
-			go m.processEventsLoop()
+			concurrency.SafeGo(m.logger, "stats-manager-events-restart", m.processEventsLoop)
 		}
 	}()
 

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"migadu/mizu/pkg/concurrency"
+
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -124,13 +126,13 @@ func (fc *FallbackCache) Get(ctx context.Context, name string) ([]byte, error) {
 			fc.logger.Info("FallbackCache: Certificate found in S3 - syncing to local cache", "name", name)
 			fc.markS3Available()
 			// Store in local cache for future fast access
-			go func() {
+			concurrency.SafeGo(fc.logger, "tls-cert-sync-to-local", func() {
 				if putErr := fc.fallback.Put(context.Background(), name, data); putErr != nil {
 					fc.logger.Warn("FallbackCache: Failed to sync certificate to local cache", "error", putErr)
 				} else {
 					fc.logger.Debug("FallbackCache: Certificate synced to local cache", "name", name)
 				}
-			}()
+			})
 			return data, nil
 		}
 
@@ -183,7 +185,9 @@ func (fc *FallbackCache) Put(ctx context.Context, name string, data []byte) erro
 	}
 
 	// Schedule S3 sync for later (best effort)
-	go fc.syncToS3(name, data)
+	concurrency.SafeGo(fc.logger, "tls-cert-sync-to-s3", func() {
+		fc.syncToS3(name, data)
+	})
 
 	return nil
 }

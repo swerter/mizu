@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"migadu/mizu/pkg/concurrency"
 	"migadu/mizu/pkg/config"
-	"migadu/mizu/pkg/logging"
 	"migadu/mizu/pkg/metrics"
 )
 
@@ -151,7 +151,7 @@ func NewAuthRateLimiter(cfg config.ServerAuthRateLimitConfig, logger *slog.Logge
 	}
 
 	// Start cleanup goroutine with panic recovery
-	logging.SafeGo(logger, "auth-rate-limiter-cleanup", limiter.cleanupLoop)
+	concurrency.SafeGo(logger, "auth-rate-limiter-cleanup", limiter.cleanupLoop)
 
 	return limiter, nil
 }

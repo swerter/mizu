@@ -147,6 +147,6 @@
 //
 // # Panic Recovery
 //
-// All goroutines use panic recovery to prevent crashes. The logging.SafeGo
+// All goroutines use panic recovery to prevent crashes. The concurrency.SafeGo
 // helper ensures WaitGroups are properly cleaned up even if a goroutine panics.
 package smtp

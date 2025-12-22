@@ -12,7 +12,7 @@ import (
 
 	"log/slog"
 
-	"migadu/mizu/pkg/logging"
+	"migadu/mizu/pkg/concurrency"
 )
 
 // resolver defines an interface for DNS lookups, allowing for mocking in tests.
@@ -75,7 +75,7 @@ func (c *Checker) CheckIP(ip net.IP) (bool, string, error) {
 
 	for _, list := range c.lists {
 		wg.Add(1)
-		logging.SafeGoWithWg(c.logger, fmt.Sprintf("blacklist-lookup-%s", list), &wg, func(l string) func() {
+		concurrency.SafeGoWithWg(c.logger, fmt.Sprintf("blacklist-lookup-%s", list), &wg, func(l string) func() {
 			return func() {
 				query := fmt.Sprintf("%s.%s", reversedIP, l)
 				addrs, err := c.resolver.LookupIPAddr(ctx, query)
@@ -85,25 +85,45 @@ func (c *Checker) CheckIP(ip net.IP) (bool, string, error) {
 					return
 				}
 				if len(addrs) > 0 {
-					// IP is listed. Check if it's Spamhaus to get detailed reason
-					reason := l
-					if strings.Contains(l, "spamhaus") && len(addrs) > 0 {
-						// Extract last octet from response (e.g., 127.0.0.2 -> 2)
-						responseIP := addrs[0].IP.To4()
-						if responseIP != nil && len(responseIP) == 4 {
-							code := responseIP[3]
-							spamhausReason := getSpamhausReason(code)
-							reason = fmt.Sprintf("%s (%s)", l, spamhausReason)
-						}
+					// Extract response IP to validate it's a legitimate listing
+					responseIP := addrs[0].IP.To4()
+					if responseIP == nil || len(responseIP) != 4 {
+						c.logger.Debug("invalid dnsbl response", "query", query)
+						return
 					}
-					resultChan <- result{list: l, reason: reason}
+
+					// Validate response is in 127.0.0.x range (standard DNSBL format)
+					if responseIP[0] != 127 || responseIP[1] != 0 || responseIP[2] != 0 {
+						c.logger.Debug("invalid dnsbl response range", "query", query, "response", responseIP.String())
+						return
+					}
+
+					code := responseIP[3]
+
+					// For Spamhaus, codes 254-255 are query errors, not actual listings
+					// Valid listing codes are 2-11
+					if strings.Contains(l, "spamhaus") {
+						if code >= 254 {
+							c.logger.Debug("spamhaus query error", "query", query, "code", code)
+							return
+						}
+						if code < 2 || (code > 11 && code < 254) {
+							c.logger.Debug("unexpected spamhaus code", "query", query, "code", code)
+							return
+						}
+						spamhausReason := getSpamhausReason(code)
+						resultChan <- result{list: l, reason: fmt.Sprintf("%s (%s)", l, spamhausReason)}
+					} else {
+						// For other DNSBLs, any response in 127.0.0.x is considered a listing
+						resultChan <- result{list: l, reason: l}
+					}
 				}
 			}
 		}(list))
 	}
 
 	// Wait for all lookups to complete in a separate goroutine to not block the timeout.
-	logging.SafeGo(c.logger, "blacklist-closer", func() {
+	concurrency.SafeGo(c.logger, "blacklist-closer", func() {
 		wg.Wait()
 		close(resultChan)
 	})

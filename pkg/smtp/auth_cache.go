@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
+	"migadu/mizu/pkg/concurrency"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,7 +79,7 @@ func NewAuthCache(positiveTTL, negativeTTL time.Duration, maxSize int, cleanupIn
 	}
 
 	// Start background cleanup goroutine
-	go cache.cleanupLoop()
+	concurrency.SafeGo(logger, "auth-cache-cleanup", cache.cleanupLoop)
 
 	return cache
 }

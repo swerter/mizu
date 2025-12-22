@@ -3,11 +3,14 @@ package dns
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"migadu/mizu/pkg/concurrency"
 	"migadu/mizu/pkg/metrics"
 )
 
@@ -28,6 +31,7 @@ type ResilientResolver struct {
 	cacheMu  sync.RWMutex           // Protects cache
 	cacheTTL time.Duration          // How long to cache responses
 	metrics  *metrics.Metrics       // Prometheus metrics (optional)
+	logger   *slog.Logger           // Logger for SafeGo
 }
 
 // NewResilientResolver creates a new resilient DNS resolver with caching.
@@ -42,16 +46,20 @@ func NewResilientResolver(servers []string, timeout time.Duration, cacheTTL time
 		cacheTTL = 5 * time.Minute // Default cache TTL
 	}
 
+	// Create a logger for the resolver
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
 	rr := &ResilientResolver{
 		servers:  servers,
 		timeout:  timeout,
 		cache:    make(map[string]*cacheEntry),
 		cacheTTL: cacheTTL,
 		metrics:  nil, // Will be set via SetMetrics()
+		logger:   logger,
 	}
 
 	// Start cache cleanup goroutine
-	go rr.cleanupExpiredCache()
+	concurrency.SafeGo(logger, "dns-resolver-cache-cleanup", rr.cleanupExpiredCache)
 
 	resolver := &net.Resolver{
 		PreferGo: true,

@@ -3,6 +3,8 @@ package tls
 import (
 	"context"
 	"time"
+
+	"migadu/mizu/pkg/concurrency"
 )
 
 // startCertificateSyncWorker starts a background worker that periodically syncs certificates
@@ -10,7 +12,7 @@ import (
 func (m *Manager) startCertificateSyncWorker(syncInterval time.Duration) {
 	m.logger.Info("Starting certificate sync worker", "interval", syncInterval)
 
-	go func() {
+	concurrency.SafeGo(m.logger, "tls-cert-sync-worker", func() {
 		ticker := time.NewTicker(syncInterval)
 		defer ticker.Stop()
 
@@ -29,7 +31,7 @@ func (m *Manager) startCertificateSyncWorker(syncInterval time.Duration) {
 				return
 			}
 		}
-	}()
+	})
 }
 
 // Shutdown gracefully stops the TLS manager and its background workers

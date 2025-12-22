@@ -375,8 +375,10 @@ func TestValidateConfig_ClusterBindAddr(t *testing.T) {
 			cfg.Local = false // Use production mode to trigger cluster validation
 			cfg.Storage.Backend = "filesystem"
 			cfg.Storage.FilesystemPath = "/tmp/mizu"
-			cfg.TLS.Email = "test@example.com"
-			cfg.TLS.Domains = []string{"test.example.com"}
+			cfg.TLS.Enabled = true
+			cfg.TLS.Provider = "letsencrypt"
+			cfg.TLS.LetsEncrypt.Email = "test@example.com"
+			cfg.TLS.LetsEncrypt.Domains = []string{"test.example.com"}
 
 			// Add a test server (DefaultConfig no longer includes servers)
 			cfg.Servers = []ServerConfig{

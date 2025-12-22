@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"migadu/mizu/pkg/cluster"
+	"migadu/mizu/pkg/concurrency"
 	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/health"
 	"migadu/mizu/pkg/logging"
@@ -74,7 +75,7 @@ func main() {
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	logging.SafeGo(logger, "signal-handler", func() {
+	concurrency.SafeGo(logger, "signal-handler", func() {
 		<-sigChan
 		logger.Info("Received shutdown signal")
 		cancel()
@@ -104,7 +105,7 @@ func main() {
 	if cfg.Local {
 		logger.Info("Running in LOCAL mode - TLS disabled, messages will be dumped to terminal")
 	} else {
-		logger.Info("Initializing TLS subsystem", "domains", cfg.TLS.Domains, "email", cfg.TLS.Email)
+		logger.Info("Initializing TLS subsystem", "enabled", cfg.TLS.Enabled, "provider", cfg.TLS.Provider)
 		tlsConfig, s3Client, tlsMgr, err = initTLS(cfg, clusterMgr, logger)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to initialize TLS: %v", err))
@@ -112,11 +113,11 @@ func main() {
 		}
 		logger.Info("initTLS completed", "tlsMgr_nil", tlsMgr == nil, "tlsConfig_nil", tlsConfig == nil)
 
-		// Start ACME challenge servers
+		// Start ACME challenge servers (only for Let's Encrypt)
 		if tlsMgr != nil {
 			logger.Info("TLS manager initialized successfully - starting ACME challenge servers")
 			// Start HTTPS server on port 443 for TLS-ALPN-01 challenges (primary method)
-			logging.SafeGo(logger, "acme-tls-alpn-server", func() {
+			concurrency.SafeGo(logger, "acme-tls-alpn-server", func() {
 				logger.Info("Starting HTTPS server for ACME TLS-ALPN-01 challenges on :443")
 				server := &http.Server{
 					Addr:      ":443",
@@ -129,15 +130,16 @@ func main() {
 			})
 
 			// Start HTTP server on port 80 for HTTP-01 challenges (fallback)
-			logging.SafeGo(logger, "acme-http-server", func() {
+			concurrency.SafeGo(logger, "acme-http-server", func() {
 				logger.Info("Starting HTTP server for ACME HTTP-01 challenges on :80")
 				if err := http.ListenAndServe(":80", tlsMgr.HTTPHandler()); err != nil {
 					logger.Error("HTTP-01 challenge server failed", "error", err)
 				}
 			})
 		} else {
-			logger.Warn("TLS manager is nil - ACME challenge servers will NOT start",
-				"tls_domains", cfg.TLS.Domains,
+			logger.Info("TLS manager is nil - ACME challenge servers will NOT start",
+				"tls_enabled", cfg.TLS.Enabled,
+				"tls_provider", cfg.TLS.Provider,
 				"cluster_enabled", cfg.Cluster.Enabled)
 		}
 	}
@@ -180,6 +182,7 @@ func main() {
 		shutdownChan chan struct{}
 	}
 	servers := make([]serverInstance, 0)
+	var successfullyStarted atomic.Int32
 
 	// Start each configured SMTP server instance
 	for i := range cfg.Servers {
@@ -226,17 +229,22 @@ func main() {
 		srvCfg := serverCfg
 		srvCtx := serverCtx
 		be := backend
-		logging.SafeGoWithWg(logger, fmt.Sprintf("smtp-server-%s", srvCfg.Name), &serverWg, func() {
-			runSMTPServerInstance(srvCtx, srvCfg, be, tlsConfig, logger)
+		started := &successfullyStarted
+		concurrency.SafeGoWithWg(logger, fmt.Sprintf("smtp-server-%s", srvCfg.Name), &serverWg, func() {
+			runSMTPServerInstance(srvCtx, srvCfg, be, tlsConfig, logger, started)
 		})
 	}
 
-	if len(servers) == 0 {
-		logger.Error("No SMTP servers enabled")
+	// Wait briefly for servers to start listening
+	time.Sleep(100 * time.Millisecond)
+
+	startedCount := successfullyStarted.Load()
+	if startedCount == 0 {
+		logger.Error("No SMTP servers successfully started")
 		os.Exit(1)
 	}
 
-	logger.Info(fmt.Sprintf("Started %d SMTP server(s)", len(servers)))
+	logger.Info(fmt.Sprintf("Started %d SMTP server(s)", startedCount))
 
 	// Wait for shutdown signal
 	<-ctx.Done()
@@ -250,7 +258,7 @@ func main() {
 
 	// Phase 2: Wait for all servers to shut down
 	shutdownDone := make(chan struct{})
-	logging.SafeGo(logger, "shutdown-wait", func() {
+	concurrency.SafeGo(logger, "shutdown-wait", func() {
 		serverWg.Wait()
 		close(shutdownDone)
 	})
@@ -415,6 +423,12 @@ func initStorageBackend(cfg *config.Config, logger *slog.Logger) (storage.Backen
 
 // initTLS sets up the storage backend and TLS certificate management using autocert.
 func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logger) (*tls.Config, *minio.Client, *tlsmgr.Manager, error) {
+	// Check if TLS is enabled
+	if !cfg.TLS.Enabled {
+		logger.Info("TLS management disabled in configuration")
+		return nil, nil, nil, nil
+	}
+
 	storageBackend, s3Client, err := initStorageBackend(cfg, logger)
 	if err != nil {
 		return nil, nil, nil, err
@@ -423,61 +437,87 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logge
 	var tlsConfig *tls.Config
 	var tlsMgr *tlsmgr.Manager
 
-	// Get leader function from cluster
-	var isLeaderF func() bool
-	if clusterMgr != nil {
-		isLeaderF = clusterMgr.IsLeader
-	} else {
-		// Fallback: always return true if no cluster (single-node mode)
-		isLeaderF = func() bool { return true }
-		logger.Warn("No cluster configured - autocert running in single-node mode")
+	// Handle different TLS providers
+	switch cfg.TLS.Provider {
+	case "file":
+		// Load certificates from files
+		if cfg.TLS.File.CertFile == "" || cfg.TLS.File.KeyFile == "" {
+			return nil, nil, nil, fmt.Errorf("tls.file.cert_file and tls.file.key_file are required when provider=file")
+		}
+		cert, err := tls.LoadX509KeyPair(cfg.TLS.File.CertFile, cfg.TLS.File.KeyFile)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to load TLS certificate: %w", err)
+		}
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		logger.Info("File-based TLS certificates loaded", "cert_file", cfg.TLS.File.CertFile, "key_file", cfg.TLS.File.KeyFile)
+		return tlsConfig, s3Client, nil, nil
+
+	case "letsencrypt":
+		// Get leader function from cluster
+		var isLeaderF func() bool
+		if clusterMgr != nil {
+			isLeaderF = clusterMgr.IsLeader
+		} else {
+			// Fallback: always return true if no cluster (single-node mode)
+			isLeaderF = func() bool { return true }
+			logger.Warn("No cluster configured - autocert running in single-node mode")
+		}
+
+		// Calculate renewal window
+		var renewBefore time.Duration
+		if cfg.TLS.LetsEncrypt.RenewBeforeDays > 0 {
+			renewBefore = time.Duration(cfg.TLS.LetsEncrypt.RenewBeforeDays) * 24 * time.Hour
+		}
+
+		// Calculate sync interval
+		var syncInterval time.Duration
+		if cfg.TLS.LetsEncrypt.SyncIntervalMinutes > 0 {
+			syncInterval = time.Duration(cfg.TLS.LetsEncrypt.SyncIntervalMinutes) * time.Minute
+		} else if cfg.TLS.LetsEncrypt.SyncIntervalMinutes == 0 && cfg.TLS.LetsEncrypt.FallbackCacheDir != "" {
+			// Default to 5 minutes if fallback cache is enabled but interval not specified
+			syncInterval = 5 * time.Minute
+		}
+
+		// Build storage prefix for certificates (append "certs/" to base prefix)
+		certStoragePrefix := cfg.Storage.S3Prefix + "certs/"
+
+		// Create TLS manager with autocert using storage backend abstraction
+		tlsMgr, err = tlsmgr.NewManager(tlsmgr.Config{
+			Enabled:        true,
+			Email:          cfg.TLS.LetsEncrypt.Email,
+			Domains:        cfg.TLS.LetsEncrypt.Domains,
+			DefaultDomain:  cfg.TLS.LetsEncrypt.DefaultDomain,
+			StorageBackend: storageBackend,
+			StoragePrefix:  certStoragePrefix,
+			IsLeaderF:      isLeaderF,
+			Staging:        cfg.TLS.LetsEncrypt.Staging,
+			RenewBefore:    renewBefore,
+			FallbackDir:    cfg.TLS.LetsEncrypt.FallbackCacheDir,
+			SyncInterval:   syncInterval,
+		}, logger)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to create TLS manager: %w", err)
+		}
+
+		tlsConfig = tlsMgr.TLSConfig()
+		if tlsConfig == nil {
+			return nil, nil, nil, fmt.Errorf("TLS manager returned nil config")
+		}
+
+		logger.Info(fmt.Sprintf("Autocert initialized for domains: %v", cfg.TLS.LetsEncrypt.Domains))
+
+		// Set default minimum TLS version (can be overridden per-server)
+		tlsConfig.MinVersion = tls.VersionTLS12
+		logger.Info("Default TLS configuration ready (per-server min version can be set in [server.tls])")
+
+		return tlsConfig, s3Client, tlsMgr, nil
+
+	default:
+		return nil, nil, nil, fmt.Errorf("unknown TLS provider: %s (must be 'file' or 'letsencrypt')", cfg.TLS.Provider)
 	}
-
-	// Calculate renewal window
-	var renewBefore time.Duration
-	if cfg.TLS.RenewBeforeDays > 0 {
-		renewBefore = time.Duration(cfg.TLS.RenewBeforeDays) * 24 * time.Hour
-	}
-
-	// Calculate sync interval
-	var syncInterval time.Duration
-	if cfg.TLS.SyncIntervalMinutes > 0 {
-		syncInterval = time.Duration(cfg.TLS.SyncIntervalMinutes) * time.Minute
-	} else if cfg.TLS.SyncIntervalMinutes == 0 && cfg.TLS.FallbackCacheDir != "" {
-		// Default to 5 minutes if fallback cache is enabled but interval not specified
-		syncInterval = 5 * time.Minute
-	}
-
-	// Create TLS manager with autocert using storage backend abstraction
-	tlsMgr, err = tlsmgr.NewManager(tlsmgr.Config{
-		Enabled:        true,
-		Email:          cfg.TLS.Email,
-		Domains:        cfg.TLS.Domains,
-		DefaultDomain:  cfg.TLS.DefaultDomain,
-		StorageBackend: storageBackend,
-		StoragePrefix:  cfg.Storage.S3Prefix,
-		IsLeaderF:      isLeaderF,
-		Staging:        !cfg.TLS.UseProduction,
-		RenewBefore:    renewBefore,
-		FallbackDir:    cfg.TLS.FallbackCacheDir,
-		SyncInterval:   syncInterval,
-	}, logger)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create TLS manager: %w", err)
-	}
-
-	tlsConfig = tlsMgr.TLSConfig()
-	if tlsConfig == nil {
-		return nil, nil, nil, fmt.Errorf("TLS manager returned nil config")
-	}
-
-	logger.Info(fmt.Sprintf("Autocert initialized for domains: %v", cfg.TLS.Domains))
-
-	// Set default minimum TLS version (can be overridden per-server)
-	tlsConfig.MinVersion = tls.VersionTLS12
-	logger.Info("Default TLS configuration ready (per-server min version can be set in [server.tls])")
-
-	return tlsConfig, s3Client, tlsMgr, nil
 }
 
 // initCluster initializes the memberlist cluster for distributed operations
@@ -639,15 +679,16 @@ func startStatsLoops(ctx context.Context, statsMgr *stats.Manager, s3Client *min
 		}
 	}
 
-	// Start export loop
-	logging.SafeGo(logger, "stats-export-loop", func() {
-		statsMgr.StartExportLoop(ctx, s3Client, cfg.Storage.S3Bucket, cfg.Storage.S3Prefix,
+	// Start export loop (use stats/ subdirectory)
+	statsPrefix := cfg.Storage.S3Prefix + "stats/"
+	concurrency.SafeGo(logger, "stats-export-loop", func() {
+		statsMgr.StartExportLoop(ctx, s3Client, cfg.Storage.S3Bucket, statsPrefix,
 			hostname, time.Duration(cfg.Stats.SyncIntervalSeconds)*time.Second)
 	})
 
 	// Start sync loop
-	logging.SafeGo(logger, "stats-sync-loop", func() {
-		statsMgr.StartSyncLoop(ctx, s3Client, cfg.Storage.S3Bucket, cfg.Storage.S3Prefix,
+	concurrency.SafeGo(logger, "stats-sync-loop", func() {
+		statsMgr.StartSyncLoop(ctx, s3Client, cfg.Storage.S3Bucket, statsPrefix,
 			time.Duration(cfg.Stats.SyncIntervalSeconds)*time.Second)
 	})
 }
@@ -688,11 +729,13 @@ func createServerBackend(
 			}
 		}
 
+		// Use connections/ subdirectory for distributed tracking
+		connectionsPrefix := globalCfg.Storage.S3Prefix + "connections/"
 		distTracker = smtp.NewDistributedTracker(
 			connTracker,
 			s3Client,
 			globalCfg.Storage.S3Bucket,
-			globalCfg.Storage.S3Prefix,
+			connectionsPrefix,
 			smtp.DistributedConfig{
 				Hostname:          nodeName,
 				Cluster:           clusterMgr,
@@ -937,7 +980,7 @@ func initRecipientValidator(serverCfg *config.ServerConfig, logger *slog.Logger)
 }
 
 // runSMTPServerInstance runs a single SMTP server instance
-func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, be *smtp.Backend, tlsConfig *tls.Config, logger *slog.Logger) {
+func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, be *smtp.Backend, tlsConfig *tls.Config, logger *slog.Logger, successCounter *atomic.Int32) {
 	server := gosmtp.NewServer(be)
 	server.Addr = serverCfg.ListenAddr
 	server.Domain = serverCfg.Hostname
@@ -999,9 +1042,12 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 	}
 	defer listener.Close()
 
+	// Mark server as successfully started
+	successCounter.Add(1)
+
 	// Start server in background
 	serverErrors := make(chan error, 1)
-	logging.SafeGo(logger, "smtp-server", func() {
+	concurrency.SafeGo(logger, "smtp-server", func() {
 		logger.Info("SMTP server listening",
 			"server", serverCfg.Name,
 			"type", serverCfg.Type,
@@ -1044,7 +1090,7 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 
 		// Wait for active sessions
 		waitDone := make(chan struct{})
-		logging.SafeGo(logger, "shutdown-wait", func() {
+		concurrency.SafeGo(logger, "shutdown-wait", func() {
 			be.ActiveSessionsWg.Wait()
 			close(waitDone)
 		})

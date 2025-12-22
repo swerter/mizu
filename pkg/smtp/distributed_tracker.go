@@ -8,15 +8,17 @@ import (
 	"fmt"
 	"io"
 	"migadu/mizu/pkg/cluster"
+	"migadu/mizu/pkg/concurrency"
 	"migadu/mizu/pkg/health"
 	"net"
 	"path"
 	"sync"
 	"time"
 
+	"log/slog"
+
 	"github.com/hashicorp/memberlist"
 	"github.com/minio/minio-go/v7"
-	"log/slog"
 )
 
 // ClusterManager interface allows for testing and abstraction
@@ -208,28 +210,26 @@ func (dt *DistributedTracker) Start() {
 	// Start memberlist gossip loop
 	if dt.cluster != nil {
 		dt.wg.Add(1)
-		go dt.gossipLoop()
+		concurrency.SafeGoWithWg(dt.logger, "distributed-tracker-gossip", &dt.wg, dt.gossipLoopInner)
 	}
 
 	// Start S3 sync loop (if configured - for cold start and backup)
 	if dt.s3Client != nil && dt.s3Bucket != "" {
 		dt.wg.Add(1)
-		go dt.s3SyncLoop()
+		concurrency.SafeGoWithWg(dt.logger, "distributed-tracker-s3-sync", &dt.wg, dt.s3SyncLoopInner)
 	}
 
 	// Start recipient cache cleanup loop
 	dt.wg.Add(1)
-	go dt.recipientCacheCleanupLoop()
+	concurrency.SafeGoWithWg(dt.logger, "distributed-tracker-recipient-cleanup", &dt.wg, dt.recipientCacheCleanupLoopInner)
 
 	// Start stale peer cleanup loop
 	dt.wg.Add(1)
-	go dt.stalePeerCleanupLoop()
+	concurrency.SafeGoWithWg(dt.logger, "distributed-tracker-peer-cleanup", &dt.wg, dt.stalePeerCleanupLoopInner)
 }
 
-// recipientCacheCleanupLoop periodically removes expired entries from recipient cache
-func (dt *DistributedTracker) recipientCacheCleanupLoop() {
-	defer dt.wg.Done()
-
+// recipientCacheCleanupLoopInner is the inner function for recipient cache cleanup
+func (dt *DistributedTracker) recipientCacheCleanupLoopInner() {
 	ticker := time.NewTicker(1 * time.Minute) // Cleanup every minute
 	defer ticker.Stop()
 
@@ -273,10 +273,8 @@ func (dt *DistributedTracker) cleanupExpiredRecipients() {
 	}
 }
 
-// stalePeerCleanupLoop periodically removes stale peer connections
-func (dt *DistributedTracker) stalePeerCleanupLoop() {
-	defer dt.wg.Done()
-
+// stalePeerCleanupLoopInner is the inner function for stale peer cleanup
+func (dt *DistributedTracker) stalePeerCleanupLoopInner() {
 	ticker := time.NewTicker(5 * time.Minute) // Cleanup every 5 minutes
 	defer ticker.Stop()
 
@@ -422,10 +420,8 @@ func (dt *DistributedTracker) estimateGlobalCount(remoteAddr string) int {
 	return localCount + peerTotal
 }
 
-// gossipLoop periodically broadcasts connection state via memberlist
-func (dt *DistributedTracker) gossipLoop() {
-	defer dt.wg.Done()
-
+// gossipLoopInner is the inner function for gossip loop
+func (dt *DistributedTracker) gossipLoopInner() {
 	ticker := time.NewTicker(dt.gossipInterval)
 	defer ticker.Stop()
 
@@ -618,10 +614,8 @@ func (dt *DistributedTracker) mergeRecipientCache(peerCache *RecipientCacheSnaps
 	}
 }
 
-// s3SyncLoop periodically syncs connection state to/from S3
-func (dt *DistributedTracker) s3SyncLoop() {
-	defer dt.wg.Done()
-
+// s3SyncLoopInner is the inner function for S3 sync loop
+func (dt *DistributedTracker) s3SyncLoopInner() {
 	ticker := time.NewTicker(dt.s3SyncInterval)
 	defer ticker.Stop()
 

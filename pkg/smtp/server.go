@@ -19,9 +19,9 @@ import (
 	"time"
 
 	"migadu/mizu/pkg/blacklist"
+	"migadu/mizu/pkg/concurrency"
 	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/dns"
-	"migadu/mizu/pkg/logging"
 	"migadu/mizu/pkg/metrics"
 	"migadu/mizu/pkg/poster"
 	"migadu/mizu/pkg/stats"
@@ -770,7 +770,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		ip := net.ParseIP(ipStr)
 		if ip != nil && s.serverConfig.SPFCheck {
 			wg.Add(1)
-			logging.SafeGo(s.Logger, "spf-check", func() {
+			concurrency.SafeGo(s.Logger, "spf-check", func() {
 				defer wg.Done()
 				res, err := validation.CheckSPF(context.Background(), ip, s.helo, from)
 				if err != nil {
@@ -804,7 +804,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		var hasMX bool
 		if s.serverConfig.DNSChecks.RequireSenderMX && senderDomain != "" {
 			wg.Add(1)
-			logging.SafeGo(s.Logger, "mx-check", func() {
+			concurrency.SafeGo(s.Logger, "mx-check", func() {
 				defer wg.Done()
 				var err error
 				hasMX, err = validation.CheckMXRecord(context.Background(), senderDomain, s.dnsResolver, time.Duration(s.globalConfig.DNS.TimeoutSeconds)*time.Second)
