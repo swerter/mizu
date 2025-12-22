@@ -75,8 +75,8 @@ func buildMizuHeaders(traceID string, spfResult *validation.SPFResult, dmarcResu
 	sb.WriteString(traceID)
 	sb.WriteString("\r\n")
 
-	// X-Mizu-Authenticated: Summary of authentication results
-	sb.WriteString("X-Mizu-Authenticated: ")
+	// X-Mizu-Authentication-Results: Summary of authentication results
+	sb.WriteString("X-Mizu-Authentication-Results: ")
 	sb.WriteString(buildAuthenticationSummary(spfResult, dmarcResult, arcResult))
 	sb.WriteString("\r\n")
 
