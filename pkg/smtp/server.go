@@ -360,7 +360,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 			}
 		}
 
-		// Require valid reverse DNS (PTR record) - helps prevent spam from compromised hosts
+		// Check reverse DNS (PTR record) - helps prevent spam from compromised hosts
 		// Use context with timeout to prevent hanging on unresponsive DNS servers
 		rdnsCtx, rdnsCancel := context.WithTimeout(context.Background(), time.Duration(be.GlobalConfig.DNS.TimeoutSeconds)*time.Second)
 		names, err := be.DNSResolver.LookupAddr(rdnsCtx, host)
@@ -372,19 +372,26 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 				be.StatsManager.RecordConnection(ipStr, false)
 			}
 
-			// Record rejection in metrics
-			if be.Metrics != nil {
-				be.Metrics.SMTPMessagesRejected.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type, "no_rdns").Inc()
-			}
+			// Reject if rDNS is required
+			if be.ServerConfig.DNSChecks.RequireRDNS {
+				// Record rejection in metrics
+				if be.Metrics != nil {
+					be.Metrics.SMTPMessagesRejected.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type, "no_rdns").Inc()
+				}
 
-			be.Logger.Info("Rejecting connection - no reverse DNS",
+				be.Logger.Info("Rejecting connection - no reverse DNS",
+					"server", be.ServerConfig.Name,
+					"remote_addr", remoteAddr)
+				return nil, &smtp.SMTPError{
+					Code:         550,
+					EnhancedCode: smtp.EnhancedCode{5, 7, 25},
+					Message:      "no reverse DNS record for IP address",
+				}
+			}
+			// Allow connection even without rDNS when not required
+			be.Logger.Info("Connection allowed without reverse DNS (not required)",
 				"server", be.ServerConfig.Name,
 				"remote_addr", remoteAddr)
-			return nil, &smtp.SMTPError{
-				Code:         550,
-				EnhancedCode: smtp.EnhancedCode{5, 7, 25},
-				Message:      "no reverse DNS record for IP address",
-			}
 		}
 		// Store first PTR record for use in recipient validation
 		if len(names) > 0 {

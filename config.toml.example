@@ -126,3 +126,62 @@ port = 7946
 node_name = ""
 peers = []
 secret_key = ""
+
+# Rate Limiting Configuration
+# Available dimension keys: IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN, AUTHENTICATED_USER
+# Keys can be combined to create composite rate limits (e.g., ["IP", "FROM"] limits per IP+sender combination)
+#
+# [server.rate_limit]
+# enabled = true
+# gossip_enabled = false                    # Share rate limit state across cluster
+# gossip_interval_seconds = 5               # How often to gossip rate limit data
+#
+# # Example: Per-IP rate limiting (100 emails per hour from any single IP)
+# [[server.rate_limit.dimensions]]
+# name = "per_ip"
+# keys = ["IP"]
+# limit = 100
+# window_seconds = 3600
+#
+# # Example: Per-sender domain rate limiting (500 emails per hour from any single domain)
+# [[server.rate_limit.dimensions]]
+# name = "per_sender_domain"
+# keys = ["FROM_DOMAIN"]
+# limit = 500
+# window_seconds = 3600
+#
+# # Example: Per-recipient rate limiting (200 emails per hour to any single recipient)
+# [[server.rate_limit.dimensions]]
+# name = "per_recipient"
+# keys = ["TO"]
+# limit = 200
+# window_seconds = 3600
+#
+# # Example: Per-recipient domain rate limiting (1000 emails per hour to any single domain)
+# [[server.rate_limit.dimensions]]
+# name = "per_recipient_domain"
+# keys = ["TO_DOMAIN"]
+# limit = 1000
+# window_seconds = 3600
+#
+# # Example: Per-authenticated-user rate limiting (100 emails per hour per user)
+# # Requires SMTP AUTH (submission server on ports 587/465)
+# [[server.rate_limit.dimensions]]
+# name = "per_user_hourly"
+# keys = ["AUTHENTICATED_USER"]
+# limit = 100
+# window_seconds = 3600
+#
+# # Example: Composite rate limiting (50 emails per 10 minutes from specific IP+sender combination)
+# [[server.rate_limit.dimensions]]
+# name = "per_ip_and_sender"
+# keys = ["IP", "FROM"]
+# limit = 50
+# window_seconds = 600
+#
+# # Example: Burst protection (10 emails per minute from any IP)
+# [[server.rate_limit.dimensions]]
+# name = "burst_protection"
+# keys = ["IP"]
+# limit = 10
+# window_seconds = 60
