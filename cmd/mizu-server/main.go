@@ -26,14 +26,17 @@ import (
 	"migadu/mizu/pkg/metrics"
 	"migadu/mizu/pkg/poster"
 	"migadu/mizu/pkg/recipient"
+	"migadu/mizu/pkg/sender"
 	"migadu/mizu/pkg/smtp"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/storage"
 	tlsmgr "migadu/mizu/pkg/tls"
 
 	gosmtp "github.com/emersion/go-smtp"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // Version information, injected at build time
@@ -100,7 +103,7 @@ func main() {
 	logger.Info("Prometheus metrics initialized")
 
 	var tlsConfig *tls.Config
-	var s3Client *minio.Client
+	var s3Client *s3.Client
 	var tlsMgr *tlsmgr.Manager
 	if cfg.Local {
 		logger.Info("Running in LOCAL mode - TLS disabled, messages will be dumped to terminal")
@@ -194,6 +197,12 @@ func main() {
 			"listen_addr", serverCfg.ListenAddr,
 			"tls", serverCfg.TLS.Mode)
 
+		// Initialize sender validator if enabled for this server
+		var senderValidator smtp.SenderValidator
+		if serverCfg.SenderValidation.Enabled {
+			senderValidator = initSenderValidator(serverCfg, logger)
+		}
+
 		// Initialize recipient validator if enabled for this server
 		var recipientValidator smtp.RecipientValidator
 		if serverCfg.RecipientValidation.Enabled {
@@ -207,6 +216,7 @@ func main() {
 			statsManager,
 			dnsResolver,
 			metricsInstance,
+			senderValidator,
 			recipientValidator,
 			clusterMgr,
 			s3Client,
@@ -351,12 +361,12 @@ func initStatsManager(cfg *config.Config, logger *slog.Logger) *stats.Manager {
 }
 
 // initStorageBackend initializes the storage backend based on configuration (S3 or filesystem)
-func initStorageBackend(cfg *config.Config, logger *slog.Logger) (storage.Backend, *minio.Client, error) {
+func initStorageBackend(cfg *config.Config, logger *slog.Logger) (storage.Backend, *s3.Client, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	var backend storage.Backend
-	var s3Client *minio.Client
+	var s3Client *s3.Client
 
 	switch cfg.Storage.Backend {
 	case "filesystem":
@@ -382,16 +392,28 @@ func initStorageBackend(cfg *config.Config, logger *slog.Logger) (storage.Backen
 
 	case "s3":
 		logger.Info("Using S3 storage backend", "bucket", cfg.Storage.S3Bucket)
-		// Initialize S3 client for MinIO (S3-compatible)
+		// Initialize S3 client using AWS SDK v2
 		var err error
-		s3Client, err = minio.New(cfg.Storage.S3Endpoint, &minio.Options{
-			Creds:  credentials.NewStaticV4(cfg.Storage.S3AccessKey, cfg.Storage.S3SecretKey, ""),
-			Region: cfg.Storage.S3Region,
-			Secure: true, // Use HTTPS
-		})
+
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+			awsconfig.WithRegion(cfg.Storage.S3Region),
+			awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+				cfg.Storage.S3AccessKey,
+				cfg.Storage.S3SecretKey,
+				"",
+			)),
+		)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to init S3 client: %w", err)
+			return nil, nil, fmt.Errorf("failed to load AWS config: %w", err)
 		}
+
+		s3Client = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+			// Custom endpoint resolver for non-AWS S3 services
+			if cfg.Storage.S3Endpoint != "" {
+				o.BaseEndpoint = aws.String(cfg.Storage.S3Endpoint)
+				o.UsePathStyle = true
+			}
+		})
 
 		s3Backend := storage.NewS3Backend(s3Client, cfg.Storage.S3Bucket, logger)
 
@@ -422,7 +444,7 @@ func initStorageBackend(cfg *config.Config, logger *slog.Logger) (storage.Backen
 }
 
 // initTLS sets up the storage backend and TLS certificate management using autocert.
-func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logger) (*tls.Config, *minio.Client, *tlsmgr.Manager, error) {
+func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logger) (*tls.Config, *s3.Client, *tlsmgr.Manager, error) {
 	// Check if TLS is enabled
 	if !cfg.TLS.Enabled {
 		logger.Info("TLS management disabled in configuration")
@@ -578,7 +600,7 @@ func initCluster(cfg *config.Config, logger *slog.Logger) (*cluster.Cluster, err
 }
 
 // startHealthServer initializes and starts the health check server.
-func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *stats.Manager, connTracker *smtp.ConnectionTracker, distTracker *smtp.DistributedTracker, s3Client *minio.Client) *health.Server {
+func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *stats.Manager, connTracker *smtp.ConnectionTracker, distTracker *smtp.DistributedTracker, s3Client *s3.Client) *health.Server {
 	if !cfg.Health.Enabled {
 		return nil
 	}
@@ -665,7 +687,7 @@ func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *st
 }
 
 // startStatsLoops starts the background loops for exporting and syncing stats data.
-func startStatsLoops(ctx context.Context, statsMgr *stats.Manager, s3Client *minio.Client, cfg *config.Config, logger *slog.Logger) {
+func startStatsLoops(ctx context.Context, statsMgr *stats.Manager, s3Client *s3.Client, cfg *config.Config, logger *slog.Logger) {
 	if !cfg.Stats.Enabled || !cfg.Stats.SyncEnabled || s3Client == nil {
 		return
 	}
@@ -700,9 +722,10 @@ func createServerBackend(
 	statsManager *stats.Manager,
 	dnsResolver *net.Resolver,
 	metricsInstance *metrics.Metrics,
+	senderValidator smtp.SenderValidator,
 	recipientValidator smtp.RecipientValidator,
 	clusterMgr *cluster.Cluster,
-	s3Client *minio.Client,
+	s3Client *s3.Client,
 	logger *slog.Logger,
 ) *smtp.Backend {
 	// Create server-specific logger
@@ -873,6 +896,7 @@ func createServerBackend(
 		RateLimiter:        rateLimiter,
 		Authenticator:      authenticator,
 		AuthRateLimiter:    authRateLimiter,
+		SenderValidator:    senderValidator,
 		RecipientValidator: recipientValidator,
 	}
 }
@@ -975,6 +999,38 @@ func initRecipientValidator(serverCfg *config.ServerConfig, logger *slog.Logger)
 		"url", serverCfg.RecipientValidation.URL,
 		"timeout_seconds", serverCfg.RecipientValidation.HTTPTimeoutSeconds,
 		"cache_ttl_seconds", serverCfg.RecipientValidation.CacheTTLSeconds)
+
+	return adapter
+}
+
+// initSenderValidator initializes a sender validator for a server
+func initSenderValidator(serverCfg *config.ServerConfig, logger *slog.Logger) smtp.SenderValidator {
+	if serverCfg.SenderValidation.URL == "" {
+		logger.Error("Sender validation requires sender_validation.url")
+		os.Exit(1)
+	}
+
+	validator, err := sender.NewValidator(sender.ValidatorConfig{
+		URL:                serverCfg.SenderValidation.URL,
+		AuthToken:          serverCfg.SenderValidation.AuthToken,
+		HTTPTimeoutSeconds: serverCfg.SenderValidation.HTTPTimeoutSeconds,
+		CacheTTLSeconds:    serverCfg.SenderValidation.CacheTTLSeconds,
+		Logger:             logger,
+	})
+	if err != nil {
+		logger.Error("Failed to initialize sender validator",
+			"url", serverCfg.SenderValidation.URL,
+			"error", err)
+		os.Exit(1)
+	}
+
+	// Wrap in adapter to match smtp.SenderValidator interface
+	adapter := sender.NewSMTPAdapter(validator)
+
+	logger.Info("Sender validator initialized",
+		"url", serverCfg.SenderValidation.URL,
+		"timeout_seconds", serverCfg.SenderValidation.HTTPTimeoutSeconds,
+		"cache_ttl_seconds", serverCfg.SenderValidation.CacheTTLSeconds)
 
 	return adapter
 }

@@ -1,3 +1,51 @@
+# Define one or more SMTP servers with individual configurations
+# Example server configurations:
+#
+# [[server]]
+# name = "relay"
+# listen_addr = ":25"
+# [server.sender_validation]
+# enabled = true                                    # Enable sender validation during MAIL FROM
+# url = "https://api.example.com/validate/sender?ip=$ip&from=$email"
+# auth_token = "DiNciQbKphGdskCQ0JUqqRCVD"         # Bearer token for API authentication
+# http_timeout_seconds = 5                          # HTTP request timeout
+# cache_ttl_seconds = 300                           # Cache successful validations for 5 minutes
+# # Sender Validation API contract (GET request with URL interpolation):
+# #   URL supports placeholders: $ip, $ptr, $helo, $email (or $from)
+# #   Response 200 OK: Sender accepted (optional JSON: {"message": "custom text"})
+# #   Response 404 Not Found: Sender not authorized
+# #   Response 403 Forbidden: Sender address rejected/blocked
+# #   Response 429 Too Many Requests: Rate limit exceeded (temporary failure)
+# #   Response 502/503/504: Temporary backend failures (retry later)
+# [server.recipient_validation]
+# enabled = true                                    # Enable recipient validation during RCPT TO
+# url = "https://api.example.com/validate/recipient?ip=$ip&from=$from&to=$email"
+# auth_token = "DiNciQbKphGdskCQ0JUqqRCVD"         # Bearer token for API authentication
+# http_timeout_seconds = 5                          # HTTP request timeout
+# cache_ttl_seconds = 300                           # Cache successful validations for 5 minutes
+# # Recipient Validation API contract (same as sender validation above)
+# [server.delivery]
+# url = "https://backend.example.com/incoming"
+# auth_token = "${DELIVERY_AUTH_TOKEN}"
+#
+# [[server]]
+# name = "submission"
+# listen_addr = ":587"
+# [server.auth]
+# enabled = true                                    # Enable SMTP AUTH
+# required = true                                   # Require authentication before MAIL FROM
+# url = "https://auth.example.com/api/users/$email?ip=$ip"
+# auth_token = "${AUTH_TOKEN}"                      # Bearer token (supports env vars)
+# # Authentication API contract (GET request):
+# #   Response 200: {"password_hashes": ["$2a$10$...", "{SSHA512}..."], "allowed_from": ["user@example.com"]}
+# #   Response 404: User not found
+# # Supported password hash formats: bcrypt ($2a$, $2b$, $2y$, {BLF-CRYPT}), SSHA512 ({SSHA512}, {SSHA512.b64}, {SSHA512.HEX}), SHA512 ({SHA512}, {SHA512.b64}, {SHA512.HEX})
+# [server.tls]
+# mode = "starttls"                                 # "starttls" or "implicit" (for port 465)
+# [server.delivery]
+# url = "https://backend.example.com/incoming"
+# auth_token = "${DELIVERY_AUTH_TOKEN}"
+
 server = []
 local = false
 
@@ -21,7 +69,7 @@ cache_negative_ttl = 60
 [storage]
 backend = "s3"
 filesystem_path = "/var/lib/mizu/storage"
-s3_endpoint = "s3.amazonaws.com"
+s3_endpoint = "https://s3.amazonaws.com"  # Full URL including https://
 s3_bucket = "email-mx-certs"
 s3_prefix = ""
 s3_access_key = ""

@@ -14,7 +14,13 @@ import (
 
 	"log/slog"
 
-	"github.com/minio/minio-go/v7"
+	"errors"
+	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -332,12 +338,12 @@ func NewCheckDestination(url string, timeout time.Duration) *CheckDestination {
 
 // CheckS3Connection checks if the S3 bucket is accessible.
 type CheckS3Connection struct {
-	S3Client   *minio.Client
+	S3Client   *s3.Client
 	BucketName string
 }
 
 // NewCheckS3Connection creates a new S3 connection health checker.
-func NewCheckS3Connection(s3Client *minio.Client, bucketName string) *CheckS3Connection {
+func NewCheckS3Connection(s3Client *s3.Client, bucketName string) *CheckS3Connection {
 	return &CheckS3Connection{
 		S3Client:   s3Client,
 		BucketName: bucketName,
@@ -358,24 +364,30 @@ func (c *CheckS3Connection) CheckHealth() ComponentStatus {
 	defer cancel()
 
 	start := time.Now()
-	exists, err := c.S3Client.BucketExists(ctx, c.BucketName)
+	_, err := c.S3Client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(c.BucketName),
+	})
 	latency := time.Since(start)
 
 	if err != nil {
+		// Check if bucket doesn't exist
+		var nsk *types.NoSuchBucket
+		var ae smithy.APIError
+		if errors.As(err, &nsk) || (errors.As(err, &ae) && (ae.ErrorCode() == "NotFound" || strings.Contains(err.Error(), "StatusCode: 404"))) {
+			return ComponentStatus{
+				Status: "unhealthy",
+				Details: map[string]any{
+					"error":   fmt.Sprintf("S3 bucket '%s' does not exist", c.BucketName),
+					"latency": latency.String(),
+				},
+			}
+		}
+
+		// Other errors
 		return ComponentStatus{
 			Status: "unhealthy",
 			Details: map[string]any{
 				"error":   "failed to check S3 bucket: " + err.Error(),
-				"latency": latency.String(),
-			},
-		}
-	}
-
-	if !exists {
-		return ComponentStatus{
-			Status: "unhealthy",
-			Details: map[string]any{
-				"error":   fmt.Sprintf("S3 bucket '%s' does not exist", c.BucketName),
 				"latency": latency.String(),
 			},
 		}

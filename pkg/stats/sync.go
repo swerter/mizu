@@ -5,16 +5,19 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
 	"time"
 
-	"github.com/minio/minio-go/v7"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // SyncFromS3 downloads and merges stats from other servers
-func (m *Manager) SyncFromS3(ctx context.Context, s3Client *minio.Client, bucket, prefix string) error {
+func (m *Manager) SyncFromS3(ctx context.Context, s3Client *s3.Client, bucket, prefix string) error {
 	if !m.enabled || !m.syncEnabled || len(m.syncServers) == 0 {
 		return nil
 	}
@@ -42,7 +45,7 @@ func (m *Manager) SyncFromS3(ctx context.Context, s3Client *minio.Client, bucket
 }
 
 // syncFromServer syncs stats from a single server
-func (m *Manager) syncFromServer(ctx context.Context, s3Client *minio.Client, bucket, prefix, serverHostname string) (int, error) {
+func (m *Manager) syncFromServer(ctx context.Context, s3Client *s3.Client, bucket, prefix, serverHostname string) (int, error) {
 	objectName := path.Join(prefix, "stats", fmt.Sprintf("%s.json.gz", serverHostname))
 
 	// Check if we've already synced this version
@@ -57,11 +60,14 @@ func (m *Manager) syncFromServer(ctx context.Context, s3Client *minio.Client, bu
 	m.lastSyncMu.Unlock()
 
 	// Check last modified time
-	objInfo, err := s3Client.StatObject(ctx, bucket, objectName, minio.StatObjectOptions{})
+	objInfo, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(objectName),
+	})
 	if err != nil {
 		// Check if the error is because the object doesn't exist
-		errResp := minio.ToErrorResponse(err)
-		if errResp.Code == "NoSuchKey" {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
 			// If we have synced before and it's been a while, the peer might be gone.
 			if attemptExists && time.Since(lastAttempt) > stalePeerTimeout {
 				m.logger.Warn("Peer stats file not found for stale peer, skipping for now", "peer", serverHostname, "object", objectName)
@@ -77,14 +83,17 @@ func (m *Manager) syncFromServer(ctx context.Context, s3Client *minio.Client, bu
 	}
 
 	// Download the stats file
-	obj, err := s3Client.GetObject(ctx, bucket, objectName, minio.GetObjectOptions{})
+	result, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(objectName),
+	})
 	if err != nil {
 		return 0, fmt.Errorf("failed to get object: %w", err)
 	}
-	defer obj.Close()
+	defer result.Body.Close()
 
 	// Read and decompress
-	gzReader, err := gzip.NewReader(obj)
+	gzReader, err := gzip.NewReader(result.Body)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create gzip reader: %w", err)
 	}
@@ -106,12 +115,12 @@ func (m *Manager) syncFromServer(ctx context.Context, s3Client *minio.Client, bu
 
 	// Update last sync time
 	m.lastSyncMu.Lock()
-	m.lastSync[serverHostname] = objInfo.LastModified
+	m.lastSync[serverHostname] = *objInfo.LastModified
 	m.lastSyncMu.Unlock()
 
 	m.logger.Debug("Synced stats from server",
 		"server", serverHostname,
-		"last_modified", objInfo.LastModified,
+		"last_modified", *objInfo.LastModified,
 		"ips", len(remoteStats.IPs),
 		"domains", len(remoteStats.Domains),
 		"merged", merged)
@@ -120,7 +129,7 @@ func (m *Manager) syncFromServer(ctx context.Context, s3Client *minio.Client, bu
 }
 
 // StartSyncLoop starts the periodic sync from other servers
-func (m *Manager) StartSyncLoop(ctx context.Context, s3Client *minio.Client, bucket, prefix string, interval time.Duration) {
+func (m *Manager) StartSyncLoop(ctx context.Context, s3Client *s3.Client, bucket, prefix string, interval time.Duration) {
 	if !m.enabled || !m.syncEnabled || len(m.syncServers) == 0 {
 		m.logger.Info("Stats sync disabled or no servers to sync from")
 		return

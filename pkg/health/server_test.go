@@ -5,8 +5,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 func TestCheckS3Connection(t *testing.T) {
@@ -14,20 +15,15 @@ func TestCheckS3Connection(t *testing.T) {
 	tests := []struct {
 		name           string
 		handler        http.HandlerFunc
-		client         *minio.Client // Use a specific client if handler is nil
+		client         *s3.Client // Use a specific client if handler is nil
 		expectStatus   string
 		expectContains string // Substring to check for in details
 	}{
 		{
 			name: "Healthy - Bucket Exists",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				// MinIO BucketExists checks via GET /?location
-				// Return minimal S3 XML response for bucket location
-				w.Header().Set("Content-Type", "application/xml")
+				// AWS SDK HeadBucket checks via HEAD /bucket
 				w.WriteHeader(http.StatusOK)
-				// Return minimal valid XML
-				w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
-<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
 			},
 			expectStatus: "healthy",
 		},
@@ -66,14 +62,13 @@ func TestCheckS3Connection(t *testing.T) {
 				server := httptest.NewServer(tt.handler)
 				defer server.Close()
 
-				// Create a MinIO client pointed at the mock server
-				client, err := minio.New(server.Listener.Addr().String(), &minio.Options{
-					Creds:  credentials.NewStaticV4("accesskey", "secretkey", ""),
-					Secure: false, // Use HTTP for test server
+				// Create an AWS SDK S3 client pointed at the mock server
+				client := s3.New(s3.Options{
+					Region:       "us-east-1",
+					Credentials:  credentials.NewStaticCredentialsProvider("accesskey", "secretkey", ""),
+					BaseEndpoint: aws.String(server.URL),
+					UsePathStyle: true,
 				})
-				if err != nil {
-					t.Fatalf("Failed to create minio client: %v", err)
-				}
 				checker = NewCheckS3Connection(client, bucketName)
 			} else {
 				// Use the pre-configured client (for nil case)

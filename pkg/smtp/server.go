@@ -64,6 +64,20 @@ func NewDNSResolver(dnsServers []string, timeout time.Duration, cacheTTL time.Du
 	return resolver, wrapper
 }
 
+// SenderValidator defines the interface for sender validation during MAIL FROM
+type SenderValidator interface {
+	Validate(ctx context.Context, clientIP, from string) (*SenderValidationResponse, error)
+	ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from string) (*SenderValidationResponse, error)
+	FlushCache()
+	GetStats() map[string]interface{}
+}
+
+// SenderValidationResponse represents the result of sender validation
+type SenderValidationResponse struct {
+	Accepted bool
+	Message  string
+}
+
 // RecipientValidator defines the interface for recipient validation during RCPT TO
 type RecipientValidator interface {
 	Validate(ctx context.Context, clientIP, from, to string) (*RecipientValidationResponse, error)
@@ -101,6 +115,9 @@ type Backend struct {
 	// Authentication (for submission servers)
 	Authenticator   Authenticator    // Optional: Authenticates users (submission servers)
 	AuthRateLimiter *AuthRateLimiter // Optional: Auth rate limiter for brute-force protection
+
+	// Sender validation
+	SenderValidator SenderValidator // Optional: Sender validator (validates during MAIL FROM)
 
 	// Recipient validation
 	RecipientValidator RecipientValidator // Optional: Recipient validator (validates during RCPT TO)
@@ -446,6 +463,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		authenticatedUser:  "",                    // No user yet
 		authenticator:      be.Authenticator,      // Authenticator (nil if not submission)
 		authRateLimiter:    be.AuthRateLimiter,    // Auth rate limiter (nil if disabled)
+		senderValidator:    be.SenderValidator,    // Sender validator (nil if disabled)
 		recipientValidator: be.RecipientValidator, // Recipient validator (nil if disabled)
 	}
 
@@ -504,6 +522,9 @@ type Session struct {
 	spfResult    *validation.SPFResult
 	dmarcResult  *validation.DMARCResult
 	arcResult    *validation.ARCResult
+
+	// Sender validation
+	senderValidator SenderValidator // Sender validator for validating during MAIL FROM (nil if disabled)
 
 	// Recipient validation
 	recipientValidator RecipientValidator // Recipient validator for validating during RCPT TO (nil if disabled)
@@ -735,6 +756,42 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 				Message:      "sender address rejected: not allowed",
 			}
 		}
+	}
+
+	// Perform sender validation if enabled
+	if s.senderValidator != nil && s.serverConfig.SenderValidation.Enabled {
+		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
+		result, err := s.senderValidator.ValidateWithContext(s.ctx, ipStr, s.ptr, s.helo, from)
+		if err != nil {
+			s.Logger.Warn("Sender validation failed", "from", from, "error", err)
+			// Treat validation errors as temporary failures
+			return &smtp.SMTPError{
+				Code:         451,
+				EnhancedCode: smtp.EnhancedCode{4, 4, 0},
+				Message:      "temporary failure, please try again later",
+			}
+		}
+
+		// Check if sender is accepted
+		if !result.Accepted {
+			s.Logger.Info("Sender rejected by validation endpoint",
+				"from", from,
+				"client_ip", ipStr,
+				"message", result.Message)
+
+			message := result.Message
+			if message == "" {
+				message = "sender address rejected"
+			}
+
+			return &smtp.SMTPError{
+				Code:         550,
+				EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+				Message:      message,
+			}
+		}
+
+		s.Logger.Debug("Sender validation passed", "from", from)
 	}
 
 	// Extract domain from sender

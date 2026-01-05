@@ -18,7 +18,8 @@ import (
 	"log/slog"
 
 	"github.com/hashicorp/memberlist"
-	"github.com/minio/minio-go/v7"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // ClusterManager interface allows for testing and abstraction
@@ -49,7 +50,7 @@ type DistributedTracker struct {
 	peerMu          sync.RWMutex
 
 	// S3 sync configuration (for cold start and backup)
-	s3Client       *minio.Client
+	s3Client       *s3.Client
 	s3Bucket       string
 	s3Prefix       string
 	s3SyncInterval time.Duration // How often to sync with S3 (default: 30s)
@@ -108,7 +109,7 @@ type DistributedConfig struct {
 // NewDistributedTracker creates a new distributed connection tracker using memberlist
 func NewDistributedTracker(
 	local *ConnectionTracker,
-	s3Client *minio.Client,
+	s3Client *s3.Client,
 	s3Bucket, s3Prefix string,
 	config DistributedConfig,
 	logger *slog.Logger,
@@ -674,16 +675,12 @@ func (dt *DistributedTracker) exportToS3() error {
 
 	// Upload to S3
 	objectName := path.Join(dt.s3Prefix, "connections", fmt.Sprintf("%s.json.gz", dt.hostname))
-	_, err = dt.s3Client.PutObject(
-		context.Background(),
-		dt.s3Bucket,
-		objectName,
-		&buf,
-		int64(buf.Len()),
-		minio.PutObjectOptions{
-			ContentType: "application/gzip",
-		},
-	)
+	_, err = dt.s3Client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket:      aws.String(dt.s3Bucket),
+		Key:         aws.String(objectName),
+		Body:        bytes.NewReader(buf.Bytes()),
+		ContentType: aws.String("application/gzip"),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to upload to S3: %w", err)
 	}
@@ -704,32 +701,32 @@ func (dt *DistributedTracker) importFromS3() error {
 	prefix := path.Join(dt.s3Prefix, "connections") + "/"
 
 	// List all connection files
-	objectCh := dt.s3Client.ListObjects(
-		context.Background(),
-		dt.s3Bucket,
-		minio.ListObjectsOptions{
-			Prefix:    prefix,
-			Recursive: false,
-		},
-	)
+	paginator := s3.NewListObjectsV2Paginator(dt.s3Client, &s3.ListObjectsV2Input{
+		Bucket:    aws.String(dt.s3Bucket),
+		Prefix:    aws.String(prefix),
+		Delimiter: aws.String("/"),
+	})
 
-	for object := range objectCh {
-		if object.Err != nil {
-			dt.logger.Error("Error listing S3 objects", "error", object.Err)
-			continue
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(context.Background())
+		if err != nil {
+			dt.logger.Error("Error listing S3 objects", "error", err)
+			break
 		}
 
-		// Skip our own file
-		expectedName := fmt.Sprintf("%s.json.gz", dt.hostname)
-		if path.Base(object.Key) == expectedName {
-			continue
-		}
+		for _, object := range page.Contents {
+			// Skip our own file
+			expectedName := fmt.Sprintf("%s.json.gz", dt.hostname)
+			if path.Base(*object.Key) == expectedName {
+				continue
+			}
 
-		// Download and process peer state
-		if err := dt.downloadPeerState(object.Key); err != nil {
-			dt.logger.Debug("Failed to download peer state",
-				"key", object.Key,
-				"error", err)
+			// Download and process peer state
+			if err := dt.downloadPeerState(*object.Key); err != nil {
+				dt.logger.Debug("Failed to download peer state",
+					"key", *object.Key,
+					"error", err)
+			}
 		}
 	}
 
@@ -742,19 +739,17 @@ func (dt *DistributedTracker) downloadPeerState(objectKey string) error {
 		return fmt.Errorf("S3 client not initialized")
 	}
 
-	obj, err := dt.s3Client.GetObject(
-		context.Background(),
-		dt.s3Bucket,
-		objectKey,
-		minio.GetObjectOptions{},
-	)
+	result, err := dt.s3Client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(dt.s3Bucket),
+		Key:    aws.String(objectKey),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to get object: %w", err)
 	}
-	defer obj.Close()
+	defer result.Body.Close()
 
 	// Decompress
-	gzReader, err := gzip.NewReader(obj)
+	gzReader, err := gzip.NewReader(result.Body)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}

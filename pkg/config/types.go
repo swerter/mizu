@@ -76,6 +76,9 @@ type ServerConfig struct {
 	RateLimit   RateLimitConfig         `toml:"rate_limit"`  // Rate limiting configuration
 	Distributed DistributedLimitsConfig `toml:"distributed"` // Distributed connection tracking
 
+	// === Sender Validation Configuration (per-server) ===
+	SenderValidation SenderValidationConfig `toml:"sender_validation"` // HTTP endpoint for sender validation during MAIL FROM
+
 	// === Recipient Validation Configuration (per-server) ===
 	RecipientValidation RecipientValidationConfig `toml:"recipient_validation"` // HTTP endpoint for recipient validation during RCPT TO
 
@@ -338,6 +341,15 @@ type StorageConfig struct {
 	S3AccessKey    string `toml:"s3_access_key"`   // S3 access key
 	S3SecretKey    string `toml:"s3_secret_key"`   // S3 secret key
 	S3Region       string `toml:"s3_region"`       // S3 region
+}
+
+// SenderValidationConfig holds configuration for sender validation during MAIL FROM
+type SenderValidationConfig struct {
+	Enabled            bool   `toml:"enabled"`              // Enable sender validation (default: false)
+	URL                string `toml:"url"`                  // HTTP endpoint for sender validation
+	AuthToken          string `toml:"auth_token"`           // Authentication token (sent as Bearer token)
+	HTTPTimeoutSeconds int    `toml:"http_timeout_seconds"` // HTTP client timeout in seconds (default: 5)
+	CacheTTLSeconds    int    `toml:"cache_ttl_seconds"`    // Cache TTL for successful validations (default: 300 = 5min)
 }
 
 // RecipientValidationConfig holds configuration for recipient validation during RCPT TO

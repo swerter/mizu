@@ -10,11 +10,12 @@ import (
 	"path"
 	"time"
 
-	"github.com/minio/minio-go/v7"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // ExportToS3 exports the current stats to S3 as a compressed JSON file
-func (m *Manager) ExportToS3(ctx context.Context, s3Client *minio.Client, bucket, prefix, hostname string) error {
+func (m *Manager) ExportToS3(ctx context.Context, s3Client *s3.Client, bucket, prefix, hostname string) error {
 	if !m.enabled || !m.syncEnabled {
 		return nil
 	}
@@ -40,11 +41,13 @@ func (m *Manager) ExportToS3(ctx context.Context, s3Client *minio.Client, bucket
 
 	// Upload to S3
 	objectName := path.Join(prefix, "stats", fmt.Sprintf("%s.json.gz", hostname))
-	_, err = s3Client.PutObject(ctx, bucket, objectName, bytes.NewReader(buf.Bytes()), int64(buf.Len()),
-		minio.PutObjectOptions{
-			ContentType:     "application/gzip",
-			ContentEncoding: "gzip",
-		})
+	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:          aws.String(bucket),
+		Key:             aws.String(objectName),
+		Body:            bytes.NewReader(buf.Bytes()),
+		ContentType:     aws.String("application/gzip"),
+		ContentEncoding: aws.String("gzip"),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to upload stats to S3: %w", err)
 	}
@@ -95,7 +98,7 @@ func (m *Manager) createExport(hostname string) *StatsExport {
 }
 
 // StartExportLoop starts the periodic export to S3
-func (m *Manager) StartExportLoop(ctx context.Context, s3Client *minio.Client, bucket, prefix, hostname string, interval time.Duration) {
+func (m *Manager) StartExportLoop(ctx context.Context, s3Client *s3.Client, bucket, prefix, hostname string, interval time.Duration) {
 	if !m.enabled || !m.syncEnabled {
 		m.logger.Info("Stats export disabled")
 		return

@@ -68,7 +68,7 @@ func TestInjectMizuHeaders(t *testing.T) {
 		{"Received contains protocol", "ESMTPS"},
 		{"Received contains trace ID", traceID},
 		{"X-Mizu-Trace-ID header", "X-Mizu-Trace-ID: " + traceID},
-		{"X-Mizu-Authenticated header", "X-Mizu-Authenticated:"},
+		{"X-Mizu-Authentication-Results header", "X-Mizu-Authentication-Results:"},
 		{"SPF pass in authentication", "spf=pass"},
 		{"DKIM pass in authentication", "dkim=pass"},
 		{"DMARC pass in authentication", "dmarc=pass"},

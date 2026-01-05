@@ -2,23 +2,27 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 
-	"github.com/minio/minio-go/v7"
-	"log/slog"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
-// S3Backend implements the Backend interface using S3/MinIO
+// S3Backend implements the Backend interface using AWS S3
 type S3Backend struct {
-	client *minio.Client
+	client *s3.Client
 	bucket string
 	logger *slog.Logger
 }
 
 // NewS3Backend creates a new S3 storage backend
-func NewS3Backend(client *minio.Client, bucket string, logger *slog.Logger) *S3Backend {
+func NewS3Backend(client *s3.Client, bucket string, logger *slog.Logger) *S3Backend {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -32,28 +36,34 @@ func NewS3Backend(client *minio.Client, bucket string, logger *slog.Logger) *S3B
 
 // PutObject uploads an object to S3
 func (s *S3Backend) PutObject(ctx context.Context, key string, reader io.Reader, size int64, opts PutOptions) error {
-	minioOpts := minio.PutObjectOptions{
-		ContentType: opts.ContentType,
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Body:   reader,
+	}
+
+	if opts.ContentType != "" {
+		input.ContentType = aws.String(opts.ContentType)
 	}
 
 	if opts.ContentEncoding != "" {
-		minioOpts.ContentEncoding = opts.ContentEncoding
+		input.ContentEncoding = aws.String(opts.ContentEncoding)
 	}
 
 	if opts.Metadata != nil {
-		minioOpts.UserMetadata = opts.Metadata
+		input.Metadata = opts.Metadata
 	}
 
 	// Handle conditional put (IfNoneMatch: "*" means only create if not exists)
 	if opts.IfNoneMatch == "*" {
-		minioOpts.SetMatchETagExcept("*")
+		input.IfNoneMatch = aws.String("*")
 	}
 
-	_, err := s.client.PutObject(ctx, s.bucket, key, reader, size, minioOpts)
+	_, err := s.client.PutObject(ctx, input)
 	if err != nil {
 		// Check for conditional put failure
-		errResponse := minio.ToErrorResponse(err)
-		if errResponse.Code == "PreconditionFailed" {
+		var ae smithy.APIError
+		if errors.As(err, &ae) && ae.ErrorCode() == "PreconditionFailed" {
 			s.logger.Debug("Conditional put failed - object already exists", "key", key)
 			return &ConditionalPutError{Key: key}
 		}
@@ -66,10 +76,13 @@ func (s *S3Backend) PutObject(ctx context.Context, key string, reader io.Reader,
 
 // GetObject retrieves an object from S3
 func (s *S3Backend) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
-	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
 	if err != nil {
-		errResponse := minio.ToErrorResponse(err)
-		if errResponse.Code == "NoSuchKey" {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
 			s.logger.Debug("Object not found in S3", "key", key)
 			return nil, os.ErrNotExist
 		}
@@ -77,34 +90,45 @@ func (s *S3Backend) GetObject(ctx context.Context, key string) (io.ReadCloser, e
 	}
 
 	s.logger.Debug("Retrieved object from S3", "key", key)
-	return obj, nil
+	return result.Body, nil
 }
 
 // StatObject returns metadata about an object in S3
 func (s *S3Backend) StatObject(ctx context.Context, key string) (ObjectInfo, error) {
-	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	result, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
 	if err != nil {
-		errResponse := minio.ToErrorResponse(err)
-		if errResponse.Code == "NoSuchKey" {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
 			return ObjectInfo{}, os.ErrNotExist
 		}
 		return ObjectInfo{}, fmt.Errorf("failed to stat object in S3: %w", err)
 	}
 
+	etag := ""
+	if result.ETag != nil {
+		etag = *result.ETag
+	}
+
 	return ObjectInfo{
 		Key:          key,
-		Size:         info.Size,
-		LastModified: info.LastModified,
-		ETag:         info.ETag,
+		Size:         *result.ContentLength,
+		LastModified: *result.LastModified,
+		ETag:         etag,
 	}, nil
 }
 
 // RemoveObject deletes an object from S3
 func (s *S3Backend) RemoveObject(ctx context.Context, key string) error {
-	err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
 	if err != nil {
-		errResponse := minio.ToErrorResponse(err)
-		if errResponse.Code == "NoSuchKey" {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
 			s.logger.Debug("Object already removed from S3", "key", key)
 			return nil // Consider already removed as success
 		}
@@ -119,23 +143,41 @@ func (s *S3Backend) RemoveObject(ctx context.Context, key string) error {
 func (s *S3Backend) ListObjects(ctx context.Context, prefix string, recursive bool) ([]ObjectInfo, error) {
 	var objects []ObjectInfo
 
-	objectCh := s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
-		Prefix:    prefix,
-		Recursive: recursive,
-	})
+	delimiter := "/"
+	if recursive {
+		delimiter = ""
+	}
 
-	for object := range objectCh {
-		if object.Err != nil {
-			s.logger.Error("Error listing objects from S3", "error", object.Err)
-			return nil, object.Err
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	}
+	if delimiter != "" {
+		input.Delimiter = aws.String(delimiter)
+	}
+
+	paginator := s3.NewListObjectsV2Paginator(s.client, input)
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			s.logger.Error("Error listing objects from S3", "error", err)
+			return nil, err
 		}
 
-		objects = append(objects, ObjectInfo{
-			Key:          object.Key,
-			Size:         object.Size,
-			LastModified: object.LastModified,
-			ETag:         object.ETag,
-		})
+		for _, obj := range page.Contents {
+			etag := ""
+			if obj.ETag != nil {
+				etag = *obj.ETag
+			}
+
+			objects = append(objects, ObjectInfo{
+				Key:          *obj.Key,
+				Size:         *obj.Size,
+				LastModified: *obj.LastModified,
+				ETag:         etag,
+			})
+		}
 	}
 
 	s.logger.Debug("Listed objects from S3",
@@ -148,20 +190,29 @@ func (s *S3Backend) ListObjects(ctx context.Context, prefix string, recursive bo
 
 // BucketExists checks if the S3 bucket exists
 func (s *S3Backend) BucketExists(ctx context.Context) (bool, error) {
-	exists, err := s.client.BucketExists(ctx, s.bucket)
+	_, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(s.bucket),
+	})
 	if err != nil {
+		var nsk *types.NoSuchBucket
+		if errors.As(err, &nsk) {
+			return false, nil
+		}
 		return false, fmt.Errorf("failed to check S3 bucket: %w", err)
 	}
-	return exists, nil
+	return true, nil
 }
 
 // MakeBucket creates the S3 bucket if it doesn't exist
 func (s *S3Backend) MakeBucket(ctx context.Context) error {
-	err := s.client.MakeBucket(ctx, s.bucket, minio.MakeBucketOptions{})
+	_, err := s.client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(s.bucket),
+	})
 	if err != nil {
 		// Check if bucket already exists
-		exists, existsErr := s.client.BucketExists(ctx, s.bucket)
-		if existsErr == nil && exists {
+		var bae *types.BucketAlreadyExists
+		var baoby *types.BucketAlreadyOwnedByYou
+		if errors.As(err, &bae) || errors.As(err, &baoby) {
 			s.logger.Info("S3 bucket already exists", "bucket", s.bucket)
 			return nil
 		}

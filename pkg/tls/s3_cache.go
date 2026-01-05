@@ -3,26 +3,29 @@ package tls
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 
-	"github.com/minio/minio-go/v7"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"golang.org/x/crypto/acme/autocert"
 )
 
 // S3Cache implements autocert.Cache using S3 for certificate storage.
 // This allows certificates to be shared across multiple instances of the application.
 type S3Cache struct {
-	client *minio.Client
+	client *s3.Client
 	bucket string
 	prefix string // Key prefix for certificate storage (default: "autocert/")
 	logger *slog.Logger
 }
 
-// NewS3Cache creates a new S3-backed autocert cache using MinIO client.
-func NewS3Cache(client *minio.Client, bucket, prefix string, logger *slog.Logger) (*S3Cache, error) {
+// NewS3Cache creates a new S3-backed autocert cache using AWS SDK.
+func NewS3Cache(client *s3.Client, bucket, prefix string, logger *slog.Logger) (*S3Cache, error) {
 	ctx := context.Background()
 
 	if logger == nil {
@@ -51,12 +54,15 @@ func NewS3Cache(client *minio.Client, bucket, prefix string, logger *slog.Logger
 
 // verifyBucketAccess checks if the S3 bucket exists and is accessible.
 func (c *S3Cache) verifyBucketAccess(ctx context.Context) error {
-	exists, err := c.client.BucketExists(ctx, c.bucket)
+	_, err := c.client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(c.bucket),
+	})
 	if err != nil {
+		var nsk *types.NoSuchBucket
+		if errors.As(err, &nsk) {
+			return fmt.Errorf("bucket %s does not exist", c.bucket)
+		}
 		return fmt.Errorf("failed to check bucket existence: %w", err)
-	}
-	if !exists {
-		return fmt.Errorf("bucket %s does not exist", c.bucket)
 	}
 	return nil
 }
@@ -68,26 +74,23 @@ func (c *S3Cache) Get(ctx context.Context, key string) ([]byte, error) {
 	c.logger.Debug("S3-Cache: Getting certificate", "key", key, "s3_key", s3Key)
 
 	// Get object from S3
-	obj, err := c.client.GetObject(ctx, c.bucket, s3Key, minio.GetObjectOptions{})
+	result, err := c.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(s3Key),
+	})
 	if err != nil {
-		c.logger.Error("S3-Cache: Failed to get object from S3", "error", err)
-		return nil, autocert.ErrCacheMiss
-	}
-	defer obj.Close()
-
-	// Check if object exists (404 means cache miss)
-	if _, err := obj.Stat(); err != nil {
-		// MinIO returns error on stat if object doesn't exist
-		if minio.ToErrorResponse(err).StatusCode == 404 {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
 			c.logger.Debug("S3-Cache: Certificate not found (cache miss)", "key", key)
 			return nil, autocert.ErrCacheMiss
 		}
-		c.logger.Error("S3-Cache: Failed to stat object", "error", err)
-		return nil, fmt.Errorf("failed to stat object: %w", err)
+		c.logger.Error("S3-Cache: Failed to get object from S3", "error", err)
+		return nil, autocert.ErrCacheMiss
 	}
+	defer result.Body.Close()
 
 	// Read object data
-	data, err := io.ReadAll(obj)
+	data, err := io.ReadAll(result.Body)
 	if err != nil {
 		c.logger.Error("S3-Cache: Failed to read object data", "error", err)
 		return nil, fmt.Errorf("failed to read object: %w", err)
@@ -104,16 +107,12 @@ func (c *S3Cache) Put(ctx context.Context, key string, data []byte) error {
 	c.logger.Debug("S3-Cache: Putting certificate", "key", key, "s3_key", s3Key, "bytes", len(data))
 
 	// Upload to S3
-	_, err := c.client.PutObject(
-		ctx,
-		c.bucket,
-		s3Key,
-		bytes.NewReader(data),
-		int64(len(data)),
-		minio.PutObjectOptions{
-			ContentType: "application/octet-stream",
-		},
-	)
+	_, err := c.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.bucket),
+		Key:         aws.String(s3Key),
+		Body:        bytes.NewReader(data),
+		ContentType: aws.String("application/octet-stream"),
+	})
 	if err != nil {
 		c.logger.Error("S3-Cache: Failed to upload certificate to S3", "error", err)
 		return fmt.Errorf("failed to upload to S3: %w", err)
@@ -130,10 +129,14 @@ func (c *S3Cache) Delete(ctx context.Context, key string) error {
 	c.logger.Debug("S3-Cache: Deleting certificate", "key", key, "s3_key", s3Key)
 
 	// Delete from S3
-	err := c.client.RemoveObject(ctx, c.bucket, s3Key, minio.RemoveObjectOptions{})
+	_, err := c.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(s3Key),
+	})
 	if err != nil {
 		// Check if object doesn't exist (which is fine for Delete)
-		if minio.ToErrorResponse(err).StatusCode == 404 {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
 			c.logger.Debug("S3-Cache: Certificate already deleted or doesn't exist", "key", key)
 			return nil
 		}
