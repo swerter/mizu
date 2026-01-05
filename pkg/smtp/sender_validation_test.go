@@ -25,10 +25,10 @@ type mockSenderValidator struct {
 }
 
 func (m *mockSenderValidator) Validate(ctx context.Context, clientIP, from string) (*SenderValidationResponse, error) {
-	return m.ValidateWithContext(ctx, clientIP, "", "", from)
+	return m.ValidateWithContext(ctx, clientIP, "", "", from, "")
 }
 
-func (m *mockSenderValidator) ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from string) (*SenderValidationResponse, error) {
+func (m *mockSenderValidator) ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from, authenticatedUser string) (*SenderValidationResponse, error) {
 	if m.shouldError {
 		return nil, &smtp.SMTPError{
 			Code:         451,

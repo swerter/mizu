@@ -67,7 +67,7 @@ func NewDNSResolver(dnsServers []string, timeout time.Duration, cacheTTL time.Du
 // SenderValidator defines the interface for sender validation during MAIL FROM
 type SenderValidator interface {
 	Validate(ctx context.Context, clientIP, from string) (*SenderValidationResponse, error)
-	ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from string) (*SenderValidationResponse, error)
+	ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from, authenticatedUser string) (*SenderValidationResponse, error)
 	FlushCache()
 	GetStats() map[string]interface{}
 }
@@ -761,9 +761,9 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	// Perform sender validation if enabled
 	if s.senderValidator != nil && s.serverConfig.SenderValidation.Enabled {
 		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-		result, err := s.senderValidator.ValidateWithContext(s.ctx, ipStr, s.ptr, s.helo, from)
+		result, err := s.senderValidator.ValidateWithContext(s.ctx, ipStr, s.ptr, s.helo, from, s.authenticatedUser)
 		if err != nil {
-			s.Logger.Warn("Sender validation failed", "from", from, "error", err)
+			s.Logger.Warn("Sender validation failed", "from", from, "authenticated_user", s.authenticatedUser, "error", err)
 			// Treat validation errors as temporary failures
 			return &smtp.SMTPError{
 				Code:         451,
@@ -777,6 +777,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 			s.Logger.Info("Sender rejected by validation endpoint",
 				"from", from,
 				"client_ip", ipStr,
+				"authenticated_user", s.authenticatedUser,
 				"message", result.Message)
 
 			message := result.Message
@@ -791,7 +792,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 			}
 		}
 
-		s.Logger.Debug("Sender validation passed", "from", from)
+		s.Logger.Debug("Sender validation passed", "from", from, "authenticated_user", s.authenticatedUser)
 	}
 
 	// Extract domain from sender

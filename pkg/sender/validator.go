@@ -80,12 +80,12 @@ func NewValidator(cfg ValidatorConfig) (*Validator, error) {
 // Validate checks if a sender should be accepted during MAIL FROM
 // Parameters can include PTR (reverse DNS) and HELO hostname if available
 func (v *Validator) Validate(ctx context.Context, clientIP, from string) (*ValidateResponse, error) {
-	return v.ValidateWithContext(ctx, clientIP, "", "", from)
+	return v.ValidateWithContext(ctx, clientIP, "", "", from, "")
 }
 
-// ValidateWithContext checks sender with additional context (PTR, HELO)
-func (v *Validator) ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from string) (*ValidateResponse, error) {
-	cacheKey := v.buildCacheKey(clientIP, ptr, helo, from)
+// ValidateWithContext checks sender with additional context (PTR, HELO, authenticated user)
+func (v *Validator) ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from, authenticatedUser string) (*ValidateResponse, error) {
+	cacheKey := v.buildCacheKey(clientIP, ptr, helo, from, authenticatedUser)
 
 	// Check cache first
 	if cached, ok := v.cache.Get(cacheKey); ok {
@@ -98,9 +98,10 @@ func (v *Validator) ValidateWithContext(ctx context.Context, clientIP, ptr, helo
 	// Cache miss - query the endpoint
 	v.logger.Debug("Sender validation cache miss - querying endpoint",
 		"from", from,
-		"url_template", v.urlTemplate)
+		"url_template", v.urlTemplate,
+		"authenticated_user", authenticatedUser)
 
-	resp, err := v.queryEndpoint(ctx, clientIP, ptr, helo, from)
+	resp, err := v.queryEndpoint(ctx, clientIP, ptr, helo, from, authenticatedUser)
 	if err != nil {
 		v.logger.Warn("Sender validation failed",
 			"from", from,
@@ -131,7 +132,7 @@ func (v *Validator) buildURL(clientIP, ptr, helo, from string) string {
 }
 
 // queryEndpoint makes the HTTP GET request to the validation endpoint
-func (v *Validator) queryEndpoint(ctx context.Context, clientIP, ptr, helo, from string) (*ValidateResponse, error) {
+func (v *Validator) queryEndpoint(ctx context.Context, clientIP, ptr, helo, from, authenticatedUser string) (*ValidateResponse, error) {
 	// Build URL with interpolation
 	requestURL := v.buildURL(clientIP, ptr, helo, from)
 
@@ -143,6 +144,11 @@ func (v *Validator) queryEndpoint(ctx context.Context, clientIP, ptr, helo, from
 
 	if v.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+v.apiKey)
+	}
+
+	// Add authenticated user header if present
+	if authenticatedUser != "" {
+		httpReq.Header.Set("X-Auth-User", authenticatedUser)
 	}
 
 	// Execute request
@@ -227,9 +233,9 @@ func (v *Validator) queryEndpoint(ctx context.Context, clientIP, ptr, helo, from
 }
 
 // buildCacheKey creates a cache key from request parameters
-func (v *Validator) buildCacheKey(clientIP, ptr, helo, from string) string {
+func (v *Validator) buildCacheKey(clientIP, ptr, helo, from, authenticatedUser string) string {
 	// Include all parameters in cache key for granular caching
-	return fmt.Sprintf("%s:%s:%s:%s", clientIP, ptr, helo, from)
+	return fmt.Sprintf("%s:%s:%s:%s:%s", clientIP, ptr, helo, from, authenticatedUser)
 }
 
 // GetStats returns cache statistics

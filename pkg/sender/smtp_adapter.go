@@ -30,9 +30,9 @@ func (a *SMTPAdapter) Validate(ctx context.Context, clientIP, from string) (*smt
 	}, nil
 }
 
-// ValidateWithContext validates a sender with additional context (PTR, HELO)
-func (a *SMTPAdapter) ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from string) (*smtp.SenderValidationResponse, error) {
-	resp, err := a.validator.ValidateWithContext(ctx, clientIP, ptr, helo, from)
+// ValidateWithContext validates a sender with additional context (PTR, HELO, authenticated user)
+func (a *SMTPAdapter) ValidateWithContext(ctx context.Context, clientIP, ptr, helo, from, authenticatedUser string) (*smtp.SenderValidationResponse, error) {
+	resp, err := a.validator.ValidateWithContext(ctx, clientIP, ptr, helo, from, authenticatedUser)
 	if err != nil {
 		return nil, err
 	}

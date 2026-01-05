@@ -12,6 +12,8 @@
 # cache_ttl_seconds = 300                           # Cache successful validations for 5 minutes
 # # Sender Validation API contract (GET request with URL interpolation):
 # #   URL supports placeholders: $ip, $ptr, $helo, $email (or $from)
+# #   Headers: Authorization: Bearer <auth_token>
+# #            X-Auth-User: <authenticated_user> (only if user authenticated via SMTP AUTH)
 # #   Response 200 OK: Sender accepted (optional JSON: {"message": "custom text"})
 # #   Response 404 Not Found: Sender not authorized
 # #   Response 403 Forbidden: Sender address rejected/blocked

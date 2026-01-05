@@ -269,7 +269,7 @@ func TestValidator_URLInterpolation(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	_, err = validator.ValidateWithContext(ctx, "192.168.1.1", "mail.example.com", "helo.example.com", "sender@example.com")
+	_, err = validator.ValidateWithContext(ctx, "192.168.1.1", "mail.example.com", "helo.example.com", "sender@example.com", "")
 	if err != nil {
 		t.Fatalf("Validation failed: %v", err)
 	}
@@ -520,6 +520,104 @@ func TestValidator_DefaultTimeouts(t *testing.T) {
 	}
 
 	t.Log("✓ Default timeout values are correct")
+}
+
+// TestValidator_AuthenticatedUserHeader tests that X-Auth-User header is sent
+func TestValidator_AuthenticatedUserHeader(t *testing.T) {
+	capturedHeaders := make(http.Header)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Capture headers
+		for k, v := range r.Header {
+			capturedHeaders[k] = v
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validator, err := NewValidator(ValidatorConfig{
+		URL:    server.URL + "/validate",
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create validator: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Test with authenticated user
+	_, err = validator.ValidateWithContext(ctx, "192.168.1.1", "mail.example.com", "helo.example.com", "sender@example.com", "testuser@example.com")
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Verify X-Auth-User header was sent
+	if capturedHeaders.Get("X-Auth-User") != "testuser@example.com" {
+		t.Errorf("Expected X-Auth-User header to be 'testuser@example.com', got '%s'", capturedHeaders.Get("X-Auth-User"))
+	}
+
+	// Clear captured headers
+	capturedHeaders = make(http.Header)
+
+	// Test without authenticated user (empty string)
+	_, err = validator.ValidateWithContext(ctx, "192.168.1.1", "mail.example.com", "helo.example.com", "sender@example.com", "")
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Verify X-Auth-User header was NOT sent
+	if capturedHeaders.Get("X-Auth-User") != "" {
+		t.Errorf("Expected X-Auth-User header to be empty, got '%s'", capturedHeaders.Get("X-Auth-User"))
+	}
+
+	t.Log("✓ X-Auth-User header handling works correctly")
+}
+
+// TestValidator_CachingWithAuthenticatedUser tests that cache is keyed by authenticated user
+func TestValidator_CachingWithAuthenticatedUser(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validator, err := NewValidator(ValidatorConfig{
+		URL:             server.URL + "/validate",
+		CacheTTLSeconds: 5,
+		Logger:          logger,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create validator: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Request 1: user1@example.com
+	_, err = validator.ValidateWithContext(ctx, "192.168.1.1", "mail.example.com", "helo.example.com", "sender@example.com", "user1@example.com")
+	if err != nil {
+		t.Fatalf("Validation 1 failed: %v", err)
+	}
+
+	// Request 2: same params but different user - should NOT use cache
+	_, err = validator.ValidateWithContext(ctx, "192.168.1.1", "mail.example.com", "helo.example.com", "sender@example.com", "user2@example.com")
+	if err != nil {
+		t.Fatalf("Validation 2 failed: %v", err)
+	}
+
+	// Request 3: same as request 1 - should use cache
+	_, err = validator.ValidateWithContext(ctx, "192.168.1.1", "mail.example.com", "helo.example.com", "sender@example.com", "user1@example.com")
+	if err != nil {
+		t.Fatalf("Validation 3 failed: %v", err)
+	}
+
+	// Should have made 2 HTTP requests (request 3 used cache)
+	if requestCount != 2 {
+		t.Errorf("Expected 2 HTTP requests (third should use cache), got %d", requestCount)
+	}
+
+	t.Log("✓ Caching correctly keys by authenticated user")
 }
 
 // Helper function
