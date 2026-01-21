@@ -25,8 +25,9 @@ func (a *SMTPAdapter) Validate(ctx context.Context, clientIP, from, to string) (
 
 	// Convert to smtp.RecipientValidationResponse
 	return &smtp.RecipientValidationResponse{
-		Accepted: resp.Accepted,
-		Message:  resp.Message,
+		Accepted:  resp.Accepted,
+		Message:   resp.Message,
+		Temporary: resp.Temporary,
 	}, nil
 }
 
@@ -39,8 +40,9 @@ func (a *SMTPAdapter) ValidateWithContext(ctx context.Context, clientIP, ptr, he
 
 	// Convert to smtp.RecipientValidationResponse
 	return &smtp.RecipientValidationResponse{
-		Accepted: resp.Accepted,
-		Message:  resp.Message,
+		Accepted:  resp.Accepted,
+		Message:   resp.Message,
+		Temporary: resp.Temporary,
 	}, nil
 }
 

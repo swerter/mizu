@@ -187,9 +187,11 @@ Key packages:
   - **200 OK**: Recipient accepted (optional JSON body with `message` field)
   - **404 Not Found**: User unknown (reject with "User unknown")
   - **403 Forbidden**: Delivery not authorized (sender blocked by recipient)
+  - **450**: Temporary failure with custom message (SMTP 4xx - retry later)
   - **429 Too Many Requests**: Rate limit exceeded (temporary failure)
   - **502/503/504**: Temporary backend failures (retry later)
 - Response body can be JSON `{"message": "custom text"}` or plain text
+- For 450 status code, response body can include JSON `{"message": "custom text", "temporary": true}` to provide custom message for temporary failure
 - Successful validations cached for 5 minutes (configurable)
 - Provides early rejection before DATA phase, reducing bandwidth and processing
 

@@ -9,8 +9,9 @@ type ValidateRequest struct {
 
 // ValidateResponse represents the validation decision from the endpoint
 type ValidateResponse struct {
-	Accepted bool   `json:"accepted"`          // Whether to accept this recipient
-	Message  string `json:"message,omitempty"` // Optional message to include in SMTP response
+	Accepted  bool   `json:"accepted"`          // Whether to accept this recipient
+	Message   string `json:"message,omitempty"` // Optional message to include in SMTP response
+	Temporary bool   `json:"temporary"`         // If true, rejection is temporary (4xx), otherwise permanent (5xx)
 }
 
 // Error codes for SMTP responses

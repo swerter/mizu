@@ -209,6 +209,25 @@ func (v *Validator) queryEndpoint(ctx context.Context, clientIP, ptr, helo, from
 		resp.Accepted = false
 		return &resp, nil
 
+	case 450:
+		// 450 - temporary failure with custom message
+		var resp ValidateResponse
+		if len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, &resp); err != nil {
+				// If body is not JSON, use it as plain message
+				if len(respBody) > 0 {
+					resp.Message = string(respBody)
+				} else {
+					resp.Message = "Requested action not taken: mailbox unavailable"
+				}
+			}
+		} else {
+			resp.Message = "Requested action not taken: mailbox unavailable"
+		}
+		resp.Accepted = false
+		resp.Temporary = true
+		return &resp, nil
+
 	case http.StatusTooManyRequests:
 		// 429 Too Many Requests - rate limit exceeded
 		return nil, fmt.Errorf("rate limit exceeded (HTTP 429)")

@@ -88,8 +88,9 @@ type RecipientValidator interface {
 
 // RecipientValidationResponse represents the result of recipient validation
 type RecipientValidationResponse struct {
-	Accepted bool
-	Message  string
+	Accepted  bool
+	Message   string
+	Temporary bool // If true, rejection is temporary (4xx), otherwise permanent (5xx)
 }
 
 // Backend implements smtp.Backend interface for our custom SMTP server.
@@ -1030,16 +1031,30 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 		// Check if recipient is accepted
 		if !result.Accepted {
-			s.Logger.Info("Recipient rejected by validation",
-				"to", to,
-				"message", result.Message)
-
 			// Use custom message if provided, otherwise use default
 			message := result.Message
 			if message == "" {
-				message = "mailbox unavailable"
+				if result.Temporary {
+					message = "temporary failure, please try again later"
+				} else {
+					message = "mailbox unavailable"
+				}
 			}
 
+			if result.Temporary {
+				s.Logger.Info("Recipient temporarily rejected by validation",
+					"to", to,
+					"message", message)
+				return &smtp.SMTPError{
+					Code:         450,
+					EnhancedCode: smtp.EnhancedCode{4, 2, 1},
+					Message:      message,
+				}
+			}
+
+			s.Logger.Info("Recipient rejected by validation",
+				"to", to,
+				"message", message)
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 1, 1},

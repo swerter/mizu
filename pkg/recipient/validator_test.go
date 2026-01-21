@@ -498,6 +498,123 @@ func TestValidator_NoCacheForRejected(t *testing.T) {
 	t.Log("✓ Rejected recipients are not cached")
 }
 
+// TestValidator_TemporaryRejection_WithJSON tests HTTP 450 with JSON body
+func TestValidator_TemporaryRejection_WithJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(450)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message":   "Mailbox temporarily unavailable",
+			"temporary": true,
+		})
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validator, err := NewValidator(ValidatorConfig{
+		URL:    server.URL + "/validate?email=$email",
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create validator: %v", err)
+	}
+
+	ctx := context.Background()
+	resp, err := validator.Validate(ctx, "192.168.1.1", "sender@example.com", "recipient@example.com")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if resp.Accepted {
+		t.Error("Expected recipient to be rejected")
+	}
+
+	if !resp.Temporary {
+		t.Error("Expected temporary rejection flag to be true")
+	}
+
+	if resp.Message != "Mailbox temporarily unavailable" {
+		t.Errorf("Expected 'Mailbox temporarily unavailable', got '%s'", resp.Message)
+	}
+
+	t.Log("✓ HTTP 450 with JSON body works correctly")
+}
+
+// TestValidator_TemporaryRejection_WithPlainText tests HTTP 450 with plain text body
+func TestValidator_TemporaryRejection_WithPlainText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(450)
+		w.Write([]byte("Mailbox is currently being migrated"))
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validator, err := NewValidator(ValidatorConfig{
+		URL:    server.URL + "/validate?email=$email",
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create validator: %v", err)
+	}
+
+	ctx := context.Background()
+	resp, err := validator.Validate(ctx, "192.168.1.1", "sender@example.com", "recipient@example.com")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if resp.Accepted {
+		t.Error("Expected recipient to be rejected")
+	}
+
+	if !resp.Temporary {
+		t.Error("Expected temporary rejection flag to be true")
+	}
+
+	if resp.Message != "Mailbox is currently being migrated" {
+		t.Errorf("Expected 'Mailbox is currently being migrated', got '%s'", resp.Message)
+	}
+
+	t.Log("✓ HTTP 450 with plain text body works correctly")
+}
+
+// TestValidator_TemporaryRejection_EmptyBody tests HTTP 450 with empty body (default message)
+func TestValidator_TemporaryRejection_EmptyBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(450)
+		// Empty body
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validator, err := NewValidator(ValidatorConfig{
+		URL:    server.URL + "/validate?email=$email",
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create validator: %v", err)
+	}
+
+	ctx := context.Background()
+	resp, err := validator.Validate(ctx, "192.168.1.1", "sender@example.com", "recipient@example.com")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if resp.Accepted {
+		t.Error("Expected recipient to be rejected")
+	}
+
+	if !resp.Temporary {
+		t.Error("Expected temporary rejection flag to be true")
+	}
+
+	if resp.Message != "Requested action not taken: mailbox unavailable" {
+		t.Errorf("Expected default message, got '%s'", resp.Message)
+	}
+
+	t.Log("✓ HTTP 450 with empty body uses default message")
+}
+
 // Helper function
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || (len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
