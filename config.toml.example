@@ -4,6 +4,7 @@
 # [[server]]
 # name = "relay"
 # listen_addr = ":25"
+# disable_mizu_headers = false                          # Disable X-Mizu-* headers (keeps Received header, removes X-Mizu-Trace-ID, X-Mizu-Authentication-Results, X-Mizu-Junk)
 # [server.sender_validation]
 # enabled = true                                    # Enable sender validation during MAIL FROM
 # url = "https://api.example.com/validate/sender?ip=$ip&from=$email"
@@ -33,6 +34,7 @@
 # [[server]]
 # name = "submission"
 # listen_addr = ":587"
+# disable_mizu_headers = false                          # Disable X-Mizu-* headers (useful for outbound servers that don't need debugging headers)
 # [server.auth]
 # enabled = true                                    # Enable SMTP AUTH
 # required = true                                   # Require authentication before MAIL FROM

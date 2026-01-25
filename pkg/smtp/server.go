@@ -1319,9 +1319,14 @@ func (s *Session) deliverMessage(rawEmail string) error {
 		s.dmarcResult,
 		s.arcResult,
 		s.isJunk,
+		s.serverConfig.DisableMizuHeaders,
 	)
 
-	s.Logger.Debug("Injected Received and X-Mizu-* headers")
+	if s.serverConfig.DisableMizuHeaders {
+		s.Logger.Debug("Injected Received header (X-Mizu-* headers disabled)")
+	} else {
+		s.Logger.Debug("Injected Received and X-Mizu-* headers")
+	}
 
 	// Apply junk modifications if message is marked as junk
 	if s.isJunk {

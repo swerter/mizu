@@ -13,12 +13,16 @@ import (
 
 // InjectMizuHeaders adds Received and X-Mizu-* headers to the email
 // These headers provide email tracing, authentication results, and debugging information
-func InjectMizuHeaders(rawEmail, domain, remoteAddr, heloHostname, traceID string, tlsVersion string, spfResult *validation.SPFResult, dmarcResult *validation.DMARCResult, arcResult *validation.ARCResult, isJunk bool) string {
-	// Build the Received header
+// If disableMizuHeaders is true, only the Received header is added (X-Mizu-* headers are skipped)
+func InjectMizuHeaders(rawEmail, domain, remoteAddr, heloHostname, traceID string, tlsVersion string, spfResult *validation.SPFResult, dmarcResult *validation.DMARCResult, arcResult *validation.ARCResult, isJunk bool, disableMizuHeaders bool) string {
+	// Build the Received header (always added)
 	receivedHeader := buildReceivedHeader(domain, remoteAddr, heloHostname, traceID, tlsVersion)
 
-	// Build X-Mizu-* headers
-	mizuHeaders := buildMizuHeaders(traceID, spfResult, dmarcResult, arcResult, isJunk)
+	// Build X-Mizu-* headers (only if not disabled)
+	var mizuHeaders string
+	if !disableMizuHeaders {
+		mizuHeaders = buildMizuHeaders(traceID, spfResult, dmarcResult, arcResult, isJunk)
+	}
 
 	// Prepend headers to the email
 	// RFC 5322: Headers come before the body, separated by CRLF

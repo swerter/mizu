@@ -55,7 +55,8 @@ type ServerConfig struct {
 	ShutdownTimeoutSeconds int `toml:"shutdown_timeout_seconds"` // Graceful shutdown timeout (overrides default)
 
 	// === Debugging ===
-	Debug bool `toml:"debug"` // Enable SMTP protocol debug logging (shows all SMTP commands and responses)
+	Debug               bool `toml:"debug"`                 // Enable SMTP protocol debug logging (shows all SMTP commands and responses)
+	DisableMizuHeaders  bool `toml:"disable_mizu_headers"`  // Disable X-Mizu-* headers (keeps Received header, removes X-Mizu-Trace-ID, X-Mizu-Authentication-Results, X-Mizu-Junk)
 
 	// === Email Validation ===
 	SPFCheck              bool   `toml:"spf_check"`               // Enable SPF validation

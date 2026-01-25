@@ -54,6 +54,7 @@ func TestInjectMizuHeaders(t *testing.T) {
 		dmarcResult,
 		arcResult,
 		false, // not junk
+		false, // don't disable mizu headers
 	)
 
 	// Verify the modified email contains expected headers
@@ -106,10 +107,11 @@ func TestInjectMizuHeaders_Junk(t *testing.T) {
 		"spammer.bad.com",
 		"trace123",
 		"TLS 1.2",
-		nil,  // no SPF
-		nil,  // no DMARC
-		nil,  // no ARC
-		true, // IS JUNK
+		nil,   // no SPF
+		nil,   // no DMARC
+		nil,   // no ARC
+		true,  // IS JUNK
+		false, // don't disable mizu headers
 	)
 
 	// Should mark as junk
@@ -140,6 +142,7 @@ func TestInjectMizuHeaders_NoTLS(t *testing.T) {
 		nil,
 		nil,
 		false,
+		false, // don't disable mizu headers
 	)
 
 	// Should use ESMTP (not ESMTPS) when no TLS
