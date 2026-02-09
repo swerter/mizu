@@ -47,7 +47,8 @@ func (s *Session) Auth(mech string) (sasl.Server, error) {
 		}
 	}
 
-	// Require TLS for AUTH (unless in local mode)
+	// Update and check TLS state (skip in local mode)
+	s.updateTLSState()
 	if !s.globalConfig.Local && s.tlsState == nil {
 		s.Logger.Warn("AUTH attempted without TLS", "remote_addr", s.remoteAddr)
 		return nil, &smtp.SMTPError{
