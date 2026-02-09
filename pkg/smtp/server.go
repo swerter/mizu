@@ -407,16 +407,18 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		if be.StatsManager != nil {
 			be.StatsManager.RecordConnection(ipStr, hasRDNS)
 
-			// Check IP reputation
-			if shouldDeny, reputation := be.StatsManager.CheckIPReputation(ipStr); shouldDeny {
-				be.Logger.Info("Rejecting connection - poor IP reputation",
-					"server", be.ServerConfig.Name,
-					"remote_addr", remoteAddr,
-					"score", reputation)
-				return nil, &smtp.SMTPError{
-					Code:         421,
-					EnhancedCode: smtp.EnhancedCode{4, 7, 1},
-					Message:      "please try again later",
+			// Check IP reputation (only for relay servers, not submission servers)
+			if be.ServerConfig.Type == "relay" {
+				if shouldDeny, reputation := be.StatsManager.CheckIPReputation(ipStr); shouldDeny {
+					be.Logger.Info("Rejecting connection - poor IP reputation",
+						"server", be.ServerConfig.Name,
+						"remote_addr", remoteAddr,
+						"score", reputation)
+					return nil, &smtp.SMTPError{
+						Code:         421,
+						EnhancedCode: smtp.EnhancedCode{4, 7, 1},
+						Message:      "please try again later",
+					}
 				}
 			}
 		}
@@ -653,20 +655,24 @@ func (s *Session) Helo(hostname string) error {
 // updateTLSState updates the TLS state from the connection
 func (s *Session) updateTLSState() {
 	if s.conn == nil {
+		s.Logger.Warn("updateTLSState: conn is nil", "remote_addr", s.remoteAddr)
 		return
 	}
 	state, ok := s.conn.TLSConnectionState()
 	if ok {
 		s.tlsState = &state
-		s.Logger.Debug("TLS state updated",
+		s.Logger.Info("TLS state updated",
 			"remote_addr", s.remoteAddr,
 			"tls_version", tlsVersionString(state.Version),
 			"cipher_suite", fmt.Sprintf("0x%04x", state.CipherSuite),
 			"server_name", state.ServerName,
 			"handshake_complete", state.HandshakeComplete)
 	} else {
+		s.Logger.Warn("TLS state check returned ok=false",
+			"remote_addr", s.remoteAddr,
+			"had_previous_tls", s.tlsState != nil)
 		if s.tlsState != nil {
-			s.Logger.Debug("TLS state cleared (was previously set)", "remote_addr", s.remoteAddr)
+			s.Logger.Warn("TLS state cleared (was previously set)", "remote_addr", s.remoteAddr)
 		}
 		s.tlsState = nil
 	}
