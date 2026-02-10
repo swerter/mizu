@@ -65,6 +65,7 @@ type ServerConfig struct {
 	DMARCCheck            bool   `toml:"dmarc_check"`             // Enable DMARC validation
 	DMARCRejectAction     string `toml:"dmarc_reject_action"`     // Action for policy=reject: "none", "reject", "junk" (default: "reject")
 	DMARCQuarantineAction string `toml:"dmarc_quarantine_action"` // Action for policy=quarantine: "none", "reject", "junk" (default: "junk")
+	ReputationCheck       bool   `toml:"reputation_check"`        // Enable IP reputation checking (default: true for relay, false for submission)
 
 	// === Nested Configuration Sections ===
 	Validation ServerValidationConfig `toml:"validation"` // Message validation settings (applies to both relay and submission)

@@ -4,6 +4,7 @@
 # [[server]]
 # name = "relay"
 # listen_addr = ":25"
+# reputation_check = true                               # Enable IP reputation checking (default: false) - rejects connections from IPs with poor reputation
 # disable_mizu_headers = false                          # Disable X-Mizu-* headers (keeps Received header, removes X-Mizu-Trace-ID, X-Mizu-Authentication-Results, X-Mizu-Junk)
 # [server.sender_validation]
 # enabled = true                                    # Enable sender validation during MAIL FROM
@@ -34,6 +35,7 @@
 # [[server]]
 # name = "submission"
 # listen_addr = ":587"
+# reputation_check = false                              # Disable IP reputation checking for submission servers (default: false)
 # disable_mizu_headers = false                          # Disable X-Mizu-* headers (useful for outbound servers that don't need debugging headers)
 # [server.auth]
 # enabled = true                                    # Enable SMTP AUTH

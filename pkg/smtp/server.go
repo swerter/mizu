@@ -407,8 +407,8 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		if be.StatsManager != nil {
 			be.StatsManager.RecordConnection(ipStr, hasRDNS)
 
-			// Check IP reputation (only for relay servers, not submission servers)
-			if be.ServerConfig.Type == "relay" {
+			// Check IP reputation if enabled for this server
+			if be.ServerConfig.ReputationCheck {
 				if shouldDeny, reputation := be.StatsManager.CheckIPReputation(ipStr); shouldDeny {
 					be.Logger.Info("Rejecting connection - poor IP reputation",
 						"server", be.ServerConfig.Name,
