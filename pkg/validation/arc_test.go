@@ -244,7 +244,7 @@ This is a test message with incomplete ARC headers.
 		t.Errorf("Expected Instance=1, got %d", result.Instance)
 	}
 
-	// Should fail validation due to incomplete set
+	// Should fail validation due to incomplete ARC set (missing ARC-Message-Signature)
 	if result.Pass {
 		t.Error("Expected Pass=false for incomplete ARC set")
 	}
@@ -301,7 +301,7 @@ To: recipient@example.com
 Subject: Test
 
 Body`,
-			expectPass:     false, // Will fail signature verification
+			expectPass:     false, // Will fail signature verification (invalid signatures)
 			expectInstance: 1,
 		},
 		{
@@ -313,7 +313,7 @@ To: recipient@example.com
 Subject: Test
 
 Body`,
-			expectPass:     false,
+			expectPass:     false, // Will fail due to incomplete set
 			expectInstance: 1,
 		},
 	}
