@@ -291,9 +291,24 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	}
 
 	// Log client connection immediately with detailed info
+	// Get current connection count for monitoring
+	var activeConns int
+	var connectionsFromIP int
+	if be.DistTracker != nil {
+		total, _, perIP := be.DistTracker.GetStats()
+		activeConns = total
+		connectionsFromIP = perIP[remoteAddr]
+	} else if tracker != nil {
+		total, _, perIP := tracker.GetStats()
+		activeConns = total
+		connectionsFromIP = perIP[remoteAddr]
+	}
+
 	be.Logger.Info("Client connected",
 		"server", be.ServerConfig.Name,
 		"remote_addr", remoteAddr,
+		"active_connections", activeConns,
+		"connections_from_ip", connectionsFromIP,
 		"tls_enabled", be.ServerConfig.IsTLSEnabled(),
 		"tls_mode", be.ServerConfig.TLS.Mode,
 		"tls_required", be.ServerConfig.TLS.Required)
@@ -1705,6 +1720,15 @@ func (s *Session) Reset() {
 
 // Logout is called when the session ends.
 func (s *Session) Logout() error {
+	// Ensure connection is always released even if something panics
+	defer func() {
+		if r := recover(); r != nil {
+			s.Logger.Error("Panic in Logout - recovering but connection was released",
+				"remote_addr", s.remoteAddr,
+				"panic", r)
+		}
+	}()
+
 	s.Logger.Debug("Session logout", "remote_addr", s.remoteAddr)
 	if s.cancel != nil {
 		s.cancel()

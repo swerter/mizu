@@ -239,16 +239,16 @@ type DomainStats struct {
 }
 
 type StatsSummary struct {
-	TotalIPs         int   `json:"total_ips"`
-	TotalDomains     int   `json:"total_domains"`
-	BlockedIPs       int   `json:"blocked_ips"`
-	TotalConnections int64 `json:"total_connections"`
-	TotalMessages    int64 `json:"total_messages"`
-	AcceptedMessages int64 `json:"accepted_messages"`
-	RejectedMessages int64 `json:"rejected_messages"`
-	JunkMessages     int64 `json:"junk_messages"`
-	EventsProcessed  int64 `json:"events_processed"`
-	EventsDropped    int64 `json:"events_dropped"`
+	TotalIPs          int   `json:"total_ips"`
+	TotalDomains      int   `json:"total_domains"`
+	BlockedIPs        int   `json:"blocked_ips"`
+	ActiveConnections int64 `json:"active_connections"`
+	TotalMessages     int64 `json:"total_messages"`
+	AcceptedMessages  int64 `json:"accepted_messages"`
+	RejectedMessages  int64 `json:"rejected_messages"`
+	JunkMessages      int64 `json:"junk_messages"`
+	EventsProcessed   int64 `json:"events_processed"`
+	EventsDropped     int64 `json:"events_dropped"`
 }
 
 func cmdBlockedIPs() {
@@ -332,7 +332,7 @@ func cmdStats() {
 	fmt.Printf("Total IPs tracked:        %d\n", stats.Summary.TotalIPs)
 	fmt.Printf("Total domains tracked:    %d\n", stats.Summary.TotalDomains)
 	fmt.Printf("Blocked IPs:              %d\n", stats.Summary.BlockedIPs)
-	fmt.Printf("Total connections:        %d\n", stats.Summary.TotalConnections)
+	fmt.Printf("Active connections:       %d\n", stats.Summary.ActiveConnections)
 	fmt.Println()
 
 	fmt.Printf("Total messages:           %d\n", stats.Summary.TotalMessages)

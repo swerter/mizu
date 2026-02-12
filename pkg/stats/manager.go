@@ -73,6 +73,15 @@ type Manager struct {
 	eventsProcessed uint64 // Total events successfully processed
 	eventsDropped   uint64 // Total events dropped due to full channel
 	metricsMu       sync.RWMutex
+
+	// Connection trackers for active connection count
+	connTrackers   []ConnectionTracker
+	connTrackersMu sync.RWMutex
+}
+
+// ConnectionTracker interface for getting active connection stats
+type ConnectionTracker interface {
+	GetStats() (total int, uniqueIPs int, perIP map[string]int)
 }
 
 // event represents a statistical event to be processed
@@ -112,7 +121,15 @@ func NewManager(enabled bool, retentionDuration time.Duration, hostname string, 
 		ctx:               ctx,
 		cancel:            cancel,
 		eventChan:         make(chan event, bufferSize),
+		connTrackers:      make([]ConnectionTracker, 0),
 	}
+}
+
+// RegisterConnectionTracker adds a connection tracker to monitor active connections
+func (m *Manager) RegisterConnectionTracker(tracker ConnectionTracker) {
+	m.connTrackersMu.Lock()
+	defer m.connTrackersMu.Unlock()
+	m.connTrackers = append(m.connTrackers, tracker)
 }
 
 // Start begins the cleanup goroutine
@@ -615,11 +632,9 @@ func (m *Manager) GetStatsSnapshot() *StatsSnapshot {
 
 	m.ipMu.RLock()
 	ips := make(map[string]*IPExport, len(m.ips))
-	var totalConnections int64
 	var blockedCount int
 	for ip, entry := range m.ips {
 		ips[ip] = entry.ToExport()
-		totalConnections += entry.Connections
 		if entry.ShouldDeny() {
 			blockedCount++
 		}
@@ -642,19 +657,28 @@ func (m *Manager) GetStatsSnapshot() *StatsSnapshot {
 	eventsDropped := m.eventsDropped
 	m.metricsMu.RUnlock()
 
+	// Get active connections from all registered connection trackers
+	m.connTrackersMu.RLock()
+	var activeConnections int
+	for _, tracker := range m.connTrackers {
+		total, _, _ := tracker.GetStats()
+		activeConnections += total
+	}
+	m.connTrackersMu.RUnlock()
+
 	return &StatsSnapshot{
 		IPs:     ips,
 		Domains: domains,
 		Summary: StatsSummary{
-			TotalIPs:         len(ips),
-			TotalDomains:     len(domains),
-			BlockedIPs:       blockedCount,
-			TotalConnections: totalConnections,
-			TotalMessages:    totalMessages,
-			AcceptedMessages: acceptedMessages,
-			RejectedMessages: rejectedMessages,
-			EventsProcessed:  int64(eventsProcessed),
-			EventsDropped:    int64(eventsDropped),
+			TotalIPs:          len(ips),
+			TotalDomains:      len(domains),
+			BlockedIPs:        blockedCount,
+			ActiveConnections: int64(activeConnections),
+			TotalMessages:     totalMessages,
+			AcceptedMessages:  acceptedMessages,
+			RejectedMessages:  rejectedMessages,
+			EventsProcessed:   int64(eventsProcessed),
+			EventsDropped:     int64(eventsDropped),
 		},
 	}
 }

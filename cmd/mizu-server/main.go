@@ -740,6 +740,11 @@ func createServerBackend(
 	// Create per-server connection tracker
 	connTracker := smtp.NewConnectionTracker(serverCfg.Limits.MaxConnections, serverCfg.Limits.MaxConnectionsPerIP)
 
+	// Register connection tracker with stats manager for active connection monitoring
+	if statsManager != nil {
+		statsManager.RegisterConnectionTracker(connTracker)
+	}
+
 	// Create distributed tracker if enabled for this server
 	var distTracker *smtp.DistributedTracker
 	if serverCfg.Distributed.Enabled {

@@ -366,14 +366,14 @@ type StatsSnapshot struct {
 
 // StatsSummary provides aggregated statistics
 type StatsSummary struct {
-	TotalIPs         int   `json:"total_ips"`
-	TotalDomains     int   `json:"total_domains"`
-	BlockedIPs       int   `json:"blocked_ips"`
-	TotalConnections int64 `json:"total_connections"`
-	TotalMessages    int64 `json:"total_messages"`
-	AcceptedMessages int64 `json:"accepted_messages"`
-	RejectedMessages int64 `json:"rejected_messages"`
-	JunkMessages     int64 `json:"junk_messages"`
-	EventsProcessed  int64 `json:"events_processed"`
-	EventsDropped    int64 `json:"events_dropped"`
+	TotalIPs          int   `json:"total_ips"`
+	TotalDomains      int   `json:"total_domains"`
+	BlockedIPs        int   `json:"blocked_ips"`
+	ActiveConnections int64 `json:"active_connections"` // Current active SMTP connections across all servers
+	TotalMessages     int64 `json:"total_messages"`
+	AcceptedMessages  int64 `json:"accepted_messages"`
+	RejectedMessages  int64 `json:"rejected_messages"`
+	JunkMessages      int64 `json:"junk_messages"`
+	EventsProcessed   int64 `json:"events_processed"`
+	EventsDropped     int64 `json:"events_dropped"`
 }

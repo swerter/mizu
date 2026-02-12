@@ -395,6 +395,11 @@ func (dt *DistributedTracker) Release(remoteAddr string) {
 	dt.local.Release(remoteAddr)
 }
 
+// GetStats returns current connection statistics from the local tracker
+func (dt *DistributedTracker) GetStats() (total int, uniqueIPs int, perIP map[string]int) {
+	return dt.local.GetStats()
+}
+
 // estimateGlobalCount calculates the estimated global connection count for an IP
 func (dt *DistributedTracker) estimateGlobalCount(remoteAddr string) int {
 	host, _, _ := parseAddr(remoteAddr)
@@ -444,6 +449,11 @@ func (dt *DistributedTracker) broadcastToCluster() {
 	dt.clockMu.Unlock()
 
 	snapshot := dt.createSnapshot()
+
+	// Log local state being broadcast
+	dt.logger.Debug("Broadcasting connection state to cluster",
+		"total_connections", snapshot.TotalCount,
+		"unique_ips", len(snapshot.Connections))
 
 	data, err := json.Marshal(snapshot)
 	if err != nil {
