@@ -21,7 +21,7 @@ func TestSPFEvaluation_WithPortInRemoteAddr(t *testing.T) {
 	session := &Session{
 		remoteAddr:   "198.103.213.10", // This should be set without port by NewSession
 		helo:         "mail.gg.ca",
-		from:         "Alexandre.Bellerive@gg.ca",
+		from:         "Test@gg.ca",
 		serverConfig: &config.ServerConfig{Name: "test", Type: "relay", SPFCheck: true},
 		globalConfig: &config.Config{Local: false},
 		statsManager: stats.NewManager(true, 0, "test", false, 0, nil, 0, 0, 0, logger),

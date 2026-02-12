@@ -68,7 +68,7 @@ func TestCheckSPF_RealDNS(t *testing.T) {
 			name:       "gg.ca domain with their mail server",
 			ip:         "198.103.213.10",
 			domain:     "gg.ca",
-			sender:     "Alexandre.Bellerive@gg.ca",
+			sender:     "Test@gg.ca",
 			wantResult: "PASS", // Should pass if IP is authorized
 		},
 		{
