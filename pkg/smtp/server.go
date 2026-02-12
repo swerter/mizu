@@ -154,7 +154,14 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		// Continue with session creation
 	}
 
-	remoteAddr := c.Conn().RemoteAddr().String()
+	// Extract IP without port for all subsequent operations
+	remoteAddrWithPort := c.Conn().RemoteAddr().String()
+	host, _, err := net.SplitHostPort(remoteAddrWithPort)
+	if err != nil {
+		// If split fails, use the raw address (shouldn't happen with TCP connections)
+		host = remoteAddrWithPort
+	}
+	remoteAddr := host
 
 	// Record connection attempt in metrics
 	if be.Metrics != nil {
@@ -291,24 +298,17 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		"tls_mode", be.ServerConfig.TLS.Mode,
 		"tls_required", be.ServerConfig.TLS.Required)
 
-	ipStr := stats.GetIPFromRemoteAddr(remoteAddr)
+	ipStr := remoteAddr // Already stripped of port at line 164
 	hasRDNS := true
 	var ptrRecord string // Store PTR (reverse DNS) record for use in validation
 
 	// Perform security checks in production mode (skip for submission servers with relaxed validation)
 	// Relay servers should validate, submission servers with skip_rdns/skip_dnsbl will skip
 	if !be.GlobalConfig.Local {
-		// Extract IP from address
-		host, _, err := net.SplitHostPort(remoteAddr)
-		if err != nil {
-			be.Logger.Error("Failed to parse remote address", "remote_addr", remoteAddr, "error", err)
-			return nil, ErrInternalServerError
-		}
-
-		// Parse IP address
-		ip := net.ParseIP(host)
+		// Parse IP address (already stripped of port)
+		ip := net.ParseIP(remoteAddr)
 		if ip == nil {
-			be.Logger.Error("Failed to parse IP address", "host", host)
+			be.Logger.Error("Failed to parse IP address", "remote_addr", remoteAddr)
 			return nil, ErrInternalServerError
 		}
 
@@ -379,7 +379,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		// Check reverse DNS (PTR record) - helps prevent spam from compromised hosts
 		// Use context with timeout to prevent hanging on unresponsive DNS servers
 		rdnsCtx, rdnsCancel := context.WithTimeout(context.Background(), time.Duration(be.GlobalConfig.DNS.TimeoutSeconds)*time.Second)
-		names, err := be.DNSResolver.LookupAddr(rdnsCtx, host)
+		names, err := be.DNSResolver.LookupAddr(rdnsCtx, remoteAddr)
 		rdnsCancel()
 		if err != nil || len(names) == 0 {
 			hasRDNS = false
@@ -789,8 +789,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 
 	// Perform sender validation if enabled
 	if s.senderValidator != nil && s.serverConfig.SenderValidation.Enabled {
-		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-		result, err := s.senderValidator.ValidateWithContext(s.ctx, ipStr, s.ptr, s.helo, from, s.authenticatedUser)
+		result, err := s.senderValidator.ValidateWithContext(s.ctx, s.remoteAddr, s.ptr, s.helo, from, s.authenticatedUser)
 		if err != nil {
 			s.Logger.Warn("Sender validation failed", "from", from, "authenticated_user", s.authenticatedUser, "error", err)
 			// Treat validation errors as temporary failures
@@ -805,7 +804,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		if !result.Accepted {
 			s.Logger.Info("Sender rejected by validation endpoint",
 				"from", from,
-				"client_ip", ipStr,
+				"client_ip", s.remoteAddr,
 				"authenticated_user", s.authenticatedUser,
 				"message", result.Message)
 
@@ -821,7 +820,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 			}
 		}
 
-		s.Logger.Debug("Sender validation passed", "from", from, "authenticated_user", s.authenticatedUser)
+		s.Logger.Info("Sender validation passed", "from", from, "authenticated_user", s.authenticatedUser)
 	}
 
 	// Extract domain from sender
@@ -853,21 +852,20 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		var spfMu sync.Mutex // Protect SPF result writes
 
 		// SPF check in parallel
-		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-		ip := net.ParseIP(ipStr)
+		ip := net.ParseIP(s.remoteAddr)
 		if ip != nil && s.serverConfig.SPFCheck {
 			wg.Add(1)
 			concurrency.SafeGo(s.Logger, "spf-check", func() {
 				defer wg.Done()
 				res, err := validation.CheckSPF(context.Background(), ip, s.helo, from)
 				if err != nil {
-					s.Logger.Debug("SPF check error", "from", from, "error", err)
+					s.Logger.Info("SPF check error", "from", from, "error", err)
 					if s.metrics != nil {
 						s.metrics.SMTPSPFChecks.WithLabelValues(s.serverName(), "error").Inc()
 					}
 				} else if res != nil {
 					resultStr := string(*res)
-					s.Logger.Debug("SPF result", "from", from, "result", resultStr)
+					s.Logger.Info("SPF result", "from", from, "result", resultStr)
 
 					// Record SPF check result in metrics
 					if s.metrics != nil {
@@ -904,7 +902,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 						"from", from,
 						"domain", senderDomain)
 				} else {
-					s.Logger.Debug("Sender domain has valid MX records", "from", from, "domain", senderDomain)
+					s.Logger.Info("Sender domain has valid MX records", "from", from, "domain", senderDomain)
 				}
 			})
 		}
@@ -1038,8 +1036,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 	// Perform recipient validation if enabled
 	if s.recipientValidator != nil && s.serverConfig.RecipientValidation.Enabled {
-		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-		result, err := s.recipientValidator.ValidateWithContext(s.ctx, ipStr, s.ptr, s.helo, s.from, to)
+		result, err := s.recipientValidator.ValidateWithContext(s.ctx, s.remoteAddr, s.ptr, s.helo, s.from, to)
 		if err != nil {
 			s.Logger.Warn("Recipient validation failed", "to", to, "error", err)
 			// Treat validation errors as temporary failures
@@ -1083,7 +1080,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 			}
 		}
 
-		s.Logger.Debug("Recipient validation passed", "to", to)
+		s.Logger.Info("Recipient validation passed", "to", to)
 	}
 
 	// Reset to idle timeout to wait for the next command
@@ -1284,7 +1281,7 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 			}
 
 			// Log ARC validation result
-			s.Logger.Debug("ARC validation result",
+			s.Logger.Info("ARC validation result",
 				"pass", arcResult.Pass,
 				"chain_valid", arcResult.ChainValid,
 				"instance", arcResult.Instance,
@@ -1344,9 +1341,9 @@ func (s *Session) deliverMessage(rawEmail string) error {
 	)
 
 	if s.serverConfig.DisableMizuHeaders {
-		s.Logger.Debug("Injected Received header (X-Mizu-* headers disabled)")
+		s.Logger.Info("Injected Received header (X-Mizu-* headers disabled)")
 	} else {
-		s.Logger.Debug("Injected Received and X-Mizu-* headers")
+		s.Logger.Info("Injected Received and X-Mizu-* headers")
 	}
 
 	// Apply junk modifications if message is marked as junk
@@ -1364,7 +1361,7 @@ func (s *Session) deliverMessage(rawEmail string) error {
 				headerName = "X-Spam" // Default header
 			}
 			emailWithHeaders = addJunkHeader(emailWithHeaders, headerName)
-			s.Logger.Debug("Added junk header", "header", headerName)
+			s.Logger.Info("Added junk header", "header", headerName)
 
 		case "subject":
 			// Modify subject with pattern
@@ -1373,7 +1370,7 @@ func (s *Session) deliverMessage(rawEmail string) error {
 				pattern = "[spam] %s" // Default pattern
 			}
 			emailWithHeaders = modifySubject(emailWithHeaders, pattern)
-			s.Logger.Debug("Modified subject for junk", "pattern", pattern)
+			s.Logger.Info("Modified subject for junk", "pattern", pattern)
 		}
 	}
 
@@ -1388,8 +1385,11 @@ func (s *Session) deliverMessage(rawEmail string) error {
 		}
 	}
 	if missingHeadersAction == "fix" {
-		emailWithHeaders = fixMissingHeaders(emailWithHeaders, s.serverConfig.Hostname)
-		s.Logger.Debug("Fixed missing headers if needed")
+		var addedHeaders []string
+		emailWithHeaders, addedHeaders = fixMissingHeaders(emailWithHeaders, s.serverConfig.Hostname)
+		if len(addedHeaders) > 0 {
+			s.Logger.Info("Fixed missing headers", "added", addedHeaders, "from", s.from)
+		}
 	}
 
 	// ARC signing removed - Mizu is SMTP-to-HTTP relay, never forwards messages
@@ -1469,11 +1469,10 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 // finalizeSuccessfulDelivery records statistics for a successfully delivered message.
 func (s *Session) finalizeSuccessfulDelivery() {
 	if s.statsManager != nil {
-		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
 		if s.isJunk {
-			s.statsManager.RecordJunkMessage(ipStr, s.senderDomain)
+			s.statsManager.RecordJunkMessage(s.remoteAddr, s.senderDomain)
 		} else {
-			s.statsManager.RecordHamDelivery(ipStr, s.senderDomain)
+			s.statsManager.RecordHamDelivery(s.remoteAddr, s.senderDomain)
 		}
 	}
 	s.Logger.Info("Email delivered successfully", "from", s.from, "to", s.to)
@@ -1482,8 +1481,7 @@ func (s *Session) finalizeSuccessfulDelivery() {
 // recordDMARCFailure is a helper to record DMARC failure stats.
 func (s *Session) recordDMARCFailure() {
 	if s.statsManager != nil {
-		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-		s.statsManager.RecordDMARCFailure(ipStr, s.senderDomain)
+		s.statsManager.RecordDMARCFailure(s.remoteAddr, s.senderDomain)
 	}
 }
 
@@ -1521,8 +1519,7 @@ func (s *Session) validateHeaders(rawEmail string) error {
 
 				// Record this as a junk message for stats
 				if s.statsManager != nil {
-					ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
-					s.statsManager.RecordJunkMessage(ipStr, s.senderDomain)
+					s.statsManager.RecordJunkMessage(s.remoteAddr, s.senderDomain)
 				}
 
 				switch action {
