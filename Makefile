@@ -98,8 +98,8 @@ linux-musl:
 	$(call cross-compile,linux,amd64,CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++,$(MIZU_ADMIN_BINARY)-linux-amd64,./cmd/mizu-admin)
 
 freebsd:
-	$(call cross-compile,freebsd,amd64,,$(MIZU_SERVER_BINARY)-freebsd-amd64,./cmd/mizu-server)
-	$(call cross-compile,freebsd,amd64,,$(MIZU_ADMIN_BINARY)-freebsd-amd64,./cmd/mizu-admin)
+	$(call cross-compile,freebsd,amd64,CGO_ENABLED=0,$(MIZU_SERVER_BINARY)-freebsd-amd64,./cmd/mizu-server)
+	$(call cross-compile,freebsd,amd64,CGO_ENABLED=0,$(MIZU_ADMIN_BINARY)-freebsd-amd64,./cmd/mizu-admin)
 
 # ====================================================================================
 # Help Target
