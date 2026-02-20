@@ -366,7 +366,7 @@ func cmdStats() {
 				fmt.Printf("    Junk rate:              %.1f%%\n", junkRate)
 				if incomplete > 0 {
 					incompleteRate := float64(incomplete) / float64(srv.TotalMessages) * 100
-					fmt.Printf("    Incomplete:             %d (%.1f%%)  # MAIL FROM received, no outcome\n", incomplete, incompleteRate)
+					fmt.Printf("    Incomplete:             %d (%.1f%%) \n", incomplete, incompleteRate)
 				}
 			}
 
