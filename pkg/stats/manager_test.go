@@ -80,26 +80,24 @@ func TestManagerRecordConnection(t *testing.T) {
 		t.Error("IsDenied should be false when hasRDNS is true")
 	}
 
-	// Record another connection without rDNS
+	// Record another connection without rDNS, then explicitly deny it
 	ip2 := "192.168.1.2"
 	manager.RecordConnection(ip2, false)
+	manager.RecordDeniedConnection(ip2)
 
 	var entry2 *IPEntry
 	err = waitFor(1*time.Second, func() bool {
 		manager.ipMu.RLock()
 		defer manager.ipMu.RUnlock()
 		entry2 = manager.ips[ip2]
-		return entry2 != nil
+		return entry2 != nil && entry2.GetIsDenied()
 	})
 	if err != nil {
-		t.Fatal("IP entry 2 not created after timeout")
-	}
-	if entry2 == nil {
-		t.Fatal("IP entry not created")
+		t.Fatal("IP entry 2 not created or not denied after timeout")
 	}
 
 	if !entry2.GetIsDenied() {
-		t.Error("IsDenied should be true when hasRDNS is false")
+		t.Error("IsDenied should be true after RecordDeniedConnection")
 	}
 }
 

@@ -25,6 +25,7 @@ type eventType int
 
 const (
 	eventConnection eventType = iota
+	eventDeniedConnection
 	eventMailFrom
 	eventInvalidRecipient
 	eventSpoofingAttempt
@@ -150,6 +151,15 @@ func (r *ServerRecorder) RecordConnection(ip string, hasRDNS bool) {
 		rdnsStatus = "no"
 	}
 	r.manager.sendEvent(event{Type: eventConnection, IP: ip, Domain: rdnsStatus, ServerName: r.serverName})
+}
+
+// RecordDeniedConnection marks an IP as denied (e.g., no rDNS on a server that requires it).
+// Only call this when the server policy actually denies the connection.
+func (r *ServerRecorder) RecordDeniedConnection(ip string) {
+	if r.manager == nil || !r.manager.enabled {
+		return
+	}
+	r.manager.sendEvent(event{Type: eventDeniedConnection, IP: ip, ServerName: r.serverName})
 }
 
 func (r *ServerRecorder) RecordMailFrom(domain string) {
@@ -374,12 +384,6 @@ func (m *Manager) handleEvent(e event) {
 	case eventConnection:
 		entry := m.getOrCreateIP(e.IP)
 		entry.IncrementConnections()
-		// hasRDNS is passed via the Domain field for this event type
-		if e.Domain == "no" {
-			entry.mu.Lock()
-			entry.IsDenied = true
-			entry.mu.Unlock()
-		}
 		// Track which server(s) saw this IP
 		if e.ServerName != "" {
 			entry.mu.Lock()
@@ -389,6 +393,11 @@ func (m *Manager) handleEvent(e event) {
 			entry.Servers[e.ServerName] = struct{}{}
 			entry.mu.Unlock()
 		}
+	case eventDeniedConnection:
+		entry := m.getOrCreateIP(e.IP)
+		entry.mu.Lock()
+		entry.IsDenied = true
+		entry.mu.Unlock()
 	case eventMailFrom:
 		if e.Domain != "" {
 			entry := m.getOrCreateDomain(e.Domain)
@@ -668,6 +677,14 @@ func (m *Manager) getOrCreateDomain(domain string) *DomainEntry {
 	}
 	m.domains[domain] = entry
 	return entry
+}
+
+// RecordDeniedConnection marks an IP as denied.
+func (m *Manager) RecordDeniedConnection(ip string) {
+	if !m.enabled {
+		return
+	}
+	m.sendEvent(event{Type: eventDeniedConnection, IP: ip})
 }
 
 // RecordConnection records a new connection from an IP by sending an event.

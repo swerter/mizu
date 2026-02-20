@@ -413,6 +413,11 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 			// Reject if rDNS is required
 			if be.ServerConfig.DNSChecks.RequireRDNS {
+				// Mark IP as denied in stats (only when server policy denies)
+				if be.StatsManager != nil {
+					be.StatsManager.RecordDeniedConnection(ipStr)
+				}
+
 				// Record rejection in metrics
 				if be.Metrics != nil {
 					be.Metrics.SMTPMessagesRejected.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type, "no_rdns").Inc()
