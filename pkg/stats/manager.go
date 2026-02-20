@@ -87,12 +87,21 @@ type Manager struct {
 	connTrackersMu sync.RWMutex
 }
 
+// srvDomainCounters tracks per-domain message counts within a single server
+type srvDomainCounters struct {
+	messages int64
+	accepted int64
+	rejected int64
+	junk     int64
+}
+
 // srvCounters tracks message counters for a single config server name
 type srvCounters struct {
 	total    uint64
 	accepted uint64
 	rejected uint64
 	junk     uint64
+	domains  map[string]*srvDomainCounters
 }
 
 // ConnectionTracker interface for getting active connection stats
@@ -117,7 +126,13 @@ type ServerRecorder struct {
 }
 
 // NewServerRecorder creates a recorder that tags all events with the given server name.
+// It eagerly registers the server name so it appears in stats even with zero traffic.
 func NewServerRecorder(manager *Manager, serverName string) *ServerRecorder {
+	if manager != nil {
+		manager.srvCountersMu.Lock()
+		manager.getOrCreateSrvCounters(serverName)
+		manager.srvCountersMu.Unlock()
+	}
 	return &ServerRecorder{manager: manager, serverName: serverName}
 }
 
@@ -237,10 +252,24 @@ func (m *Manager) getOrCreateSrvCounters(name string) *srvCounters {
 	}
 	c, ok := m.srvCounters[name]
 	if !ok {
-		c = &srvCounters{}
+		c = &srvCounters{domains: make(map[string]*srvDomainCounters)}
 		m.srvCounters[name] = c
 	}
 	return c
+}
+
+// getOrCreateSrvDomain returns the per-domain counters for a server, creating if needed.
+// Caller must hold srvCountersMu write lock.
+func (c *srvCounters) getOrCreateDomain(domain string) *srvDomainCounters {
+	if domain == "" {
+		return nil
+	}
+	d, ok := c.domains[domain]
+	if !ok {
+		d = &srvDomainCounters{}
+		c.domains[domain] = d
+	}
+	return d
 }
 
 // RegisterConnectionTracker adds a connection tracker to monitor active connections
@@ -356,10 +385,13 @@ func (m *Manager) handleEvent(e event) {
 			entry := m.getOrCreateDomain(e.Domain)
 			entry.IncrementMessages()
 
-			// Track per-server message count
+			// Track per-server message count and per-server domain
 			m.srvCountersMu.Lock()
 			c := m.getOrCreateSrvCounters(e.ServerName)
 			c.total++
+			if d := c.getOrCreateDomain(e.Domain); d != nil {
+				d.messages++
+			}
 			m.srvCountersMu.Unlock()
 		}
 	case eventInvalidRecipient:
@@ -371,9 +403,13 @@ func (m *Manager) handleEvent(e event) {
 			domainEntry.Rejected++
 			domainEntry.mu.Unlock()
 		}
-		// Track per-server rejected count
+		// Track per-server rejected count + per-server domain rejected
 		m.srvCountersMu.Lock()
-		m.getOrCreateSrvCounters(e.ServerName).rejected++
+		sc := m.getOrCreateSrvCounters(e.ServerName)
+		sc.rejected++
+		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+			d.rejected++
+		}
 		m.srvCountersMu.Unlock()
 	case eventSpoofingAttempt:
 		m.applyNegativeWeight(e.IP, e.Domain, WeightSpoofingAttempt)
@@ -384,9 +420,13 @@ func (m *Manager) handleEvent(e event) {
 			domainEntry.Rejected++
 			domainEntry.mu.Unlock()
 		}
-		// Track per-server rejected count
+		// Track per-server rejected count + per-server domain rejected
 		m.srvCountersMu.Lock()
-		m.getOrCreateSrvCounters(e.ServerName).rejected++
+		sc := m.getOrCreateSrvCounters(e.ServerName)
+		sc.rejected++
+		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+			d.rejected++
+		}
 		m.srvCountersMu.Unlock()
 	case eventDMARCFailure:
 		m.applyNegativeWeight(e.IP, e.Domain, WeightDMARCFailure)
@@ -397,9 +437,13 @@ func (m *Manager) handleEvent(e event) {
 			domainEntry.Rejected++
 			domainEntry.mu.Unlock()
 		}
-		// Track per-server rejected count
+		// Track per-server rejected count + per-server domain rejected
 		m.srvCountersMu.Lock()
-		m.getOrCreateSrvCounters(e.ServerName).rejected++
+		sc := m.getOrCreateSrvCounters(e.ServerName)
+		sc.rejected++
+		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+			d.rejected++
+		}
 		m.srvCountersMu.Unlock()
 	case eventJunkMessage:
 		m.applyNegativeWeight(e.IP, e.Domain, WeightJunkMessage)
@@ -410,15 +454,23 @@ func (m *Manager) handleEvent(e event) {
 			domainEntry.Junk++
 			domainEntry.mu.Unlock()
 		}
-		// Track per-server junk count
+		// Track per-server junk count + per-server domain junk
 		m.srvCountersMu.Lock()
-		m.getOrCreateSrvCounters(e.ServerName).junk++
+		sc := m.getOrCreateSrvCounters(e.ServerName)
+		sc.junk++
+		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+			d.junk++
+		}
 		m.srvCountersMu.Unlock()
 	case eventHamDelivery:
 		m.applyPositiveWeight(e.IP, e.Domain, WeightHamDelivery)
-		// Track per-server accepted count
+		// Track per-server accepted count + per-server domain accepted
 		m.srvCountersMu.Lock()
-		m.getOrCreateSrvCounters(e.ServerName).accepted++
+		sc := m.getOrCreateSrvCounters(e.ServerName)
+		sc.accepted++
+		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+			d.accepted++
+		}
 		m.srvCountersMu.Unlock()
 	}
 }
@@ -870,7 +922,7 @@ func (m *Manager) buildServerSummaries() map[string]*ServerSummary {
 	// Add per-config-server summaries from local counters
 	m.srvCountersMu.RLock()
 	for name, c := range m.srvCounters {
-		servers[name] = &ServerSummary{
+		summary := &ServerSummary{
 			Hostname:         name,
 			TotalMessages:    int64(c.total),
 			AcceptedMessages: int64(c.accepted),
@@ -878,6 +930,26 @@ func (m *Manager) buildServerSummaries() map[string]*ServerSummary {
 			JunkMessages:     int64(c.junk),
 			LastUpdated:      time.Now(),
 		}
+		// Include per-server domain breakdown
+		if len(c.domains) > 0 {
+			summary.Domains = make(map[string]*ServerDomainStats, len(c.domains))
+			for domain, dc := range c.domains {
+				sds := &ServerDomainStats{
+					Messages: dc.messages,
+					Accepted: dc.accepted,
+					Rejected: dc.rejected,
+					Junk:     dc.junk,
+				}
+				// Look up global reputation for this domain
+				m.domainMu.RLock()
+				if entry, ok := m.domains[domain]; ok {
+					sds.Reputation = entry.GetReputation()
+				}
+				m.domainMu.RUnlock()
+				summary.Domains[domain] = sds
+			}
+		}
+		servers[name] = summary
 	}
 	m.srvCountersMu.RUnlock()
 

@@ -374,14 +374,24 @@ func (e *DomainEntry) FromExport(export *DomainExport) {
 	e.Rejected = export.Rejected
 }
 
+// ServerDomainStats tracks per-domain message counts within a single server
+type ServerDomainStats struct {
+	Messages   int64   `json:"messages"`
+	Accepted   int64   `json:"accepted"`
+	Rejected   int64   `json:"rejected"`
+	Junk       int64   `json:"junk"`
+	Reputation float64 `json:"reputation"` // Global reputation (from shared DomainEntry)
+}
+
 // ServerSummary provides per-server message statistics
 type ServerSummary struct {
-	Hostname         string    `json:"hostname"`
-	TotalMessages    int64     `json:"total_messages"`
-	AcceptedMessages int64     `json:"accepted_messages"`
-	RejectedMessages int64     `json:"rejected_messages"`
-	JunkMessages     int64     `json:"junk_messages"`
-	LastUpdated      time.Time `json:"last_updated"`
+	Hostname         string                        `json:"hostname"`
+	TotalMessages    int64                         `json:"total_messages"`
+	AcceptedMessages int64                         `json:"accepted_messages"`
+	RejectedMessages int64                         `json:"rejected_messages"`
+	JunkMessages     int64                         `json:"junk_messages"`
+	LastUpdated      time.Time                     `json:"last_updated"`
+	Domains          map[string]*ServerDomainStats `json:"domains,omitempty"`
 }
 
 // StatsSnapshot is a complete snapshot of stats for API responses
