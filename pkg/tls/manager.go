@@ -151,7 +151,14 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 			return nil, fmt.Errorf("%w: %s", ErrHostNotAllowed, serverName)
 		}
 
-		logger.Info("TLS: Certificate request during handshake", "domain", serverName, "has_sni", hello.ServerName != "")
+		// Log ClientHello details for TLS handshake diagnostics
+		logger.Info("TLS: Certificate request during handshake",
+			"domain", serverName,
+			"has_sni", hello.ServerName != "",
+			"tls_versions", formatSupportedVersions(hello.SupportedVersions),
+			"alpn_protocols", hello.SupportedProtos,
+			"cipher_suites_count", len(hello.CipherSuites),
+			"server_name_raw", hello.ServerName)
 
 		// Create a modified ClientHelloInfo with the resolved server name
 		modifiedHello := *hello
@@ -172,11 +179,18 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		// Log certificate chain details for diagnostics
 		if cert != nil {
 			chainLen := len(cert.Certificate)
+			keyType := fmt.Sprintf("%T", cert.PrivateKey) // e.g. *ecdsa.PrivateKey, *rsa.PrivateKey
+			leafSize := 0
+			if chainLen > 0 {
+				leafSize = len(cert.Certificate[0])
+			}
 			logger.Info("TLS: Certificate provided successfully",
 				"domain", serverName,
 				"chain_length", chainLen,
 				"has_leaf", chainLen > 0,
-				"has_intermediates", chainLen > 1)
+				"has_intermediates", chainLen > 1,
+				"key_type", keyType,
+				"leaf_der_bytes", leafSize)
 			if chainLen <= 1 {
 				logger.Warn("TLS: Certificate chain may be incomplete - no intermediate certificates",
 					"domain", serverName,

@@ -556,6 +556,16 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logge
 		// abort the TLS handshake. The ACME TLS-ALPN-01 challenges are handled
 		// by the dedicated HTTPS server on port 443, not the SMTP servers.
 		tlsConfig.NextProtos = nil
+
+		// Disable TLS session tickets for SMTP.
+		// Go's TLS 1.3 implementation sends NewSessionTicket messages after the
+		// handshake completes. Some SMTP clients (notably Exchange Online/Outlook)
+		// don't expect post-handshake data and interpret it as a protocol error,
+		// closing the connection with EOF. Session ticket resumption provides
+		// minimal benefit for SMTP (connections are typically short-lived) and
+		// disabling it fixes compatibility with these clients.
+		tlsConfig.SessionTicketsDisabled = true
+
 		logger.Info("Default TLS configuration ready (per-server min version can be set in [server.tls])")
 
 		return tlsConfig, s3Client, tlsMgr, nil
