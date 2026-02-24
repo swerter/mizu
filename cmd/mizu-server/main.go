@@ -1327,7 +1327,7 @@ func (l *smtpErrorLogger) Printf(format string, v ...interface{}) {
 	}
 	// STARTTLS success/failure are informational, not errors
 	if strings.HasPrefix(msg, "STARTTLS ") {
-		l.logger.Info("SMTP TLS", "server", l.serverName, "message", msg)
+		l.logger.Info(msg, "server", l.serverName)
 		return
 	}
 	l.logger.Error("SMTP error", "server", l.serverName, "message", msg)
