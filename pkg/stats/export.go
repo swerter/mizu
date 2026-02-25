@@ -56,8 +56,7 @@ func (m *Manager) ExportToS3(ctx context.Context, s3Client *s3.Client, bucket, p
 		"hostname", hostname,
 		"object", objectName,
 		"size", buf.Len(),
-		"ips", len(export.IPs),
-		"domains", len(export.Domains))
+		"ips", len(export.IPs))
 
 	return nil
 }
@@ -77,7 +76,6 @@ func (m *Manager) createExport(hostname string) *StatsExport {
 		Hostname:  hostname,
 		Timestamp: time.Now(),
 		IPs:       make(map[string]*IPExport),
-		Domains:   make(map[string]*DomainExport),
 	}
 
 	// Export IPs
@@ -86,13 +84,6 @@ func (m *Manager) createExport(hostname string) *StatsExport {
 		export.IPs[ip] = entry.ToExport()
 	}
 	m.ipMu.RUnlock()
-
-	// Export domains
-	m.domainMu.RLock()
-	for domain, entry := range m.domains {
-		export.Domains[domain] = entry.ToExport()
-	}
-	m.domainMu.RUnlock()
 
 	// Include aggregated local server message counts in export
 	m.srvCountersMu.RLock()

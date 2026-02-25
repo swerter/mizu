@@ -50,16 +50,14 @@ type Manager struct {
 	hostname     string
 
 	// LRU eviction limits
-	maxIPEntries     int
-	maxDomainEntries int
+	maxIPEntries        int
+	maxSrvDomainEntries int // Max sender/recipient domains tracked per server
 
-	// Maps for tracking IPs and domains
-	ips     map[string]*IPEntry
-	domains map[string]*DomainEntry
+	// Maps for tracking IPs
+	ips map[string]*IPEntry
 
 	// Mutex for map access
-	ipMu     sync.RWMutex
-	domainMu sync.RWMutex
+	ipMu sync.RWMutex
 
 	// Track sync times per server
 	lastSync        map[string]time.Time // Tracks LastModified time of successfully synced objects
@@ -269,7 +267,7 @@ func (r *ServerRecorder) RecordDeliveryRecipients(recipients []string, accepted 
 	r.manager.srvCountersMu.Lock()
 	sc := r.manager.getOrCreateSrvCounters(r.serverName)
 	for domain, count := range rcptDomains {
-		rd := sc.getOrCreateRcptDomain(domain)
+		rd := sc.getOrCreateRcptDomain(domain, r.manager.maxSrvDomainEntries)
 		rd.messages += int64(count)
 		if accepted {
 			rd.accepted += int64(count)
@@ -290,18 +288,8 @@ func (r *ServerRecorder) CheckIPReputation(ip string) (shouldDeny bool, reputati
 	return shouldDeny, reputation
 }
 
-func (r *ServerRecorder) CheckDomainReputation(domain string) (shouldDeny bool, reputation float64) {
-	if r.manager == nil {
-		return false, 0
-	}
-	// Get reputation from manager, but apply server-specific threshold
-	_, reputation = r.manager.CheckDomainReputation(domain)
-	shouldDeny = reputation < r.minDomainScore
-	return shouldDeny, reputation
-}
-
 // NewManager creates a new stats manager
-func NewManager(enabled bool, retentionDuration time.Duration, hostname string, syncEnabled bool, syncInterval time.Duration, syncServers []string, maxIPEntries, maxDomainEntries, bufferSize int, logger *slog.Logger) *Manager {
+func NewManager(enabled bool, retentionDuration time.Duration, hostname string, syncEnabled bool, syncInterval time.Duration, syncServers []string, maxIPEntries, maxSrvDomainEntries, bufferSize int, logger *slog.Logger) *Manager {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -314,25 +302,24 @@ func NewManager(enabled bool, retentionDuration time.Duration, hostname string, 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Manager{
-		enabled:           enabled,
-		retentionDuration: retentionDuration,
-		hostname:          hostname,
-		syncEnabled:       syncEnabled,
-		syncInterval:      syncInterval,
-		syncServers:       syncServers,
-		maxIPEntries:      maxIPEntries,
-		maxDomainEntries:  maxDomainEntries,
-		logger:            logger,
-		ips:               make(map[string]*IPEntry),
-		domains:           make(map[string]*DomainEntry),
-		lastSync:          make(map[string]time.Time),
-		lastSyncAttempt:   make(map[string]time.Time),
-		ctx:               ctx,
-		cancel:            cancel,
-		eventChan:         make(chan event, bufferSize),
-		connTrackers:      make([]ConnectionTracker, 0),
-		srvCounters:       make(map[string]*srvCounters),
-		peerSummaries:     make(map[string]*ServerSummary),
+		enabled:             enabled,
+		retentionDuration:   retentionDuration,
+		hostname:            hostname,
+		syncEnabled:         syncEnabled,
+		syncInterval:        syncInterval,
+		syncServers:         syncServers,
+		maxIPEntries:        maxIPEntries,
+		maxSrvDomainEntries: maxSrvDomainEntries,
+		logger:              logger,
+		ips:                 make(map[string]*IPEntry),
+		lastSync:            make(map[string]time.Time),
+		lastSyncAttempt:     make(map[string]time.Time),
+		ctx:                 ctx,
+		cancel:              cancel,
+		eventChan:           make(chan event, bufferSize),
+		connTrackers:        make([]ConnectionTracker, 0),
+		srvCounters:         make(map[string]*srvCounters),
+		peerSummaries:       make(map[string]*ServerSummary),
 	}
 }
 
@@ -354,13 +341,17 @@ func (m *Manager) getOrCreateSrvCounters(name string) *srvCounters {
 }
 
 // getOrCreateDomain returns the per-sender-domain counters for a server, creating if needed.
+// Returns nil if the domain map is at capacity and this is a new domain (prevents unbounded growth).
 // Caller must hold srvCountersMu write lock.
-func (c *srvCounters) getOrCreateDomain(domain string) *srvDomainCounters {
+func (c *srvCounters) getOrCreateDomain(domain string, maxEntries int) *srvDomainCounters {
 	if domain == "" {
 		return nil
 	}
 	d, ok := c.domains[domain]
 	if !ok {
+		if maxEntries > 0 && len(c.domains) >= maxEntries {
+			return nil // At capacity, don't track new domains
+		}
 		d = &srvDomainCounters{}
 		c.domains[domain] = d
 	}
@@ -368,13 +359,17 @@ func (c *srvCounters) getOrCreateDomain(domain string) *srvDomainCounters {
 }
 
 // getOrCreateRcptDomain returns the per-recipient-domain counters for a server, creating if needed.
+// Returns nil if the domain map is at capacity and this is a new domain (prevents unbounded growth).
 // Caller must hold srvCountersMu write lock.
-func (c *srvCounters) getOrCreateRcptDomain(domain string) *srvDomainCounters {
+func (c *srvCounters) getOrCreateRcptDomain(domain string, maxEntries int) *srvDomainCounters {
 	if domain == "" {
 		return nil
 	}
 	d, ok := c.rcptDomains[domain]
 	if !ok {
+		if maxEntries > 0 && len(c.rcptDomains) >= maxEntries {
+			return nil // At capacity, don't track new domains
+		}
 		d = &srvDomainCounters{}
 		c.rcptDomains[domain] = d
 	}
@@ -498,69 +493,43 @@ func (m *Manager) handleEvent(e event) {
 		entry.IsDenied = true
 		entry.mu.Unlock()
 	case eventMailFrom:
-		if e.Domain != "" {
-			entry := m.getOrCreateDomain(e.Domain)
-			entry.IncrementMessages()
-		}
-
-		// Always track per-server message count (even without domain)
+		// Track per-server message count
 		m.srvCountersMu.Lock()
 		c := m.getOrCreateSrvCounters(e.ServerName)
 		c.total++
 		if e.Domain != "" {
-			if d := c.getOrCreateDomain(e.Domain); d != nil {
+			if d := c.getOrCreateDomain(e.Domain, m.maxSrvDomainEntries); d != nil {
 				d.messages++
 			}
 		}
 		m.srvCountersMu.Unlock()
 	case eventInvalidRecipient:
 		m.applyNegativeWeight(e.IP, e.Domain, WeightInvalidRecipient)
-		// Track unweighted rejected count on domain
-		if e.Domain != "" {
-			domainEntry := m.getOrCreateDomain(e.Domain)
-			domainEntry.mu.Lock()
-			domainEntry.Rejected++
-			domainEntry.mu.Unlock()
-		}
 		// Track per-server rejected count + per-server domain rejected
 		m.srvCountersMu.Lock()
 		sc := m.getOrCreateSrvCounters(e.ServerName)
 		sc.rejected++
-		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+		if d := sc.getOrCreateDomain(e.Domain, m.maxSrvDomainEntries); d != nil {
 			d.rejected++
 		}
 		m.srvCountersMu.Unlock()
 	case eventSpoofingAttempt:
 		m.applyNegativeWeight(e.IP, e.Domain, WeightSpoofingAttempt)
-		// Track unweighted rejected count on domain
-		if e.Domain != "" {
-			domainEntry := m.getOrCreateDomain(e.Domain)
-			domainEntry.mu.Lock()
-			domainEntry.Rejected++
-			domainEntry.mu.Unlock()
-		}
 		// Track per-server rejected count + per-server domain rejected
 		m.srvCountersMu.Lock()
 		sc := m.getOrCreateSrvCounters(e.ServerName)
 		sc.rejected++
-		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+		if d := sc.getOrCreateDomain(e.Domain, m.maxSrvDomainEntries); d != nil {
 			d.rejected++
 		}
 		m.srvCountersMu.Unlock()
 	case eventDMARCFailure:
 		m.applyNegativeWeight(e.IP, e.Domain, WeightDMARCFailure)
-		// Track unweighted rejected count on domain
-		if e.Domain != "" {
-			domainEntry := m.getOrCreateDomain(e.Domain)
-			domainEntry.mu.Lock()
-			domainEntry.Rejected++
-			domainEntry.mu.Unlock()
-		}
 		// Track per-server rejected count + per-server domain rejected
 		m.srvCountersMu.Lock()
 		sc := m.getOrCreateSrvCounters(e.ServerName)
 		sc.rejected++
-		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+		if d := sc.getOrCreateDomain(e.Domain, m.maxSrvDomainEntries); d != nil {
 			d.rejected++
 		}
 		m.srvCountersMu.Unlock()
@@ -580,18 +549,11 @@ func (m *Manager) handleEvent(e event) {
 		}
 	case eventJunkMessage:
 		m.applyNegativeWeight(e.IP, e.Domain, WeightJunkMessage)
-		// Track unweighted junk count on domain
-		if e.Domain != "" {
-			domainEntry := m.getOrCreateDomain(e.Domain)
-			domainEntry.mu.Lock()
-			domainEntry.Junk++
-			domainEntry.mu.Unlock()
-		}
 		// Track per-server junk count + per-server domain junk
 		m.srvCountersMu.Lock()
 		sc := m.getOrCreateSrvCounters(e.ServerName)
 		sc.junk++
-		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+		if d := sc.getOrCreateDomain(e.Domain, m.maxSrvDomainEntries); d != nil {
 			d.junk++
 		}
 		m.srvCountersMu.Unlock()
@@ -608,7 +570,7 @@ func (m *Manager) handleEvent(e event) {
 		m.srvCountersMu.Lock()
 		sc := m.getOrCreateSrvCounters(e.ServerName)
 		sc.accepted += uint64(count)
-		if d := sc.getOrCreateDomain(e.Domain); d != nil {
+		if d := sc.getOrCreateDomain(e.Domain, m.maxSrvDomainEntries); d != nil {
 			d.accepted += int64(count)
 		}
 		m.srvCountersMu.Unlock()
@@ -642,31 +604,11 @@ func (m *Manager) cleanup() {
 	}
 	m.ipMu.Unlock()
 
-	// Clean domains
-	m.domainMu.Lock()
-	expiredDomains := 0
-	for domain, entry := range m.domains {
-		if entry.IsExpired(m.retentionDuration) {
-			delete(m.domains, domain)
-			expiredDomains++
-		}
-	}
-
-	// Enforce LRU eviction if over limit
-	evictedDomains := 0
-	if m.maxDomainEntries > 0 && len(m.domains) > m.maxDomainEntries {
-		evictedDomains = m.evictLRUDomains(len(m.domains) - m.maxDomainEntries)
-	}
-	m.domainMu.Unlock()
-
-	if expiredIPs > 0 || expiredDomains > 0 || evictedIPs > 0 || evictedDomains > 0 {
+	if expiredIPs > 0 || evictedIPs > 0 {
 		m.logger.Debug("Cleaned expired stats entries",
 			"expired_ips", expiredIPs,
-			"expired_domains", expiredDomains,
 			"evicted_ips", evictedIPs,
-			"evicted_domains", evictedDomains,
-			"remaining_ips", len(m.ips),
-			"remaining_domains", len(m.domains))
+			"remaining_ips", len(m.ips))
 	}
 }
 
@@ -705,41 +647,6 @@ func (m *Manager) evictLRUIPs(n int) int {
 	return evicted
 }
 
-// evictLRUDomains evicts the oldest n domain entries based on LastSeen time
-// Caller must hold domainMu.Lock()
-func (m *Manager) evictLRUDomains(n int) int {
-	if n <= 0 {
-		return 0
-	}
-
-	// Build a list of candidates for eviction
-	type candidate struct {
-		domain   string
-		lastSeen time.Time
-	}
-	candidates := make([]candidate, 0, len(m.domains))
-
-	for domain, entry := range m.domains {
-		entry.mu.RLock()
-		candidates = append(candidates, candidate{domain: domain, lastSeen: entry.LastSeen})
-		entry.mu.RUnlock()
-	}
-
-	// Sort by LastSeen (oldest first) using O(n log n) sort
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].lastSeen.Before(candidates[j].lastSeen)
-	})
-
-	// Evict the oldest n entries
-	evicted := 0
-	for i := 0; i < n && i < len(candidates); i++ {
-		delete(m.domains, candidates[i].domain)
-		evicted++
-	}
-
-	return evicted
-}
-
 // getOrCreateIP gets or creates an IP entry. This uses locks as it can be called
 // from the event loop or from reputation checks.
 func (m *Manager) getOrCreateIP(ip string) *IPEntry {
@@ -767,37 +674,6 @@ func (m *Manager) getOrCreateIP(ip string) *IPEntry {
 		LastSeen:  now,
 	}
 	m.ips[ip] = entry
-	return entry
-}
-
-// getOrCreateDomain gets or creates a domain entry.
-func (m *Manager) getOrCreateDomain(domain string) *DomainEntry {
-	// Normalize domain
-	domain = strings.ToLower(strings.TrimSpace(domain))
-
-	m.domainMu.RLock()
-	entry, exists := m.domains[domain]
-	m.domainMu.RUnlock()
-
-	if exists && entry != nil {
-		return entry
-	}
-
-	// Create new entry
-	m.domainMu.Lock()
-	defer m.domainMu.Unlock()
-
-	// Double-check after acquiring write lock
-	if entry, exists := m.domains[domain]; exists && entry != nil {
-		return entry
-	}
-
-	now := time.Now()
-	entry = &DomainEntry{
-		FirstSeen: now,
-		LastSeen:  now,
-	}
-	m.domains[domain] = entry
 	return entry
 }
 
@@ -921,10 +797,6 @@ func (m *Manager) applyNegativeWeight(ip, domain string, weight int64) {
 		ipEntry := m.getOrCreateIP(ip)
 		ipEntry.AddNegative(weight)
 	}
-	if domain != "" {
-		domainEntry := m.getOrCreateDomain(domain)
-		domainEntry.AddNegative(weight)
-	}
 }
 
 // applyPositiveWeight applies a positive weight to IP and domain entries.
@@ -933,10 +805,6 @@ func (m *Manager) applyPositiveWeight(ip, domain string, weight int64) {
 	if ip != "" {
 		ipEntry := m.getOrCreateIP(ip)
 		ipEntry.AddPositive(weight)
-	}
-	if domain != "" {
-		domainEntry := m.getOrCreateDomain(domain)
-		domainEntry.AddPositive(weight)
 	}
 }
 
@@ -949,26 +817,6 @@ func (m *Manager) CheckIPReputation(ip string) (shouldDeny bool, reputation floa
 	m.ipMu.RLock()
 	entry, exists := m.ips[ip]
 	m.ipMu.RUnlock()
-
-	if !exists {
-		return false, 0 // No data, allow
-	}
-
-	return entry.ShouldDeny(), entry.GetReputation()
-}
-
-// CheckDomainReputation checks if a domain should be denied based on reputation
-func (m *Manager) CheckDomainReputation(domain string) (shouldDeny bool, reputation float64) {
-	if !m.enabled {
-		return false, 0
-	}
-
-	// Normalize domain
-	domain = strings.ToLower(strings.TrimSpace(domain))
-
-	m.domainMu.RLock()
-	entry, exists := m.domains[domain]
-	m.domainMu.RUnlock()
 
 	if !exists {
 		return false, 0 // No data, allow
@@ -1021,7 +869,6 @@ func (m *Manager) GetStatsSnapshot() *StatsSnapshot {
 	if !m.enabled {
 		return &StatsSnapshot{
 			IPs:     make(map[string]*IPExport),
-			Domains: make(map[string]*DomainExport),
 			Summary: StatsSummary{},
 		}
 	}
@@ -1036,20 +883,6 @@ func (m *Manager) GetStatsSnapshot() *StatsSnapshot {
 		}
 	}
 	m.ipMu.RUnlock()
-
-	m.domainMu.RLock()
-	domains := make(map[string]*DomainExport, len(m.domains))
-	var totalMessages, acceptedMessages, rejectedMessages, junkMessages int64
-	for domain, entry := range m.domains {
-		domains[domain] = entry.ToExport()
-		entry.mu.RLock()
-		totalMessages += entry.Messages
-		acceptedMessages += entry.Positive // Positive tracks ham deliveries (weight=1)
-		rejectedMessages += entry.Rejected // Unweighted rejected count
-		junkMessages += entry.Junk         // Unweighted junk count
-		entry.mu.RUnlock()
-	}
-	m.domainMu.RUnlock()
 
 	m.metricsMu.RLock()
 	eventsProcessed := m.eventsProcessed
@@ -1068,17 +901,11 @@ func (m *Manager) GetStatsSnapshot() *StatsSnapshot {
 	servers := m.buildServerSummaries()
 
 	return &StatsSnapshot{
-		IPs:     ips,
-		Domains: domains,
+		IPs: ips,
 		Summary: StatsSummary{
 			TotalIPs:          len(ips),
-			TotalDomains:      len(domains),
 			BlockedIPs:        blockedCount,
 			ActiveConnections: int64(activeConnections),
-			TotalMessages:     totalMessages,
-			AcceptedMessages:  acceptedMessages,
-			RejectedMessages:  rejectedMessages,
-			JunkMessages:      junkMessages,
 			EventsProcessed:   int64(eventsProcessed),
 			EventsDropped:     int64(eventsDropped),
 		},
@@ -1113,21 +940,14 @@ func (m *Manager) buildServerSummaries() map[string]*ServerSummary {
 		}
 		// Include per-server domain breakdown
 		if len(c.domains) > 0 {
-			summary.Domains = make(map[string]*ServerDomainStats, len(c.domains))
+			summary.SenderDomains = make(map[string]*ServerDomainStats, len(c.domains))
 			for domain, dc := range c.domains {
-				sds := &ServerDomainStats{
+				summary.SenderDomains[domain] = &ServerDomainStats{
 					Messages: dc.messages,
 					Accepted: dc.accepted,
 					Rejected: dc.rejected,
 					Junk:     dc.junk,
 				}
-				// Look up global reputation for this domain
-				m.domainMu.RLock()
-				if entry, ok := m.domains[domain]; ok {
-					sds.Reputation = entry.GetReputation()
-				}
-				m.domainMu.RUnlock()
-				summary.Domains[domain] = sds
 			}
 		}
 		// Include per-server recipient domain breakdown
@@ -1173,10 +993,6 @@ func (m *Manager) CheckHealth() health.ComponentStatus {
 	ipCount := len(m.ips)
 	m.ipMu.RUnlock()
 
-	m.domainMu.RLock()
-	domainCount := len(m.domains)
-	m.domainMu.RUnlock()
-
 	// Get event metrics
 	m.metricsMu.RLock()
 	eventsProcessed := m.eventsProcessed
@@ -1191,7 +1007,6 @@ func (m *Manager) CheckHealth() health.ComponentStatus {
 	details := map[string]any{
 		"enabled":          true,
 		"tracked_ips":      ipCount,
-		"tracked_domains":  domainCount,
 		"events_processed": eventsProcessed,
 		"events_dropped":   eventsDropped,
 		"channel_length":   chanLen,

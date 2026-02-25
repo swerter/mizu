@@ -12,11 +12,6 @@ func (m *Manager) mergeStats(remote *StatsExport) int {
 		merged += m.mergeIPEntry(ip, remoteEntry)
 	}
 
-	// Merge domain stats
-	for domain, remoteEntry := range remote.Domains {
-		merged += m.mergeDomainEntry(domain, remoteEntry)
-	}
-
 	return merged
 }
 
@@ -80,46 +75,6 @@ func (m *Manager) mergeIPEntry(ip string, remote *IPExport) int {
 			local.Servers[s] = struct{}{}
 		}
 	}
-
-	return 1
-}
-
-// mergeDomainEntry merges a remote domain entry into local stats using max-wins semantics.
-// For counters (Messages, Positive, Negative, Junk, Rejected), we take the maximum of
-// local vs remote to get the best available estimate without inflation.
-func (m *Manager) mergeDomainEntry(domain string, remote *DomainExport) int {
-	m.domainMu.Lock()
-	defer m.domainMu.Unlock()
-
-	local, exists := m.domains[domain]
-	if !exists {
-		// New entry - create it
-		local = &DomainEntry{}
-		local.FromExport(remote)
-		m.domains[domain] = local
-		return 1
-	}
-
-	// Existing entry - merge using max-wins
-	local.mu.Lock()
-	defer local.mu.Unlock()
-
-	// Take earliest first seen
-	if remote.FirstSeen.Before(local.FirstSeen) {
-		local.FirstSeen = remote.FirstSeen
-	}
-
-	// Take latest last seen
-	if remote.LastSeen.After(local.LastSeen) {
-		local.LastSeen = remote.LastSeen
-	}
-
-	// Max-wins for counters: prevents inflation from repeated sync cycles.
-	local.Messages = maxInt64(local.Messages, remote.Messages)
-	local.Positive = maxInt64(local.Positive, remote.Positive)
-	local.Negative = maxInt64(local.Negative, remote.Negative)
-	local.Junk = maxInt64(local.Junk, remote.Junk)
-	local.Rejected = maxInt64(local.Rejected, remote.Rejected)
 
 	return 1
 }

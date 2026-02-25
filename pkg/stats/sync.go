@@ -136,7 +136,6 @@ func (m *Manager) syncFromServer(ctx context.Context, s3Client *s3.Client, bucke
 		"server", serverHostname,
 		"last_modified", *objInfo.LastModified,
 		"ips", len(remoteStats.IPs),
-		"domains", len(remoteStats.Domains),
 		"merged", merged)
 
 	return merged, nil

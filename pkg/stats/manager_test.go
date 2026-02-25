@@ -41,9 +41,6 @@ func TestNewManager(t *testing.T) {
 		t.Error("ips map is nil")
 	}
 
-	if manager.domains == nil {
-		t.Error("domains map is nil")
-	}
 }
 
 func TestManagerRecordConnection(t *testing.T) {
@@ -123,20 +120,6 @@ func TestManagerRecordMailFrom(t *testing.T) {
 		t.Errorf("Per-server total = %v; want 2", sc)
 	}
 
-	// Verify domain entry is created for observability (message counting)
-	var entry *DomainEntry
-	_ = waitFor(1*time.Second, func() bool {
-		manager.domainMu.RLock()
-		defer manager.domainMu.RUnlock()
-		entry = manager.domains["example.com"]
-		return entry != nil && entry.GetMessages() == 2
-	})
-	if entry == nil {
-		t.Fatal("Domain entry not created for observability")
-	}
-	if entry.GetMessages() != 2 {
-		t.Errorf("Messages = %d; want 2", entry.GetMessages())
-	}
 }
 
 func TestManagerRecordInvalidRecipient(t *testing.T) {
@@ -164,13 +147,6 @@ func TestManagerRecordInvalidRecipient(t *testing.T) {
 		t.Errorf("IP Negative = %d; want %d", ipEntry.GetNegative(), WeightInvalidRecipient)
 	}
 
-	// Verify NO domain entry (domain is no longer passed)
-	manager.domainMu.RLock()
-	domainCount := len(manager.domains)
-	manager.domainMu.RUnlock()
-	if domainCount != 0 {
-		t.Errorf("Expected 0 domain entries, got %d", domainCount)
-	}
 }
 
 func TestManagerRecordSpoofingAttempt(t *testing.T) {
@@ -252,14 +228,6 @@ func TestManagerRecordSPFFailure(t *testing.T) {
 		t.Errorf("IP Negative = %d; want %d", ipEntry.GetNegative(), WeightSPFFailure)
 	}
 
-	// Verify NO domain entry is created (SPF failure is IP-only because domain is forged)
-	manager.domainMu.RLock()
-	domainCount := len(manager.domains)
-	manager.domainMu.RUnlock()
-
-	if domainCount != 0 {
-		t.Errorf("Expected no domain entries (SPF failure is IP-only), got %d", domainCount)
-	}
 }
 
 // TestManagerSPFFailureAccumulatesForRotatingIPs verifies that multiple SPF failures
@@ -474,38 +442,6 @@ func TestManagerCheckIPReputation(t *testing.T) {
 	}
 }
 
-func TestManagerCheckDomainReputation(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	manager := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 0, 0, 0, logger)
-	manager.Start()
-	defer manager.Stop()
-
-	domain := "example.com"
-
-	// No data - should not deny
-	shouldDeny, reputation := manager.CheckDomainReputation(domain)
-	if shouldDeny {
-		t.Error("should not deny domain with no data")
-	}
-	if reputation != 0 {
-		t.Errorf("reputation = %f; want 0", reputation)
-	}
-
-	// Build up bad reputation
-	entry := manager.getOrCreateDomain(domain)
-	entry.Messages = 20
-	entry.Negative = 15
-	entry.Positive = 5
-
-	shouldDeny, reputation = manager.CheckDomainReputation(domain)
-	if !shouldDeny {
-		t.Error("should deny domain with bad reputation")
-	}
-	if reputation >= ReputationDenyThreshold {
-		t.Errorf("reputation = %f; should be below %f", reputation, ReputationDenyThreshold)
-	}
-}
-
 func TestManagerDisabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	manager := NewManager(false, 24*time.Hour, "test", false, 1*time.Minute, nil, 0, 0, 0, logger)
@@ -529,12 +465,6 @@ func TestManagerDisabled(t *testing.T) {
 		t.Error("ips map should be empty when disabled")
 	}
 	manager.ipMu.RUnlock()
-
-	manager.domainMu.RLock()
-	if len(manager.domains) != 0 {
-		t.Error("domains map should be empty when disabled")
-	}
-	manager.domainMu.RUnlock()
 
 	shouldDeny, _ := manager.CheckIPReputation(ip)
 	if shouldDeny {
@@ -629,58 +559,32 @@ func TestManagerCleanup(t *testing.T) {
 	manager.Start()
 	defer manager.Stop()
 
-	// Add some entries
+	// Add some IP entries
 	oldIP := "192.168.1.1"
 	recentIP := "192.168.1.2"
-	oldDomain := "old.example.com"
-	recentDomain := "recent.example.com"
 
 	manager.ipMu.Lock()
-	// Old entries
 	manager.ips[oldIP] = &IPEntry{
 		FirstSeen: time.Now().Add(-2 * time.Hour),
 		LastSeen:  time.Now().Add(-2 * time.Hour),
 	}
-	// Recent entries
 	manager.ips[recentIP] = &IPEntry{
 		FirstSeen: time.Now(),
 		LastSeen:  time.Now(),
 	}
 	manager.ipMu.Unlock()
 
-	manager.domainMu.Lock()
-	manager.domains[oldDomain] = &DomainEntry{
-		FirstSeen: time.Now().Add(-2 * time.Hour),
-		LastSeen:  time.Now().Add(-2 * time.Hour),
-	}
-	manager.domains[recentDomain] = &DomainEntry{
-		FirstSeen: time.Now(),
-		LastSeen:  time.Now(),
-	}
-	manager.domainMu.Unlock()
-
 	// Run cleanup
 	manager.cleanup()
 
 	manager.ipMu.RLock()
-	// Old entries should be removed
 	if _, exists := manager.ips[oldIP]; exists {
 		t.Error("old IP entry should be removed")
 	}
-	// Recent entries should remain
 	if _, exists := manager.ips[recentIP]; !exists {
 		t.Error("recent IP entry should remain")
 	}
 	manager.ipMu.RUnlock()
-
-	manager.domainMu.RLock()
-	if _, exists := manager.domains[oldDomain]; exists {
-		t.Error("old domain entry should be removed")
-	}
-	if _, exists := manager.domains[recentDomain]; !exists {
-		t.Error("recent domain entry should remain")
-	}
-	manager.domainMu.RUnlock()
 }
 
 // waitFor polls a condition until it's true or a timeout is reached.

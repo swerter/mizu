@@ -59,62 +59,6 @@ func TestLRUEviction_IPs(t *testing.T) {
 	m.ipMu.RUnlock()
 }
 
-func TestLRUEviction_Domains(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	// Create manager with limit of 5 domains
-	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 0, 5, 0, logger)
-	m.Start()
-	defer m.Stop()
-
-	// Add 10 domains
-	domains := []string{
-		"domain1.com", "domain2.com", "domain3.com", "domain4.com", "domain5.com",
-		"domain6.com", "domain7.com", "domain8.com", "domain9.com", "domain10.com",
-	}
-
-	// Directly insert domain entries (RecordMailFrom no longer creates domains)
-	m.domainMu.Lock()
-	for _, domain := range domains {
-		now := time.Now()
-		m.domains[domain] = &DomainEntry{
-			FirstSeen: now,
-			LastSeen:  now,
-			Messages:  1,
-		}
-		time.Sleep(10 * time.Millisecond) // Ensure different LastSeen times
-	}
-	m.domainMu.Unlock()
-
-	// Trigger cleanup (which should evict 5 oldest domains)
-	m.cleanup()
-
-	// Check that we have exactly 5 domains
-	m.domainMu.RLock()
-	domainCount := len(m.domains)
-	m.domainMu.RUnlock()
-
-	if domainCount != 5 {
-		t.Errorf("Expected 5 domains after eviction, got %d", domainCount)
-	}
-
-	// Verify the oldest domains were evicted (first 5)
-	m.domainMu.RLock()
-	for i := 0; i < 5; i++ {
-		if _, exists := m.domains[domains[i]]; exists {
-			t.Errorf("Old domain %s should have been evicted", domains[i])
-		}
-	}
-
-	// Verify the newest domains were kept (last 5)
-	for i := 5; i < 10; i++ {
-		if _, exists := m.domains[domains[i]]; !exists {
-			t.Errorf("Recent domain %s should have been kept", domains[i])
-		}
-	}
-	m.domainMu.RUnlock()
-}
-
 func TestLRUEviction_NoLimit(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -201,32 +145,6 @@ func TestEvictLRUIPs_EmptyMap(t *testing.T) {
 	}
 }
 
-func TestEvictLRUDomains_NegativeCount(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 0, 10, 0, logger)
-	m.Start()
-	defer m.Stop()
-
-	// Add some domains
-	m.RecordMailFrom("test.com")
-	m.RecordMailFrom("test.com")
-	time.Sleep(100 * time.Millisecond)
-
-	m.domainMu.Lock()
-	initialCount := len(m.domains)
-	evicted := m.evictLRUDomains(-5)
-	finalCount := len(m.domains)
-	m.domainMu.Unlock()
-
-	if evicted != 0 {
-		t.Errorf("Expected 0 evictions with negative count, got %d", evicted)
-	}
-
-	if initialCount != finalCount {
-		t.Errorf("Map size should not change with negative eviction count")
-	}
-}
-
 // TestLRUEviction_MixedActivity tests that active IPs are preserved
 func TestLRUEviction_MixedActivity(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -306,25 +224,19 @@ func TestLRUEviction_ConcurrentUpdates(t *testing.T) {
 	}
 }
 
-// TestLRUEviction_BothLimits tests when both IP and domain limits are enforced
+// TestLRUEviction_BothLimits tests when IP limits are enforced
 func TestLRUEviction_BothLimits(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Create manager with limits for both IPs and domains
+	// Create manager with IP limit
 	m := NewManager(true, 24*time.Hour, "test", false, 1*time.Minute, nil, 5, 5, 0, logger)
 	m.Start()
 	defer m.Stop()
 
-	// Add 10 IPs and 10 domains
+	// Add 10 IPs
 	for i := 1; i <= 10; i++ {
 		ip := fmt.Sprintf("192.168.100.%d", i)
-		domain := fmt.Sprintf("example%d.com", i)
 		m.RecordConnection(ip, true)
-		// Directly insert domain (RecordMailFrom no longer creates domains)
-		m.domainMu.Lock()
-		now := time.Now()
-		m.domains[domain] = &DomainEntry{FirstSeen: now, LastSeen: now, Messages: 1}
-		m.domainMu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -334,21 +246,13 @@ func TestLRUEviction_BothLimits(t *testing.T) {
 	// Trigger cleanup
 	m.cleanup()
 
-	// Verify both limits are enforced
+	// Verify IP limit is enforced
 	m.ipMu.RLock()
 	ipCount := len(m.ips)
 	m.ipMu.RUnlock()
 
-	m.domainMu.RLock()
-	domainCount := len(m.domains)
-	m.domainMu.RUnlock()
-
 	if ipCount != 5 {
 		t.Errorf("Expected 5 IPs after eviction, got %d", ipCount)
-	}
-
-	if domainCount != 5 {
-		t.Errorf("Expected 5 domains after eviction, got %d", domainCount)
 	}
 }
 
@@ -436,16 +340,10 @@ func TestLRUEviction_LargeScale(t *testing.T) {
 	m.Start()
 	defer m.Stop()
 
-	// Add 500 IPs and 500 domains
+	// Add 500 IPs
 	for i := 1; i <= 500; i++ {
 		ip := fmt.Sprintf("10.%d.%d.%d", (i/256)%256, (i/16)%16, i%16)
-		domain := fmt.Sprintf("domain%d.com", i)
 		m.RecordConnection(ip, true)
-		// Directly insert domain (RecordMailFrom no longer creates domains)
-		m.domainMu.Lock()
-		now := time.Now()
-		m.domains[domain] = &DomainEntry{FirstSeen: now, LastSeen: now, Messages: 1}
-		m.domainMu.Unlock()
 	}
 
 	// Wait for IP connection events to be processed
@@ -459,16 +357,8 @@ func TestLRUEviction_LargeScale(t *testing.T) {
 	ipCount := len(m.ips)
 	m.ipMu.RUnlock()
 
-	m.domainMu.RLock()
-	domainCount := len(m.domains)
-	m.domainMu.RUnlock()
-
 	if ipCount != 100 {
 		t.Errorf("Expected 100 IPs after large-scale eviction, got %d", ipCount)
-	}
-
-	if domainCount != 100 {
-		t.Errorf("Expected 100 domains after large-scale eviction, got %d", domainCount)
 	}
 }
 

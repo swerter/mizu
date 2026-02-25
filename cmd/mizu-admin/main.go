@@ -239,7 +239,6 @@ type IPStats struct {
 
 type StatsSummary struct {
 	TotalIPs          int   `json:"total_ips"`
-	TotalDomains      int   `json:"total_domains"`
 	BlockedIPs        int   `json:"blocked_ips"`
 	ActiveConnections int64 `json:"active_connections"`
 	EventsProcessed   int64 `json:"events_processed"`
@@ -247,11 +246,10 @@ type StatsSummary struct {
 }
 
 type ServerDomainStats struct {
-	Messages   int64   `json:"messages"`
-	Accepted   int64   `json:"accepted"`
-	Rejected   int64   `json:"rejected"`
-	Junk       int64   `json:"junk"`
-	Reputation float64 `json:"reputation"`
+	Messages int64 `json:"messages"`
+	Accepted int64 `json:"accepted"`
+	Rejected int64 `json:"rejected"`
+	Junk     int64 `json:"junk"`
 }
 
 type ServerSummary struct {
@@ -262,7 +260,7 @@ type ServerSummary struct {
 	JunkMessages      int64                         `json:"junk_messages"`
 	ActiveConnections int64                         `json:"active_connections"`
 	LastUpdated       time.Time                     `json:"last_updated"`
-	Domains           map[string]*ServerDomainStats `json:"domains,omitempty"`           // Sender (FROM) domains
+	SenderDomains     map[string]*ServerDomainStats `json:"sender_domains,omitempty"`    // Sender (FROM) domains
 	RecipientDomains  map[string]*ServerDomainStats `json:"recipient_domains,omitempty"` // Recipient (TO) domains
 }
 
@@ -382,7 +380,7 @@ func cmdStats() {
 			}
 
 			// Per-server top sender domains (FROM)
-			if len(srv.Domains) > 0 {
+			if len(srv.SenderDomains) > 0 {
 				fmt.Println()
 				fmt.Printf("  Top Sender Domains (FROM)\n")
 				fmt.Printf("  ─────────────────────────\n")
@@ -391,8 +389,8 @@ func cmdStats() {
 					domain string
 					stats  *ServerDomainStats
 				}
-				domainEntries := make([]srvDomainEntry, 0, len(srv.Domains))
-				for domain, dStats := range srv.Domains {
+				domainEntries := make([]srvDomainEntry, 0, len(srv.SenderDomains))
+				for domain, dStats := range srv.SenderDomains {
 					domainEntries = append(domainEntries, srvDomainEntry{domain, dStats})
 				}
 				sort.Slice(domainEntries, func(i, j int) bool {
@@ -400,19 +398,18 @@ func cmdStats() {
 				})
 
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-				fmt.Fprintln(w, "  DOMAIN\tMESSAGES\tACCEPTED\tREJECTED\tJUNK\tREPUTATION")
+				fmt.Fprintln(w, "  DOMAIN\tMESSAGES\tACCEPTED\tREJECTED\tJUNK")
 
 				for i, entry := range domainEntries {
 					if i >= 10 {
 						break
 					}
-					fmt.Fprintf(w, "  %s\t%d\t%d\t%d\t%d\t%.2f\n",
+					fmt.Fprintf(w, "  %s\t%d\t%d\t%d\t%d\n",
 						entry.domain,
 						entry.stats.Messages,
 						entry.stats.Accepted,
 						entry.stats.Rejected,
 						entry.stats.Junk,
-						entry.stats.Reputation,
 					)
 				}
 				w.Flush()
@@ -461,7 +458,6 @@ func cmdStats() {
 	fmt.Println("==============")
 	fmt.Println()
 	fmt.Printf("Total IPs tracked:        %d\n", stats.Summary.TotalIPs)
-	fmt.Printf("Total domains tracked:    %d\n", stats.Summary.TotalDomains)
 	fmt.Printf("Blocked IPs:              %d\n", stats.Summary.BlockedIPs)
 	fmt.Printf("Events processed:         %d\n", stats.Summary.EventsProcessed)
 	fmt.Printf("Events dropped:           %d\n", stats.Summary.EventsDropped)
