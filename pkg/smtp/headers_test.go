@@ -55,6 +55,7 @@ func TestInjectMizuHeaders(t *testing.T) {
 		arcResult,
 		false, // not junk
 		false, // don't disable mizu headers
+		nil,   // no spam headers
 	)
 
 	// Verify the modified email contains expected headers
@@ -112,6 +113,7 @@ func TestInjectMizuHeaders_Junk(t *testing.T) {
 		nil,   // no ARC
 		true,  // IS JUNK
 		false, // don't disable mizu headers
+		nil,   // no spam headers
 	)
 
 	// Should mark as junk
@@ -143,6 +145,7 @@ func TestInjectMizuHeaders_NoTLS(t *testing.T) {
 		nil,
 		false,
 		false, // don't disable mizu headers
+		nil,   // no spam headers
 	)
 
 	// Should use ESMTP (not ESMTPS) when no TLS

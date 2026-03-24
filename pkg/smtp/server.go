@@ -93,6 +93,20 @@ type RecipientValidationResponse struct {
 	Temporary bool // If true, rejection is temporary (4xx), otherwise permanent (5xx)
 }
 
+// SpamChecker defines the interface for external spam checking (rspamd)
+type SpamChecker interface {
+	Check(ctx context.Context, message, clientIP, from string, rcpt []string, helo string) (SpamCheckResult, error)
+}
+
+// SpamCheckResult represents the result of spam checking
+type SpamCheckResult struct {
+	IsSpam       bool              // True if message should be treated as spam
+	Action       string            // Rspamd action (e.g., "add header", "reject")
+	Score        float64           // Spam score
+	AddHeaders   map[string]string // Headers to add (from rspamd milter)
+	ShouldReject bool              // True if message should be rejected based on action
+}
+
 // Backend implements smtp.Backend interface for our custom SMTP server.
 // It manages the overall server configuration and creates new sessions for incoming connections.
 type Backend struct {
@@ -122,6 +136,9 @@ type Backend struct {
 
 	// Recipient validation
 	RecipientValidator RecipientValidator // Optional: Recipient validator (validates during RCPT TO)
+
+	// Spam checking
+	SpamChecker SpamChecker // Optional: External spam checker (rspamd)
 }
 
 // Authenticator interface for SMTP AUTH
@@ -559,6 +576,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		authRateLimiter:    be.AuthRateLimiter,    // Auth rate limiter (nil if disabled)
 		senderValidator:    be.SenderValidator,    // Sender validator (nil if disabled)
 		recipientValidator: be.RecipientValidator, // Recipient validator (nil if disabled)
+		spamChecker:        be.SpamChecker,        // Spam checker (nil if disabled)
 	}
 
 	be.Logger.Info("Session created successfully",
@@ -666,6 +684,10 @@ type Session struct {
 
 	// Recipient validation
 	recipientValidator RecipientValidator // Recipient validator for validating during RCPT TO (nil if disabled)
+
+	// Spam checking
+	spamChecker SpamChecker      // Spam checker for external spam scanning (nil if disabled)
+	spamResult  *SpamCheckResult // Result from spam check (nil if not checked)
 }
 
 // SMTP command states for sequence validation
@@ -1504,6 +1526,47 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 		}
 	}
 
+	// External spam checking (rspamd)
+	if s.spamChecker != nil {
+		spamCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		result, err := s.spamChecker.Check(spamCtx, rawEmail, s.remoteAddr, s.from, s.to, s.helo)
+		if err != nil {
+			s.Logger.Warn("Spam check failed", "error", err)
+			if s.metrics != nil {
+				s.metrics.SMTPMessagesRejected.WithLabelValues(s.serverName(), s.serverType(), "spam_check_error").Inc()
+			}
+			// Don't reject on spam check errors - fail open for availability
+		} else {
+			s.spamResult = &result
+
+			s.Logger.Info("Spam check completed",
+				"is_spam", result.IsSpam,
+				"action", result.Action,
+				"score", result.Score)
+
+			// Check if we should reject based on rspamd action
+			if result.ShouldReject {
+				s.Logger.Warn("Rejecting message - spam check action", "action", result.Action, "score", result.Score)
+				if s.metrics != nil {
+					s.metrics.SMTPMessagesRejected.WithLabelValues(s.serverName(), s.serverType(), "spam_reject").Inc()
+				}
+				return &smtp.SMTPError{
+					Code:         550,
+					EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+					Message:      "message rejected - spam detected",
+				}
+			}
+
+			// Mark as junk if spam detected (even if not rejecting)
+			if result.IsSpam {
+				s.isJunk = true
+				s.junkReasons = append(s.junkReasons, fmt.Sprintf("spam check (score: %.2f)", result.Score))
+			}
+		}
+	}
+
 	if s.isJunk {
 		s.Logger.Info("Message marked as junk", "from", s.from, "reasons", s.junkReasons)
 	}
@@ -1522,6 +1585,12 @@ func (s *Session) deliverMessage(rawEmail string) error {
 		tlsVersionStr = tlsVersionString(s.tlsState.Version)
 	}
 
+	// Collect spam check headers
+	var spamHeaders map[string]string
+	if s.spamResult != nil && len(s.spamResult.AddHeaders) > 0 {
+		spamHeaders = s.spamResult.AddHeaders
+	}
+
 	emailWithHeaders := InjectMizuHeaders(
 		rawEmail,
 		s.serverConfig.Hostname,
@@ -1534,6 +1603,7 @@ func (s *Session) deliverMessage(rawEmail string) error {
 		s.arcResult,
 		s.isJunk,
 		s.serverConfig.DisableMizuHeaders,
+		spamHeaders,
 	)
 
 	if s.serverConfig.DisableMizuHeaders {

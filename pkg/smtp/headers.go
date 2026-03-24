@@ -14,7 +14,8 @@ import (
 // InjectMizuHeaders adds Received and X-Mizu-* headers to the email
 // These headers provide email tracing, authentication results, and debugging information
 // If disableMizuHeaders is true, only the Received header is added (X-Mizu-* headers are skipped)
-func InjectMizuHeaders(rawEmail, domain, remoteAddr, heloHostname, traceID string, tlsVersion string, spfResult *validation.SPFResult, dmarcResult *validation.DMARCResult, arcResult *validation.ARCResult, isJunk bool, disableMizuHeaders bool) string {
+// spamHeaders contains additional headers from spam checking (e.g., X-Junk: yes)
+func InjectMizuHeaders(rawEmail, domain, remoteAddr, heloHostname, traceID string, tlsVersion string, spfResult *validation.SPFResult, dmarcResult *validation.DMARCResult, arcResult *validation.ARCResult, isJunk bool, disableMizuHeaders bool, spamHeaders map[string]string) string {
 	// Build the Received header (always added)
 	receivedHeader := buildReceivedHeader(domain, remoteAddr, heloHostname, traceID, tlsVersion)
 
@@ -24,9 +25,22 @@ func InjectMizuHeaders(rawEmail, domain, remoteAddr, heloHostname, traceID strin
 		mizuHeaders = buildMizuHeaders(traceID, spfResult, dmarcResult, arcResult, isJunk)
 	}
 
+	// Build spam check headers (from rspamd or other spam checkers)
+	var spamHeaderStr string
+	if len(spamHeaders) > 0 {
+		var sb strings.Builder
+		for name, value := range spamHeaders {
+			sb.WriteString(name)
+			sb.WriteString(": ")
+			sb.WriteString(value)
+			sb.WriteString("\r\n")
+		}
+		spamHeaderStr = sb.String()
+	}
+
 	// Prepend headers to the email
 	// RFC 5322: Headers come before the body, separated by CRLF
-	allHeaders := receivedHeader + mizuHeaders
+	allHeaders := receivedHeader + mizuHeaders + spamHeaderStr
 	return allHeaders + rawEmail
 }
 

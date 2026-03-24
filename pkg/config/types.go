@@ -71,6 +71,7 @@ type ServerConfig struct {
 	Auth       ServerAuthConfig       `toml:"auth"`       // Authentication configuration (use auth.required=true to require auth)
 	DNSChecks  ServerDNSChecksConfig  `toml:"dns_checks"` // DNS validation checks (rDNS, MX)
 	Junk       ServerJunkConfig       `toml:"junk"`       // Junk/spam detection configuration
+	SpamCheck  ServerSpamCheckConfig  `toml:"spam_check"` // External spam checking (rspamd) configuration
 
 	// === Rate Limiting (per-server) ===
 	RateLimit   RateLimitConfig         `toml:"rate_limit"`  // Rate limiting configuration
@@ -214,6 +215,18 @@ type ServerJunkConfig struct {
 	ApplyAction      string   `toml:"apply_action"`       // Action when junk detected: "header", "reject", "warn", "subject"
 	SubjectPattern   string   `toml:"subject_pattern"`    // Subject pattern for "subject" action (e.g., "[spam] %s")
 	Header           string   `toml:"header"`             // Header to add for "header" action (e.g., "X-Spam")
+}
+
+// ServerSpamCheckConfig holds external spam checking configuration (rspamd)
+type ServerSpamCheckConfig struct {
+	Enabled            bool   `toml:"enabled"`              // Enable external spam checking (default: false)
+	URL                string `toml:"url"`                  // Rspamd HTTP endpoint (e.g., "http://rspamd:11333/checkv2")
+	Password           string `toml:"password"`             // HTTPCrypt password for rspamd authentication (optional)
+	HTTPTimeoutSeconds int    `toml:"http_timeout_seconds"` // HTTP client timeout in seconds (default: 5)
+	SpamHeader         string `toml:"spam_header"`          // Header name to add when spam detected (default: "X-Junk")
+	SpamHeaderValue    string `toml:"spam_header_value"`    // Header value for spam (default: "yes")
+	HamHeaderValue     string `toml:"ham_header_value"`     // Header value for ham/not spam (default: "", empty = don't add header for ham)
+	RejectOnAction     string `toml:"reject_on_action"`     // Reject message if rspamd action matches this (e.g., "reject", empty = never reject)
 }
 
 // ServerTLSConfig holds TLS configuration for a server
