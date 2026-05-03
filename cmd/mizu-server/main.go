@@ -39,6 +39,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	gosmtp "github.com/emersion/go-smtp"
+	proxyproto "github.com/pires/go-proxyproto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -1298,6 +1299,44 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 		return
 	}
 	defer listener.Close()
+
+	// Wrap with PROXY protocol listener if enabled
+	if serverCfg.ProxyProtocol {
+		// Build trusted subnet list for policy enforcement
+		var trustedNets []*net.IPNet
+		for _, entry := range serverCfg.ProxyProtocolTrusted {
+			if _, cidr, err := net.ParseCIDR(entry); err == nil {
+				trustedNets = append(trustedNets, cidr)
+			} else if ip := net.ParseIP(entry); ip != nil {
+				// Convert single IP to /32 or /128
+				bits := 32
+				if ip.To4() == nil {
+					bits = 128
+				}
+				trustedNets = append(trustedNets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			}
+		}
+
+		listener = &proxyproto.Listener{
+			Listener: listener,
+			Policy: func(upstream net.Addr) (proxyproto.Policy, error) {
+				tcpAddr, ok := upstream.(*net.TCPAddr)
+				if !ok {
+					return proxyproto.REJECT, nil
+				}
+				for _, n := range trustedNets {
+					if n.Contains(tcpAddr.IP) {
+						return proxyproto.REQUIRE, nil
+					}
+				}
+				return proxyproto.REJECT, nil
+			},
+		}
+		logger.Info("PROXY protocol enabled",
+			"server", serverCfg.Name,
+			"addr", serverCfg.ListenAddr,
+			"trusted", serverCfg.ProxyProtocolTrusted)
+	}
 
 	// Mark server as successfully started
 	successCounter.Add(1)

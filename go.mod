@@ -1,6 +1,6 @@
 module migadu/mizu
 
-go 1.24.1
+go 1.25
 
 require (
 	github.com/BurntSushi/toml v1.5.0
@@ -54,6 +54,7 @@ require (
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/pires/go-proxyproto v0.12.0 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
