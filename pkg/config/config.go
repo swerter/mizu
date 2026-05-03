@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 )
@@ -236,6 +237,22 @@ func (s *ServerConfig) Validate() error {
 	}
 	if strings.HasSuffix(s.ListenAddr, ":25") && s.IsSubmission() {
 		return errors.New("port 25 is typically for relay servers, not submission (use 465 or 587)")
+	}
+
+	// Validate PROXY protocol config
+	if s.ProxyProtocol && len(s.ProxyProtocolTrusted) == 0 {
+		return errors.New("proxy_protocol_trusted is required when proxy_protocol=true (specify trusted proxy CIDRs/IPs)")
+	}
+	if !s.ProxyProtocol && len(s.ProxyProtocolTrusted) > 0 {
+		return errors.New("proxy_protocol_trusted is set but proxy_protocol is not enabled")
+	}
+	for _, cidr := range s.ProxyProtocolTrusted {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			// Try as plain IP
+			if net.ParseIP(cidr) == nil {
+				return fmt.Errorf("proxy_protocol_trusted: invalid CIDR or IP %q", cidr)
+			}
+		}
 	}
 
 	// Validate distributed tracking
