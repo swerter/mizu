@@ -61,10 +61,11 @@ func main() {
 	}
 
 	// Setup logging
-	logger, err := logging.NewLogger(cfg.Logging)
+	logger, logWriter, err := logging.NewLogger(cfg.Logging)
 	if err != nil {
 		log.Fatalf("Failed to setup logging: %v", err)
 	}
+	defer logWriter.Close()
 
 	logger.Info("███╗   ███╗██╗███████╗██╗   ██╗")
 	logger.Info("████╗ ████║██║╚══███╔╝██║   ██║")
@@ -167,27 +168,31 @@ func main() {
 		}
 	}
 
-	// Handle SIGHUP for certificate reload (file-based TLS only)
-	if fileCertProvider != nil {
-		hupChan := make(chan os.Signal, 1)
-		signal.Notify(hupChan, syscall.SIGHUP)
-		concurrency.SafeGo(logger, "sighup-handler", func() {
-			defer signal.Stop(hupChan)
-			for {
-				select {
-				case <-hupChan:
-					logger.Info("Received SIGHUP, reloading TLS certificates...")
+	// Handle SIGHUP: reopen log file for newsyslog rotation + reload TLS certificates (file-based).
+	hupChan := make(chan os.Signal, 1)
+	signal.Notify(hupChan, syscall.SIGHUP)
+	concurrency.SafeGo(logger, "sighup-handler", func() {
+		defer signal.Stop(hupChan)
+		for {
+			select {
+			case <-hupChan:
+				logger.Info("received SIGHUP, reopening log file")
+				if err := logWriter.Reopen(); err != nil {
+					logger.Error("failed to reopen log file", "error", err)
+				}
+				if fileCertProvider != nil {
+					logger.Info("reloading TLS certificates")
 					if err := fileCertProvider.Reload(); err != nil {
 						logger.Error("TLS certificate reload failed, keeping previous certificate", "error", err)
 					} else {
 						logger.Info("TLS certificates reloaded successfully")
 					}
-				case <-ctx.Done():
-					return
 				}
+			case <-ctx.Done():
+				return
 			}
-		})
-	}
+		}
+	})
 
 	// Initialize and start health check server (before starting SMTP servers)
 	// Note: Connection trackers are registered later via AddChecker after server backends are created
