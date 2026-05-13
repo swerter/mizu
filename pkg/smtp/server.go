@@ -736,61 +736,8 @@ func (s *Session) Helo(hostname string) error {
 
 	// Validate HELO hostname for security (skip in local development mode)
 	if !s.globalConfig.Local {
-		// Reject if HELO claims to be our own hostname or a subdomain (spoofing attempt)
-		// Case-insensitive check for robustness.
-		if strings.HasSuffix(strings.ToLower(hostname), "."+strings.ToLower(s.serverConfig.Hostname)) || strings.EqualFold(hostname, s.serverConfig.Hostname) {
-			s.Logger.Warn("Rejecting HELO/EHLO - client using our hostname", "hostname", hostname, "our_hostname", s.serverConfig.Hostname)
-			return &smtp.SMTPError{
-				Code:         550,
-				EnhancedCode: smtp.EnhancedCode{5, 7, 8},
-				Message:      "invalid HELO hostname",
-			}
-		}
-
-		// Reject localhost or single-label hostnames
-		if hostname == "localhost" || !strings.Contains(hostname, ".") {
-			s.Logger.Warn("Rejecting HELO/EHLO - invalid hostname", "hostname", hostname)
-			return &smtp.SMTPError{
-				Code:         550,
-				EnhancedCode: smtp.EnhancedCode{5, 7, 1},
-				Message:      "HELO requires fully-qualified hostname",
-			}
-		}
-
-		// Reject bare IP addresses. Per RFC 5321, IP literals must be in brackets.
-		isIPLiteral := strings.HasPrefix(hostname, "[") && strings.HasSuffix(hostname, "]")
-		if !isIPLiteral && net.ParseIP(hostname) != nil {
-			s.Logger.Warn("Rejecting HELO/EHLO - bare IP", "ip", hostname)
-			return &smtp.SMTPError{
-				Code:    550,
-				Message: "HELO with bare IP must use [IP] format",
-			}
-		}
-
-		// Check for invalid characters
-		if strings.ContainsAny(hostname, " \t\r\n") {
-			s.Logger.Warn("Rejecting HELO/EHLO - invalid characters")
-			return &smtp.SMTPError{
-				Code:    550,
-				Message: "invalid characters in HELO hostname",
-			}
-		}
-
-		// Optional: Verify HELO hostname has valid DNS records
-		if s.serverConfig.DNSChecks.RequireResolvableHELO {
-			timeoutSecs := s.globalConfig.DNS.TimeoutSeconds
-			if timeoutSecs == 0 {
-				timeoutSecs = 5 // Default DNS timeout
-			}
-			resolves, reason, err := blacklist.CheckHELOResolves(hostname, time.Duration(timeoutSecs)*time.Second)
-			if err != nil || !resolves {
-				s.Logger.Warn("Rejecting HELO/EHLO - hostname check failed", "hostname", hostname, "reason", reason)
-				return &smtp.SMTPError{
-					Code:         550,
-					EnhancedCode: smtp.EnhancedCode{5, 7, 27},
-					Message:      fmt.Sprintf("HELO hostname check failed: %s", reason),
-				}
-			}
+		if err := s.validateHeloHostname(hostname); err != nil {
+			return err
 		}
 	}
 
@@ -801,6 +748,70 @@ func (s *Session) Helo(hostname string) error {
 	// Reset to idle timeout to wait for the next command
 	if err := s.setCommandTimeout(IdleTimeout); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// validateHeloHostname checks a HELO/EHLO hostname for security issues.
+// This is called both from the explicit Helo() handler and from the Mail()
+// fallback path when go-smtp handles EHLO internally.
+func (s *Session) validateHeloHostname(hostname string) error {
+	// Reject if HELO claims to be our own hostname or a subdomain (spoofing attempt)
+	// Case-insensitive check for robustness.
+	if strings.HasSuffix(strings.ToLower(hostname), "."+strings.ToLower(s.serverConfig.Hostname)) || strings.EqualFold(hostname, s.serverConfig.Hostname) {
+		s.Logger.Warn("Rejecting HELO/EHLO - client using our hostname", "hostname", hostname, "our_hostname", s.serverConfig.Hostname)
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 8},
+			Message:      "invalid HELO hostname",
+		}
+	}
+
+	// Reject localhost or single-label hostnames
+	if hostname == "localhost" || !strings.Contains(hostname, ".") {
+		s.Logger.Warn("Rejecting HELO/EHLO - invalid hostname", "hostname", hostname)
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "HELO requires fully-qualified hostname",
+		}
+	}
+
+	// Reject bare IP addresses. Per RFC 5321, IP literals must be in brackets.
+	isIPLiteral := strings.HasPrefix(hostname, "[") && strings.HasSuffix(hostname, "]")
+	if !isIPLiteral && net.ParseIP(hostname) != nil {
+		s.Logger.Warn("Rejecting HELO/EHLO - bare IP", "ip", hostname)
+		return &smtp.SMTPError{
+			Code:    550,
+			Message: "HELO with bare IP must use [IP] format",
+		}
+	}
+
+	// Check for invalid characters (including null bytes)
+	if strings.ContainsAny(hostname, " \t\r\n\x00") {
+		s.Logger.Warn("Rejecting HELO/EHLO - invalid characters")
+		return &smtp.SMTPError{
+			Code:    550,
+			Message: "invalid characters in HELO hostname",
+		}
+	}
+
+	// Optional: Verify HELO hostname has valid DNS records
+	if s.serverConfig.DNSChecks.RequireResolvableHELO {
+		timeoutSecs := s.globalConfig.DNS.TimeoutSeconds
+		if timeoutSecs == 0 {
+			timeoutSecs = 5 // Default DNS timeout
+		}
+		resolves, reason, err := blacklist.CheckHELOResolves(hostname, time.Duration(timeoutSecs)*time.Second)
+		if err != nil || !resolves {
+			s.Logger.Warn("Rejecting HELO/EHLO - hostname check failed", "hostname", hostname, "reason", reason)
+			return &smtp.SMTPError{
+				Code:         550,
+				EnhancedCode: smtp.EnhancedCode{5, 7, 27},
+				Message:      fmt.Sprintf("HELO hostname check failed: %s", reason),
+			}
+		}
 	}
 
 	return nil
@@ -869,7 +880,13 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	if s.conn != nil {
 		heloHostname := s.conn.Hostname()
 		if heloHostname != "" && s.helo == "" {
-			// EHLO was handled by go-smtp internally, update our state
+			// EHLO was handled by go-smtp internally — run the same
+			// validation that the explicit Helo() path uses.
+			if !s.globalConfig.Local {
+				if err := s.validateHeloHostname(heloHostname); err != nil {
+					return err
+				}
+			}
 			s.helo = heloHostname
 			s.commandState = stateHelo
 			s.Logger.Debug("HELO/EHLO set via conn.Hostname", "hostname", heloHostname)
@@ -941,17 +958,12 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 				"from", from,
 				"client_ip", s.remoteAddr,
 				"authenticated_user", s.authenticatedUser,
-				"message", result.Message)
-
-			message := result.Message
-			if message == "" {
-				message = "sender address rejected"
-			}
+				"backend_message", result.Message)
 
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 7, 1},
-				Message:      message,
+				Message:      "sender address rejected",
 			}
 		}
 
@@ -1205,34 +1217,24 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 		// Check if recipient is accepted
 		if !result.Accepted {
-			// Use custom message if provided, otherwise use default
-			message := result.Message
-			if message == "" {
-				if result.Temporary {
-					message = "temporary failure, please try again later"
-				} else {
-					message = "mailbox unavailable"
-				}
-			}
-
 			if result.Temporary {
 				s.Logger.Info("Recipient temporarily rejected by validation",
 					"to", to,
-					"message", message)
+					"backend_message", result.Message)
 				return &smtp.SMTPError{
 					Code:         450,
 					EnhancedCode: smtp.EnhancedCode{4, 2, 1},
-					Message:      message,
+					Message:      "temporary failure, please try again later",
 				}
 			}
 
 			s.Logger.Info("Recipient rejected by validation",
 				"to", to,
-				"message", message)
+				"backend_message", result.Message)
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 1, 1},
-				Message:      message,
+				Message:      "mailbox unavailable",
 			}
 		}
 

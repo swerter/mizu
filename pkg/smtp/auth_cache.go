@@ -3,6 +3,7 @@ package smtp
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"log/slog"
 	"migadu/mizu/pkg/concurrency"
@@ -127,8 +128,9 @@ func (c *AuthCache) CheckAuth(username, password string) (authenticated bool, fo
 	// Hash the provided password for comparison
 	passwordHash := hashPassword(password)
 
-	// Check if password matches cached hash
-	passwordMatches := (entry.PasswordHash != "" && entry.PasswordHash == passwordHash)
+	// Check if password matches cached hash (constant-time comparison to prevent timing attacks)
+	passwordMatches := entry.PasswordHash != "" &&
+		subtle.ConstantTimeCompare([]byte(entry.PasswordHash), []byte(passwordHash)) == 1
 
 	// Handle negative cache entries (failed authentication)
 	if entry.Result != AuthSuccess {

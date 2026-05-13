@@ -172,15 +172,17 @@ func (a *HTTPAuthenticator) AuthenticateWithIP(username, password, remoteIP stri
 	return true, nil
 }
 
-// verifyAgainstHashes tries to verify the password against a list of hashes
-// Returns true if any hash matches
+// verifyAgainstHashes tries to verify the password against a list of hashes.
+// Returns true if any hash matches. Always iterates all hashes to avoid
+// leaking which position matched via timing side-channel.
 func (a *HTTPAuthenticator) verifyAgainstHashes(hashes []string, password string) bool {
+	matched := false
 	for _, hash := range hashes {
-		if err := VerifyPassword(hash, password); err == nil {
-			return true
+		if VerifyPassword(hash, password) == nil {
+			matched = true
 		}
 	}
-	return false
+	return matched
 }
 
 // fetchCredentials fetches user credentials from the backend via GET request
@@ -211,7 +213,7 @@ func (a *HTTPAuthenticator) fetchCredentials(username, remoteIP string) (*AuthRe
 
 	// 404 means user not found - this is not an error, just auth failure
 	if resp.StatusCode == http.StatusNotFound {
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if err != nil {
 			a.logger.Warn("failed to read auth 404 response body", "username", username, "error", err)
 		}
@@ -224,7 +226,7 @@ func (a *HTTPAuthenticator) fetchCredentials(username, remoteIP string) (*AuthRe
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if err != nil {
 			a.logger.Warn("failed to read auth error response body", "username", username, "error", err)
 		}

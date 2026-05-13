@@ -1,8 +1,8 @@
 package smtp
 
 import (
-	"bytes"
 	"crypto/sha512"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -86,8 +86,8 @@ func verifySSHA512(hashedPassword, password string) error {
 	h.Write(salt)
 	calculatedHash := h.Sum(nil)
 
-	// Compare the hashes
-	if !bytes.Equal(storedHash, calculatedHash) {
+	// Compare the hashes (constant-time to prevent timing attacks)
+	if subtle.ConstantTimeCompare(storedHash, calculatedHash) != 1 {
 		return errors.New("invalid password")
 	}
 
@@ -111,8 +111,8 @@ func verifySHA512(hashedPassword, password string) error {
 	h.Write([]byte(password))
 	calculatedHash := h.Sum(nil)
 
-	// Compare the hashes
-	if !bytes.Equal(storedHash, calculatedHash) {
+	// Compare the hashes (constant-time to prevent timing attacks)
+	if subtle.ConstantTimeCompare(storedHash, calculatedHash) != 1 {
 		return errors.New("invalid password")
 	}
 

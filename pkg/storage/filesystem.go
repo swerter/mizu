@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,8 @@ import (
 
 	"log/slog"
 )
+
+var errPathTraversal = errors.New("invalid storage key: path traversal detected")
 
 // FilesystemBackend implements the Backend interface using local filesystem
 type FilesystemBackend struct {
@@ -49,17 +52,30 @@ func NewFilesystemBackend(basePath string, logger *slog.Logger) (*FilesystemBack
 	}, nil
 }
 
-// getFullPath converts a storage key to a full filesystem path
-func (f *FilesystemBackend) getFullPath(key string) string {
+// getFullPath converts a storage key to a full filesystem path.
+// Returns the path and true if valid, or empty string and false if the key
+// would escape the base directory (directory traversal).
+func (f *FilesystemBackend) getFullPath(key string) (string, bool) {
 	// Sanitize key to prevent directory traversal attacks
 	key = filepath.Clean(key)
 	key = strings.TrimPrefix(key, "/")
-	return filepath.Join(f.basePath, key)
+	fullPath := filepath.Join(f.basePath, key)
+
+	// Verify the resolved path is still within the base directory
+	if !strings.HasPrefix(fullPath, f.basePath+string(filepath.Separator)) && fullPath != f.basePath {
+		f.logger.Warn("Path traversal attempt blocked", "key", key, "resolved", fullPath)
+		return "", false
+	}
+
+	return fullPath, true
 }
 
 // PutObject uploads an object to the filesystem
 func (f *FilesystemBackend) PutObject(ctx context.Context, key string, reader io.Reader, size int64, opts PutOptions) error {
-	fullPath := f.getFullPath(key)
+	fullPath, ok := f.getFullPath(key)
+	if !ok {
+		return errPathTraversal
+	}
 
 	// Check for conditional put (IfNoneMatch: "*" means only create if not exists)
 	if opts.IfNoneMatch == "*" {
@@ -108,7 +124,10 @@ func (f *FilesystemBackend) PutObject(ctx context.Context, key string, reader io
 
 // GetObject retrieves an object from the filesystem
 func (f *FilesystemBackend) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
-	fullPath := f.getFullPath(key)
+	fullPath, ok := f.getFullPath(key)
+	if !ok {
+		return nil, errPathTraversal
+	}
 
 	file, err := os.Open(fullPath)
 	if err != nil {
@@ -125,7 +144,10 @@ func (f *FilesystemBackend) GetObject(ctx context.Context, key string) (io.ReadC
 
 // StatObject returns metadata about an object
 func (f *FilesystemBackend) StatObject(ctx context.Context, key string) (ObjectInfo, error) {
-	fullPath := f.getFullPath(key)
+	fullPath, ok := f.getFullPath(key)
+	if !ok {
+		return ObjectInfo{}, errPathTraversal
+	}
 
 	info, err := os.Stat(fullPath)
 	if err != nil {
@@ -148,7 +170,10 @@ func (f *FilesystemBackend) StatObject(ctx context.Context, key string) (ObjectI
 
 // RemoveObject deletes an object from the filesystem
 func (f *FilesystemBackend) RemoveObject(ctx context.Context, key string) error {
-	fullPath := f.getFullPath(key)
+	fullPath, ok := f.getFullPath(key)
+	if !ok {
+		return errPathTraversal
+	}
 
 	err := os.Remove(fullPath)
 	if err != nil {
@@ -165,7 +190,10 @@ func (f *FilesystemBackend) RemoveObject(ctx context.Context, key string) error 
 
 // ListObjects lists objects with a given prefix
 func (f *FilesystemBackend) ListObjects(ctx context.Context, prefix string, recursive bool) ([]ObjectInfo, error) {
-	searchPath := f.getFullPath(prefix)
+	searchPath, ok := f.getFullPath(prefix)
+	if !ok {
+		return nil, errPathTraversal
+	}
 	var objects []ObjectInfo
 
 	// If searchPath doesn't exist, return empty list
