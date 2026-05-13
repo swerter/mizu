@@ -403,26 +403,37 @@ func TestFilesystemBackend_GetFullPath(t *testing.T) {
 	backend, _ := NewFilesystemBackend(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Test normal key
-	path := backend.getFullPath("test/key.txt")
+	path, ok := backend.getFullPath("test/key.txt")
 	expected := filepath.Join(tmpDir, "test/key.txt")
-	if path != expected {
-		t.Errorf("Expected %s, got %s", expected, path)
+	if !ok || path != expected {
+		t.Errorf("Expected %s (ok=true), got %s (ok=%v)", expected, path, ok)
 	}
 
 	// Test key with leading slash (should be cleaned)
-	path = backend.getFullPath("/test/key.txt")
-	if path != expected {
-		t.Errorf("Expected %s, got %s", expected, path)
+	path, ok = backend.getFullPath("/test/key.txt")
+	if !ok || path != expected {
+		t.Errorf("Expected %s (ok=true), got %s (ok=%v)", expected, path, ok)
 	}
 
-	// Test key with .. (should be sanitized)
-	path = backend.getFullPath("test/../key.txt")
+	// Test key with .. that stays within base (should succeed)
+	path, ok = backend.getFullPath("test/../key.txt")
 	expected = filepath.Join(tmpDir, "key.txt")
-	if path != expected {
-		t.Errorf("Expected %s, got %s", expected, path)
+	if !ok || path != expected {
+		t.Errorf("Expected %s (ok=true), got %s (ok=%v)", expected, path, ok)
 	}
 
-	t.Log("✓ getFullPath sanitizes keys correctly")
+	// Test directory traversal attack (should be blocked)
+	_, ok = backend.getFullPath("../../etc/passwd")
+	if ok {
+		t.Error("Expected path traversal to be blocked, but it was allowed")
+	}
+
+	_, ok = backend.getFullPath("../../../etc/shadow")
+	if ok {
+		t.Error("Expected path traversal to be blocked, but it was allowed")
+	}
+
+	t.Log("✓ getFullPath sanitizes keys and blocks traversal correctly")
 }
 
 func TestGenerateETag(t *testing.T) {
