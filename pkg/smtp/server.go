@@ -13,6 +13,7 @@ import (
 	"net"
 	net_http "net/http"
 	"net/mail"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1180,16 +1181,17 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		}
 	}
 
-	s.to = append(s.to, to)
 	s.commandState = stateRcpt
 
 	// Check rate limits now that we have TO information
 	// This allows TO, TO_DOMAIN, FROM+TO, AUTHENTICATED_USER, and other recipient-based combination checks
 	if s.rateLimiter != nil {
+		// Include the candidate recipient for rate limit evaluation.
+		// Use slices.Concat to avoid mutating s.to's underlying array.
 		sessionCtx := SessionContext{
 			RemoteAddr:        s.remoteAddr,
 			From:              s.from,
-			To:                s.to,
+			To:                slices.Concat(s.to, []string{to}),
 			AuthenticatedUser: s.authenticatedUser,
 		}
 		if err := s.rateLimiter.CheckRateLimit(sessionCtx); err != nil {
@@ -1249,6 +1251,9 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 			s.distTracker.ClearRecipientCache(to)
 		}
 	}
+
+	// Add recipient only after all checks pass
+	s.to = append(s.to, to)
 
 	// Reset to idle timeout to wait for the next command
 	if err := s.setCommandTimeout(IdleTimeout); err != nil {
@@ -1667,19 +1672,28 @@ func (s *Session) deliverMessage(rawEmail string) error {
 
 // deliverSynchronous handles synchronous delivery
 func (s *Session) deliverSynchronous(signedEmail string) error {
+	// Per-recipient POST to Mailqueuer. Each request is atomic: one recipient,
+	// one queue message, one S3 object. On first failure, stop and return the
+	// error — the sending MTA will retry all recipients.
+	for _, recipient := range s.to {
+		if err := s.deliverToRecipient(signedEmail, recipient); err != nil {
+			return err
+		}
+	}
+
+	s.Logger.Info("Successfully delivered message to destination", "recipients", len(s.to))
+	return nil
+}
+
+func (s *Session) deliverToRecipient(signedEmail string, recipient string) error {
 	// Check recipient cache first (if distributed tracking is enabled)
-	if s.distTracker != nil && len(s.to) > 0 {
-		// Check cache for all recipients
-		for _, recipient := range s.to {
-			if found, isBlocked, reason := s.distTracker.IsRecipientCached(recipient); found {
-				s.Logger.Info(fmt.Sprintf("Recipient %s found in cache: %s", recipient, reason))
-				if isBlocked {
-					// Recipient is blocked (403)
-					return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "Recipient blocked by destination"}
-				}
-				// Recipient not found (404)
-				return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "Recipient not found"}
+	if s.distTracker != nil {
+		if found, isBlocked, reason := s.distTracker.IsRecipientCached(recipient); found {
+			s.Logger.Info(fmt.Sprintf("Recipient %s found in cache: %s", recipient, reason))
+			if isBlocked {
+				return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "Recipient blocked by destination"}
 			}
+			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "Recipient not found"}
 		}
 	}
 
@@ -1691,7 +1705,7 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 		s.serverConfig.Delivery.MaxRetryAttempts,
 		s.isJunk,
 		s.from,
-		s.to,
+		recipient,
 		s.traceID,
 		s.authenticatedUser,
 		s.circuitBreaker,
@@ -1700,12 +1714,10 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 	)
 
 	if err != nil {
-		s.Logger.Error(fmt.Sprintf("Failed to deliver message to destination: %v", err))
+		s.Logger.Error(fmt.Sprintf("Failed to deliver message for recipient %s: %v", recipient, err))
 
-		// Check if this is a recipient-specific error that should be cached
 		var httpErr *poster.HTTPStatusError
 		if errors.As(err, &httpErr) {
-			// Handle 413 Payload Too Large - convert to SMTP 552
 			if httpErr.IsPayloadTooLarge() {
 				return &smtp.SMTPError{
 					Code:         552,
@@ -1714,19 +1726,13 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 				}
 			}
 
-			// Cache 404 responses (recipient not found)
-			if httpErr.IsRecipientNotFound() && s.distTracker != nil && s.distTracker.recipientCacheTTL > 0 && len(s.to) > 0 {
-				for _, recipient := range s.to {
-					s.distTracker.CacheRecipientNotFound(recipient)
-				}
+			if httpErr.IsRecipientNotFound() && s.distTracker != nil && s.distTracker.recipientCacheTTL > 0 {
+				s.distTracker.CacheRecipientNotFound(recipient)
 				return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "Recipient not found"}
 			}
 
-			// Cache 403 responses (recipient blocked)
-			if httpErr.IsRecipientBlocked() && s.distTracker != nil && s.distTracker.recipientCacheTTL > 0 && len(s.to) > 0 {
-				for _, recipient := range s.to {
-					s.distTracker.CacheRecipientBlocked(recipient)
-				}
+			if httpErr.IsRecipientBlocked() && s.distTracker != nil && s.distTracker.recipientCacheTTL > 0 {
+				s.distTracker.CacheRecipientBlocked(recipient)
 				return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "Recipient blocked by destination"}
 			}
 		}
@@ -1737,7 +1743,6 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 4, 0}, Message: "Temporary failure, please try again later"}
 	}
 
-	s.Logger.Info("Successfully delivered message to destination")
 	return nil
 }
 

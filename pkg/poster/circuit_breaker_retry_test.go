@@ -51,7 +51,7 @@ func TestCircuitBreaker_RetriesContinueWhenOpen(t *testing.T) {
 		3, // 3 retry attempts
 		false,
 		"sender@example.com",
-		[]string{"recipient@example.com"},
+		"recipient@example.com",
 		"test-trace",
 		"",
 		cb,
@@ -108,7 +108,7 @@ func TestCircuitBreaker_AllRetriesFailWithCircuitOpen(t *testing.T) {
 		3,
 		false,
 		"sender@example.com",
-		[]string{"recipient@example.com"},
+		"recipient@example.com",
 		"test-trace",
 		"",
 		cb,
@@ -170,7 +170,7 @@ func TestCircuitBreaker_OpensButRecoversInRetryWindow(t *testing.T) {
 		5, // More retries to allow circuit to recover
 		false,
 		"sender@example.com",
-		[]string{"recipient@example.com"},
+		"recipient@example.com",
 		"test-trace",
 		"",
 		cb,
