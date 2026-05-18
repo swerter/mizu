@@ -49,12 +49,12 @@ func NewHTTPClient(timeout time.Duration, maxIdleConnsPerHost, maxConnsPerHost i
 // The authenticatedUser parameter is added as X-Auth-User header when the message was sent via authenticated submission.
 // The circuitBreaker parameter is optional - if provided, each retry attempt will be protected by the circuit breaker.
 // The httpClient parameter specifies the HTTP client to use for requests (with configured timeout).
-func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, authenticatedUser string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *slog.Logger) error {
+func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo string, traceID string, authenticatedUser string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *slog.Logger) error {
 	return postEmailWithRetries(ctx, rawEmail, destinationURL, apiKey, maxRetryAttempts, isJunk, mailFrom, mailTo, traceID, authenticatedUser, circuitBreaker, httpClient, logger)
 }
 
 // postEmailWithRetries contains the actual retry logic with circuit breaker protection per attempt
-func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, authenticatedUser string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *slog.Logger) error {
+func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo string, traceID string, authenticatedUser string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *slog.Logger) error {
 	var lastErr error
 
 	// Ensure at least one attempt even if configured incorrectly
@@ -124,7 +124,7 @@ func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, 
 
 // postEmailAttemptWithContext performs a single attempt to post the email with context support.
 // It sends the raw email as message/rfc822 content type with API key authentication.
-func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, isJunk bool, mailFrom string, mailTo []string, traceID string, authenticatedUser string, httpClient *http.Client, logger *slog.Logger) error {
+func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, isJunk bool, mailFrom string, mailTo string, traceID string, authenticatedUser string, httpClient *http.Client, logger *slog.Logger) error {
 	if httpClient == nil {
 		return fmt.Errorf("httpClient cannot be nil")
 	}
@@ -146,8 +146,8 @@ func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinati
 	if mailFrom != "" {
 		req.Header.Set("X-Mail-From", mailFrom)
 	}
-	if len(mailTo) > 0 {
-		req.Header.Set("X-Mail-To", strings.Join(mailTo, ", "))
+	if mailTo != "" {
+		req.Header.Set("X-Mail-To", mailTo)
 	}
 
 	// Add trace ID for distributed tracing and log correlation
