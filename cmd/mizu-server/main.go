@@ -1114,6 +1114,7 @@ func createServerBackend(
 		AuthRateLimiter:    authRateLimiter,
 		SenderValidator:    senderValidator,
 		RecipientValidator: recipientValidator,
+		SpamChecker:        spamChecker,
 	}
 }
 
