@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Client is an HTTP client for checking messages against rspamd
@@ -173,6 +175,54 @@ func (c *Client) Check(ctx context.Context, message, clientIP, from string, rcpt
 		"symbols_count", len(result.Symbols))
 
 	return result, nil
+}
+
+// Ping checks if the rspamd server is reachable by sending a HEAD request.
+// Returns nil if the server responds, or an error if it is unreachable.
+func (c *Client) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, "HEAD", c.URL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create ping request: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("rspamd unreachable: %w", err)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// StartHealthCheck periodically pings rspamd and updates the provided gauge metric.
+// It runs until the context is cancelled. The gauge is set to 1 when rspamd is reachable,
+// and 0 when it is not.
+func (c *Client) StartHealthCheck(ctx context.Context, gauge prometheus.Gauge, interval time.Duration) {
+	// Check immediately on start
+	c.updateHealthMetric(ctx, gauge)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.updateHealthMetric(ctx, gauge)
+		}
+	}
+}
+
+func (c *Client) updateHealthMetric(ctx context.Context, gauge prometheus.Gauge) {
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := c.Ping(pingCtx); err != nil {
+		gauge.Set(0)
+		c.Logger.Warn("Spam check server unreachable", "error", err)
+	} else {
+		gauge.Set(1)
+	}
 }
 
 // generateHTTPCryptSignature creates HMAC-SHA256 signature for rspamd authentication

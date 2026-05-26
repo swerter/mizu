@@ -30,6 +30,7 @@ import (
 	"migadu/mizu/pkg/recipient"
 	"migadu/mizu/pkg/sender"
 	"migadu/mizu/pkg/smtp"
+	"migadu/mizu/pkg/spamcheck"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/storage"
 	tlsmgr "migadu/mizu/pkg/tls"
@@ -1053,6 +1054,41 @@ func createServerBackend(
 		"timeout_seconds", serverCfg.Delivery.HTTPTimeoutSeconds,
 		"max_idle_conns_per_host", serverCfg.Delivery.MaxIdleConnsPerHost,
 		"max_conns_per_host", serverCfg.Delivery.MaxConnsPerHost)
+
+	// Initialize spam checker if configured
+	var spamChecker smtp.SpamChecker
+	if serverCfg.SpamCheck.Enabled {
+		if serverCfg.SpamCheck.URL == "" {
+			serverLogger.Error("Spam check enabled but no URL configured")
+			os.Exit(1)
+		}
+
+		timeout := 5 * time.Second
+		if serverCfg.SpamCheck.HTTPTimeoutSeconds > 0 {
+			timeout = time.Duration(serverCfg.SpamCheck.HTTPTimeoutSeconds) * time.Second
+		}
+
+		client := spamcheck.NewClient(serverCfg.SpamCheck.URL, serverCfg.SpamCheck.Password, timeout, serverLogger)
+		adapter := spamcheck.NewAdapter(
+			client,
+			serverCfg.SpamCheck.SpamHeader,
+			serverCfg.SpamCheck.SpamHeaderValue,
+			serverCfg.SpamCheck.HamHeaderValue,
+			serverCfg.SpamCheck.RejectOnAction,
+		)
+		spamChecker = adapter
+
+		// Start periodic health check for rspamd
+		if metricsInstance != nil {
+			logging.SafeGo(serverLogger, "spam-check-health", func() {
+				client.StartHealthCheck(context.Background(), metricsInstance.SpamCheckUp, 30*time.Second)
+			})
+		}
+
+		serverLogger.Info("Spam checker enabled",
+			"url", serverCfg.SpamCheck.URL,
+			"reject_on_action", serverCfg.SpamCheck.RejectOnAction)
+	}
 
 	// Create Backend
 	var activeSessionsWg sync.WaitGroup
