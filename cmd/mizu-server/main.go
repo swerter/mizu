@@ -138,23 +138,9 @@ func main() {
 		}
 		logger.Info("initTLS completed", "tlsMgr_nil", tlsMgr == nil, "tlsConfig_nil", tlsConfig == nil)
 
-		// Start ACME challenge servers (only for Let's Encrypt)
+		// Start ACME HTTP-01 challenge server (only for Let's Encrypt)
 		if tlsMgr != nil {
-			logger.Info("TLS manager initialized successfully - starting ACME challenge servers")
-			// Start HTTPS server on port 443 for TLS-ALPN-01 challenges (primary method)
-			concurrency.SafeGo(logger, "acme-tls-alpn-server", func() {
-				logger.Info("Starting HTTPS server for ACME TLS-ALPN-01 challenges on :443")
-				server := &http.Server{
-					Addr:      ":443",
-					TLSConfig: tlsMgr.TLSConfig(),
-				}
-				// Empty cert/key files - TLSConfig.GetCertificate handles everything
-				if err := server.ListenAndServeTLS("", ""); err != nil {
-					logger.Error("TLS-ALPN-01 challenge server failed", "error", err)
-				}
-			})
-
-			// Start HTTP server on port 80 for HTTP-01 challenges (fallback)
+			logger.Info("TLS manager initialized successfully - starting ACME challenge server")
 			concurrency.SafeGo(logger, "acme-http-server", func() {
 				logger.Info("Starting HTTP server for ACME HTTP-01 challenges on :80")
 				if err := http.ListenAndServe(":80", tlsMgr.HTTPHandler()); err != nil {
