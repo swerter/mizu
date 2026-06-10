@@ -53,8 +53,7 @@ type rspamdSymbol struct {
 
 // rspamdMilter contains headers and actions for modifying the message
 type rspamdMilter struct {
-	AddHeaders    map[string]rspamdHeader `json:"add_headers,omitempty"`
-	RemoveHeaders map[string]int          `json:"remove_headers,omitempty"`
+	AddHeaders map[string]rspamdHeader `json:"add_headers,omitempty"`
 }
 
 // rspamdHeader represents a header to add. Rspamd may return either
