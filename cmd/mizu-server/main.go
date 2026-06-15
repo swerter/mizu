@@ -189,9 +189,10 @@ func main() {
 	// Start separate metrics server
 	metricsServer := startMetricsServer(cfg, logger)
 
-	// Set ACME handler on health server if autocert is enabled
+	// Set ACME handler and cert renewer on health server if autocert is enabled
 	if healthServer != nil && tlsMgr != nil {
 		healthServer.SetACMEHandler(tlsMgr.HTTPHandler())
+		healthServer.SetCertRenewer(tlsMgr)
 	}
 
 	// Start stats manager and sync/export loops
@@ -755,6 +756,9 @@ func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *st
 	// Set stats provider
 	healthServer.SetStatsProvider(statsManager)
 
+	// Set IP unblocker for /api/unblock-ip endpoint
+	healthServer.SetIPUnblocker(statsManager)
+
 	// Set cache flusher (if distributed tracker exists)
 	if distTracker != nil {
 		healthServer.SetCacheFlusher(distTracker)
@@ -1270,6 +1274,7 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 	server.WriteTimeout = time.Duration(serverCfg.TimeoutSeconds) * time.Second
 	server.MaxMessageBytes = int64(serverCfg.MaxMessageSize)
 	server.EnableSMTPUTF8 = true
+	server.MaxRecipients = serverCfg.MaxRecipientsPerMessage
 
 	// Enable debug logging if configured
 	if serverCfg.Debug {
