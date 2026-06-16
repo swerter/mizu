@@ -195,6 +195,12 @@ func (s *ServerConfig) Validate() error {
 		if s.TLS.MinTLSVersion != "" && s.TLS.MinTLSVersion != "1.2" && s.TLS.MinTLSVersion != "1.3" {
 			return fmt.Errorf("tls.min_tls_version must be '1.2' or '1.3', got '%s'", s.TLS.MinTLSVersion)
 		}
+		if s.TLS.MaxTLSVersion != "" && s.TLS.MaxTLSVersion != "1.2" && s.TLS.MaxTLSVersion != "1.3" {
+			return fmt.Errorf("tls.max_tls_version must be '1.2' or '1.3', got '%s'", s.TLS.MaxTLSVersion)
+		}
+		if s.TLS.MinTLSVersion == "1.3" && s.TLS.MaxTLSVersion == "1.2" {
+			return errors.New("tls.max_tls_version (1.2) cannot be lower than tls.min_tls_version (1.3)")
+		}
 	}
 
 	// Submission servers must require auth

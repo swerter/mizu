@@ -119,6 +119,12 @@
 # # WARNING: Disabling removes brute force protection - every failed auth hits your backend API
 # [server.tls]
 # mode = "starttls"                                 # "starttls" or "implicit" (for port 465)
+# min_tls_version = "1.2"                           # "1.2" or "1.3" (default 1.2)
+# max_tls_version = "1.2"                            # "1.2" or "1.3" (empty = no cap). Set "1.2" on the
+#                                                   #   inbound MX for Exchange Online interop: its SChannel
+#                                                   #   stack misclassifies Go's TLS 1.3 handshake as a
+#                                                   #   renegotiation and aborts ("451 4.4.0 Security status
+#                                                   #   Renegotiate").
 # [server.delivery]
 # url = "https://backend.example.com/incoming"
 # auth_token = "${DELIVERY_AUTH_TOKEN}"

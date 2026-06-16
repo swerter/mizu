@@ -237,6 +237,7 @@ type ServerTLSConfig struct {
 	Mode          string `toml:"mode"`            // TLS mode: "starttls" or "implicit"
 	Required      bool   `toml:"required"`        // Enforce TLS (reject unencrypted connections)
 	MinTLSVersion string `toml:"min_tls_version"` // Minimum TLS version: "1.2" or "1.3"
+	MaxTLSVersion string `toml:"max_tls_version"` // Maximum TLS version: "1.2" or "1.3" (empty = no cap). Set to "1.2" for Exchange Online interop.
 }
 
 // IsRelay returns true if this is a relay (MX) server

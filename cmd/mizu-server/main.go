@@ -1291,6 +1291,17 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 				"min_tls_version", serverCfg.TLS.MinTLSVersion)
 		}
 
+		// Apply per-server max TLS version if specified. Capping at 1.2 is the
+		// remedy for Exchange Online, whose SChannel stack misclassifies Go's
+		// TLS 1.3 handshake as a renegotiation attempt and aborts the session
+		// ("451 4.4.0 Security status Renegotiate").
+		if serverCfg.TLS.MaxTLSVersion != "" {
+			serverTLSConfig.MaxVersion = getTLSVersion(serverCfg.TLS.MaxTLSVersion)
+			logger.Info("Server-specific maximum TLS version",
+				"server", serverCfg.Name,
+				"max_tls_version", serverCfg.TLS.MaxTLSVersion)
+		}
+
 		server.TLSConfig = serverTLSConfig
 		logger.Info("TLS configured for SMTP server",
 			"server", serverCfg.Name,
@@ -1366,9 +1377,11 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 			"addr", serverCfg.ListenAddr,
 			"tls", serverCfg.TLS.Mode)
 
-		// For implicit TLS (port 465), wrap listener with TLS
-		if serverCfg.UsesImplicitTLS() && tlsConfig != nil {
-			tlsListener := tls.NewListener(listener, tlsConfig)
+		// For implicit TLS (port 465), wrap listener with TLS. Use the per-server
+		// config (server.TLSConfig) so per-server min/max TLS version overrides
+		// apply to the implicit-TLS handshake, not just STARTTLS.
+		if serverCfg.UsesImplicitTLS() && server.TLSConfig != nil {
+			tlsListener := tls.NewListener(listener, server.TLSConfig)
 			serverErrors <- server.Serve(tlsListener)
 		} else {
 			serverErrors <- server.Serve(listener)

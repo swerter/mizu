@@ -243,6 +243,55 @@ func TestValidateConfig_ValidMultiServer(t *testing.T) {
 	}
 }
 
+func TestValidateServer_TLSVersionBounds(t *testing.T) {
+	// Minimal relay server with TLS enabled, reaching the version checks.
+	baseServer := func() ServerConfig {
+		return ServerConfig{
+			Name:       "relay",
+			Type:       "relay",
+			ListenAddr: ":25",
+			TLS: ServerTLSConfig{
+				Enabled: true,
+				Mode:    "starttls",
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		min     string
+		max     string
+		wantErr string // substring; empty = expect success
+	}{
+		{name: "both empty", min: "", max: ""},
+		{name: "max 1.2 only (Exchange compat)", min: "", max: "1.2"},
+		{name: "max 1.3 only", min: "", max: "1.3"},
+		{name: "min 1.2 max 1.2", min: "1.2", max: "1.2"},
+		{name: "min 1.2 max 1.3", min: "1.2", max: "1.3"},
+		{name: "min 1.3 max 1.3", min: "1.3", max: "1.3"},
+		{name: "invalid max", min: "", max: "1.1", wantErr: "max_tls_version"},
+		{name: "min above max", min: "1.3", max: "1.2", wantErr: "cannot be lower"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := baseServer()
+			s.TLS.MinTLSVersion = tt.min
+			s.TLS.MaxTLSVersion = tt.max
+			err := s.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !contains(err.Error(), tt.wantErr) {
+				t.Errorf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
