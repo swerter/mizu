@@ -176,6 +176,9 @@ func (c *Client) Check(ctx context.Context, message, clientIP, from string, rcpt
 		return nil, fmt.Errorf("rspamd returned status %d: %s", status, string(bodyBytes))
 	}
 
+	// TEMP: log full rspamd response body to investigate empty-action results.
+	c.Logger.Info("Rspamd raw response", "body", string(bodyBytes))
+
 	// Parse JSON response
 	var rspamdResp rspamdResponse
 	if err := json.Unmarshal(bodyBytes, &rspamdResp); err != nil {
