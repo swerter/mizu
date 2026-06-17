@@ -12,7 +12,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"syscall"
@@ -166,15 +165,13 @@ func (c *Client) Check(ctx context.Context, traceID, message, clientIP, from str
 		return nil, err
 	}
 
-	// TEMP: dump full rspamd response to stderr to investigate empty-action
-	// results. Bypassing slog so quotes/braces stay readable. Logged BEFORE
-	// the status check so we capture 504/statistics-error fail-open bodies too.
-	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, bodyBytes, "", "  "); err == nil {
-		fmt.Fprintf(os.Stderr, "Rspamd raw response (trace_id=%s status=%d):\n%s\n", traceID, status, pretty.String())
-	} else {
-		fmt.Fprintf(os.Stderr, "Rspamd raw response (trace_id=%s status=%d, unparseable):\n%s\n", traceID, status, string(bodyBytes))
-	}
+	// Log full rspamd response for debugging empty-action results. Logged
+	// BEFORE the status check so we capture 504/statistics-error fail-open
+	// bodies too. Debug level — set logger to debug to see it.
+	c.Logger.Debug("Rspamd raw response",
+		"trace_id", traceID,
+		"status", status,
+		"body", string(bodyBytes))
 
 	// Rspamd may return 504 when autolearn/statistics fails even though the
 	// scan itself succeeded. The body contains a JSON error (not a scan result),
