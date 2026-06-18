@@ -424,21 +424,39 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		rdnsCtx, rdnsCancel := context.WithTimeout(context.Background(), time.Duration(be.GlobalConfig.DNS.TimeoutSeconds)*time.Second)
 		names, err := be.DNSResolver.LookupAddr(rdnsCtx, remoteAddr)
 		rdnsCancel()
-		if err != nil || len(names) == 0 {
+
+		// Distinguish "no PTR record exists" (NXDOMAIN / empty answer) from
+		// transient lookup failures (timeout, SERVFAIL, network blip). Treating
+		// transient errors as "no PTR" rejects legitimate senders whose PTR is
+		// fine — `dig -x` from another resolver succeeds while Mizu's recursor
+		// happens to fail or time out.
+		//
+		// Stats: every code path below falls through to the shared
+		// RecordConnection call at the end of this rDNS block EXCEPT the
+		// reject path, which returns early and records inline. The hasRDNS
+		// argument reflects best-known state:
+		//   - success → true
+		//   - confirmed no PTR → false
+		//   - transient DNS error → true (optimistic; don't penalize the IP
+		//     for our recursor's problem, matching the fail-open policy)
+		switch classifyRDNSResult(names, err) {
+		case rdnsTransient:
+			be.Logger.Warn("Reverse DNS lookup failed transiently - allowing connection",
+				"server", be.ServerConfig.Name,
+				"remote_addr", remoteAddr,
+				"error", err)
+
+		case rdnsMissing:
 			hasRDNS = false
-			// Record this in stats
-			if be.StatsManager != nil {
-				be.StatsManager.RecordConnection(ipStr, false)
-			}
 
 			// Reject if rDNS is required
 			if be.ServerConfig.DNSChecks.RequireRDNS {
-				// Mark IP as denied in stats (only when server policy denies)
 				if be.StatsManager != nil {
+					// Reject returns early; record inline so this connection
+					// still counts toward the IP's connection total.
+					be.StatsManager.RecordConnection(ipStr, false)
 					be.StatsManager.RecordDeniedConnection(ipStr)
 				}
-
-				// Record rejection in metrics
 				if be.Metrics != nil {
 					be.Metrics.SMTPMessagesRejected.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type, "no_rdns").Inc()
 				}
@@ -452,19 +470,22 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 					Message:      fmt.Sprintf("no reverse DNS record for IP address %s", ipStr),
 				}
 			}
-			// Allow connection even without rDNS when not required
 			be.Logger.Info("Connection allowed without reverse DNS (not required)",
 				"server", be.ServerConfig.Name,
 				"remote_addr", remoteAddr)
-		}
-		// Store first PTR record for use in recipient validation
-		if len(names) > 0 {
+
+		case rdnsSuccess:
 			ptrRecord = names[0]
+			be.Logger.Info("Reverse DNS resolved",
+				"server", be.ServerConfig.Name,
+				"remote_addr", remoteAddr,
+				"remote_host", ptrRecord)
+
+		default:
+			// Compile-time exhaustiveness isn't enforced; trip loudly if a new
+			// rdnsResult variant gets added without a corresponding arm here.
+			panic(fmt.Sprintf("unhandled rdnsResult: %d", classifyRDNSResult(names, err)))
 		}
-		be.Logger.Info("Reverse DNS resolved",
-			"server", be.ServerConfig.Name,
-			"remote_addr", remoteAddr,
-			"remote_host", ptrRecord)
 
 		// Record connection in stats
 		if be.StatsManager != nil {
@@ -623,6 +644,36 @@ func (be *Backend) matchIPWhitelist(ip string, whitelistEntry string) bool {
 		return false
 	}
 	return ipAddr.Equal(whitelistIP)
+}
+
+// rdnsResult classifies the outcome of a reverse-DNS (PTR) lookup. The three
+// states are mutually exclusive by construction — callers can switch
+// exhaustively without worrying about overlap.
+type rdnsResult int
+
+const (
+	rdnsSuccess   rdnsResult = iota // At least one PTR record returned.
+	rdnsMissing                     // Authoritative "no PTR" (NXDOMAIN / empty answer).
+	rdnsTransient                   // Lookup failed transiently (timeout, SERVFAIL, network); PTR may well exist.
+)
+
+// classifyRDNSResult inspects a (names, err) tuple from net.Resolver.LookupAddr
+// and classifies it. Transient failures must be distinguished from "no PTR"
+// so the caller can fail-open: a `dig -x` from a different recursor may
+// succeed while ours just timed out.
+func classifyRDNSResult(names []string, err error) rdnsResult {
+	if err == nil {
+		// Empty answer with no error is equivalent to "record does not exist".
+		if len(names) == 0 {
+			return rdnsMissing
+		}
+		return rdnsSuccess
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return rdnsMissing
+	}
+	return rdnsTransient
 }
 
 // matchHostWhitelist checks if a PTR hostname matches a whitelist entry (suffix match)
