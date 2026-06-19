@@ -198,6 +198,63 @@ func TestInjectMizuHeaders_SpamHeaderSanitization(t *testing.T) {
 	}
 }
 
+func TestInjectMizuHeaders_FoldedSpamHeaderPreserved(t *testing.T) {
+	originalEmail := "From: sender@example.com\r\nSubject: Test\r\n\r\nBody\r\n"
+
+	// rspamd emits long values (e.g. Authentication-Results) pre-folded with
+	// CRLF + whitespace. Those folds must survive sanitization so the header
+	// stays valid RFC 5322 instead of collapsing onto one long line.
+	folded := "mx13.migadu.com;\r\n\tdkim=pass header.d=wise.com;\r\n\tdmarc=pass (policy=reject) header.from=wise.com"
+	spamHeaders := map[string][]string{
+		"Authentication-Results": {folded},
+	}
+
+	modifiedEmail := InjectMizuHeaders(
+		originalEmail,
+		"mail.example.com",
+		"1.2.3.4:5678",
+		"client.example.com",
+		"trace789",
+		"TLS 1.3",
+		nil, nil, nil,
+		false,
+		true, // disable mizu headers — focus on the spam path
+		spamHeaders,
+	)
+
+	// The fold must be preserved verbatim: continuation lines begin with WSP.
+	want := "Authentication-Results: mx13.migadu.com;\r\n\tdkim=pass header.d=wise.com;\r\n\tdmarc=pass (policy=reject) header.from=wise.com\r\n"
+	if !strings.Contains(modifiedEmail, want) {
+		t.Errorf("Folded header was not preserved.\nwant substring:\n%q\ngot:\n%q", want, modifiedEmail)
+	}
+
+	// Every continuation line of the header must start with whitespace; none
+	// may look like a new header or a blank (body-separator) line.
+	lines := strings.Split(modifiedEmail, "\r\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "dkim=pass") || strings.HasPrefix(line, "dmarc=pass") {
+			t.Errorf("Continuation line %d lost its folding whitespace: %q", i, line)
+		}
+	}
+}
+
+func TestSanitizeFoldedHeaderValue_InjectionStillBlocked(t *testing.T) {
+	// A newline NOT followed by whitespace is an injection attempt and must be
+	// stripped, exactly like the strict sanitizer.
+	cases := map[string]string{
+		"value\r\nInjected-Header: yes": "valueInjected-Header: yes",
+		"a\r\n\r\nbody injection":       "abody injection", // blank line collapses
+		"keep\r\n\tfold":                "keep\r\n\tfold",  // real fold survives
+		"bare\nnewline":                 "barenewline",
+		"nul\x00byte":                   "nulbyte",
+	}
+	for in, want := range cases {
+		if got := sanitizeFoldedHeaderValue(in); got != want {
+			t.Errorf("sanitizeFoldedHeaderValue(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestBuildReceivedHeader(t *testing.T) {
 	header := buildReceivedHeader(
 		"mail.example.com",

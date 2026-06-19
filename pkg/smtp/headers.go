@@ -40,7 +40,7 @@ func InjectMizuHeaders(rawEmail, domain, remoteAddr, heloHostname, traceID strin
 			for _, value := range values {
 				sb.WriteString(safeName)
 				sb.WriteString(": ")
-				sb.WriteString(sanitizeHeaderValue(value))
+				sb.WriteString(sanitizeFoldedHeaderValue(value))
 				sb.WriteString("\r\n")
 			}
 		}
@@ -105,6 +105,38 @@ func sanitizeHeaderValue(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// sanitizeFoldedHeaderValue sanitizes a header value that may legitimately
+// contain folding whitespace (CRLF followed by SP or TAB), as produced by
+// rspamd's milter add_headers for long values such as Authentication-Results.
+// Folds are preserved and normalized to canonical CRLF; every other CR or LF is
+// stripped. Because each surviving newline is guaranteed to be followed by
+// whitespace, a malicious value can never begin a new header line or terminate
+// the header block, so header/body injection remains impossible.
+func sanitizeFoldedHeaderValue(s string) string {
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\r':
+			// Drop; a real fold is recognized at the following '\n'.
+			continue
+		case c == '\n':
+			// Preserve only when this newline begins a fold (next byte is SP/TAB).
+			if i+1 < len(s) && (s[i+1] == ' ' || s[i+1] == '\t') {
+				sb.WriteString("\r\n")
+			}
+			// Otherwise it is a bare or injected newline — drop it.
+		case c < 0x20 && c != '\t':
+			// Drop other control characters (NUL, etc.); tab is valid.
+			continue
+		default:
+			sb.WriteByte(c)
+		}
+	}
+	return sb.String()
 }
 
 // buildMizuHeaders creates custom X-Mizu-* headers for debugging and analysis
