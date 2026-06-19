@@ -686,7 +686,7 @@ s3_prefix = ""
 
 [tls.letsencrypt]
 domains = ["%s"]
-fallback_cache_dir = "%s"
+cache_dir = "%s"
 `, storagePath, testDomain, cachePath)
 
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {

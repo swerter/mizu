@@ -403,6 +403,31 @@ type CheckS3Connection struct {
 	BucketName string
 }
 
+// ClusterInfo is the minimal cluster state the cluster health check needs.
+type ClusterInfo interface {
+	GetLeader() string
+	IsLeader() bool
+	NumMembers() int
+}
+
+// CheckCluster reports cluster membership and which node is the leader.
+type CheckCluster struct {
+	Cluster ClusterInfo
+}
+
+func (c *CheckCluster) Name() string { return "cluster" }
+
+func (c *CheckCluster) CheckHealth() ComponentStatus {
+	return ComponentStatus{
+		Status: "healthy",
+		Details: map[string]any{
+			"leader":    c.Cluster.GetLeader(),
+			"is_leader": c.Cluster.IsLeader(),
+			"members":   c.Cluster.NumMembers(),
+		},
+	}
+}
+
 // NewCheckS3Connection creates a new S3 connection health checker.
 func NewCheckS3Connection(s3Client *s3.Client, bucketName string) *CheckS3Connection {
 	return &CheckS3Connection{

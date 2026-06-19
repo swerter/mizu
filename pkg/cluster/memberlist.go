@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/memberlist"
 
 	"migadu/mizu/pkg/concurrency"
+	"migadu/mizu/pkg/metrics"
 )
 
 // MessageType identifies the type of gossip message
@@ -59,6 +60,7 @@ type Cluster struct {
 	// Leader election
 	leader    string
 	leaderMtx sync.RWMutex
+	metrics   *metrics.Metrics // optional; publishes the cluster leader gauge
 
 	// Lifecycle
 	done         chan struct{} // Closed on Shutdown to stop background goroutines
@@ -336,14 +338,15 @@ func (c *Cluster) GetLeader() string {
 // Leader = node with lexicographically smallest node name (deterministic)
 func (c *Cluster) updateLeader() {
 	c.leaderMtx.Lock()
-	defer c.leaderMtx.Unlock()
 
 	if c.ml == nil {
+		c.leaderMtx.Unlock()
 		return
 	}
 
 	members := c.ml.Members()
 	if len(members) == 0 {
+		c.leaderMtx.Unlock()
 		return
 	}
 
@@ -353,15 +356,37 @@ func (c *Cluster) updateLeader() {
 	})
 
 	newLeader := members[0].Name
+	localName := c.ml.LocalNode().Name
+	oldLeader := c.leader
+	changed := oldLeader != newLeader
+	c.leader = newLeader
+	m := c.metrics
+	c.leaderMtx.Unlock()
 
-	if c.leader != newLeader {
-		oldLeader := c.leader
-		c.leader = newLeader
+	if changed {
 		c.logger.Info("cluster leader changed",
 			"old_leader", oldLeader,
-			"new_leader", c.leader,
-			"is_leader", c.leader == c.ml.LocalNode().Name)
+			"new_leader", newLeader,
+			"is_leader", newLeader == localName)
 	}
+
+	// Reflect leadership in the Prometheus gauge (1 = this node is leader).
+	if m != nil && m.ClusterLeader != nil {
+		v := 0.0
+		if newLeader == localName {
+			v = 1.0
+		}
+		m.ClusterLeader.WithLabelValues(localName).Set(v)
+	}
+}
+
+// SetMetrics attaches the metrics instance so the cluster can publish the
+// leader gauge, and immediately reflects the current leadership state.
+func (c *Cluster) SetMetrics(m *metrics.Metrics) {
+	c.leaderMtx.Lock()
+	c.metrics = m
+	c.leaderMtx.Unlock()
+	c.updateLeader()
 }
 
 // --- Memberlist Delegate Interface Implementation ---

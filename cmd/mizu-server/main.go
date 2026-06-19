@@ -124,6 +124,11 @@ func main() {
 	metricsInstance := metrics.New("mizu")
 	logger.Info("Prometheus metrics initialized")
 
+	// Let the cluster publish the leader gauge (mizu_cluster_leader{node}).
+	if clusterMgr != nil {
+		clusterMgr.SetMetrics(metricsInstance)
+	}
+
 	var tlsConfig *tls.Config
 	var s3Client *s3.Client
 	var tlsMgr *tlsmgr.Manager
@@ -210,6 +215,11 @@ func main() {
 	// Initialize and start health check server (before starting SMTP servers)
 	// Note: Connection trackers are registered later via AddChecker after server backends are created
 	healthServer := startHealthServer(cfg, logger, statsManager, nil, nil, s3Client)
+
+	// Surface cluster leadership in the health endpoint (and `mizu-admin health`).
+	if clusterMgr != nil && healthServer != nil {
+		healthServer.AddChecker(&health.CheckCluster{Cluster: clusterMgr})
+	}
 
 	// Start separate metrics server
 	metricsServer := startMetricsServer(cfg, logger)
