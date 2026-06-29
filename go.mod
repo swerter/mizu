@@ -16,13 +16,14 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/hashicorp/memberlist v0.5.3
 	github.com/migadu/spf v1.0.0
+	github.com/pires/go-proxyproto v0.12.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/pflag v1.0.6
 	golang.org/x/crypto v0.48.0
 	golang.org/x/net v0.50.0
 )
 
-replace github.com/emersion/go-smtp => github.com/dejanstrbac/go-smtp v0.0.0-20260313205502-a1dea4f0d630
+replace github.com/emersion/go-smtp => github.com/dejanstrbac/go-smtp v0.0.0-20260629115909-cff9d83cd24f
 
 require (
 	github.com/armon/go-metrics v0.4.1 // indirect
@@ -54,7 +55,6 @@ require (
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/pires/go-proxyproto v0.12.0 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
