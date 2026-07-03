@@ -106,6 +106,8 @@ func main() {
 		cmdFlushCache()
 	case "unblock-ip":
 		cmdUnblockIP()
+	case "auth":
+		cmdAuth()
 	case "version", "-version", "--version":
 		cmdVersion()
 	default:
@@ -131,6 +133,7 @@ Commands:
   renew-cert         Force certificate renewal for a domain
   flush-cache        Flush recipient and IP block caches
   unblock-ip         Remove a specific IP from the reputation tracker
+  auth               Check a username/password against the SMTP AUTH backend
   version            Show version information
 
 Flags:
@@ -155,6 +158,9 @@ Examples:
   mizu-admin tls sync
   mizu-admin renew-cert relay.example.com
   mizu-admin flush-cache
+  mizu-admin auth user@example.com                 # Show hashes/allowed_from for a user
+  mizu-admin auth user@example.com 's3cret'        # Verify a password locally
+  mizu-admin auth --url 'http://localhost:8090/auth?email=$email' --token 't0ken' user@example.com 's3cret'
 
 `)
 }
