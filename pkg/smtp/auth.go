@@ -187,75 +187,87 @@ func (a *HTTPAuthenticator) verifyAgainstHashes(hashes []string, password string
 
 // fetchCredentials fetches user credentials from the backend via GET request
 func (a *HTTPAuthenticator) fetchCredentials(username, remoteIP string) (*AuthResponse, error) {
-	// Build URL with interpolation
-	requestURL := a.buildURL(username, remoteIP)
+	requestURL := BuildAuthURL(a.urlTemplate, username, remoteIP)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
+	status, authResp, body, err := FetchAuthCredentials(ctx, a.httpClient, requestURL, a.apiKey)
 	if err != nil {
-		a.logger.Error("failed to create auth request", "error", err)
-		return nil, fmt.Errorf("internal error")
-	}
-
-	// Add API key if configured
-	if a.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.apiKey)
-	}
-
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		a.logger.Error("auth request failed", "url", requestURL, "error", err)
+		a.logger.Error("auth request failed", "url", requestURL, "status", status, "error", err)
+		if status == http.StatusOK {
+			// Got a 200 but the body was unreadable or not valid JSON
+			return nil, fmt.Errorf("internal error")
+		}
 		return nil, fmt.Errorf("authentication service unavailable")
 	}
-	defer resp.Body.Close()
 
-	// 404 means user not found - this is not an error, just auth failure
-	if resp.StatusCode == http.StatusNotFound {
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if err != nil {
-			a.logger.Warn("failed to read auth 404 response body", "username", username, "error", err)
-		}
+	switch status {
+	case http.StatusOK:
+		return authResp, nil
+	case http.StatusNotFound:
+		// 404 means user not found - this is not an error, just auth failure
 		a.logger.Debug("auth request: user not found",
 			"username", username,
 			"url", requestURL,
-			"status", resp.StatusCode,
+			"status", status,
 			"response", string(body))
-		return &AuthResponse{}, nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if err != nil {
-			a.logger.Warn("failed to read auth error response body", "username", username, "error", err)
-		}
+		return authResp, nil
+	default:
 		a.logger.Warn("auth request failed",
 			"username", username,
 			"url", requestURL,
-			"status", resp.StatusCode,
+			"status", status,
 			"response", string(body))
-		return nil, fmt.Errorf("authentication service error: %d", resp.StatusCode)
+		return nil, fmt.Errorf("authentication service error: %d", status)
 	}
-
-	var authResp AuthResponse
-	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
-		a.logger.Error("failed to parse auth response", "error", err)
-		return nil, fmt.Errorf("internal error")
-	}
-
-	return &authResp, nil
 }
 
-// buildURL builds the request URL by interpolating $email and $ip placeholders
-func (a *HTTPAuthenticator) buildURL(email, ip string) string {
-	result := a.urlTemplate
+// FetchAuthCredentials performs the GET request Mizu sends to the auth backend:
+// bearer-token authorization, 404 treated as "user unknown" (empty response, no
+// error), JSON decode on 200. It returns the HTTP status code, the decoded
+// response (non-nil only on 200/404), and the raw body for diagnostics; err is
+// set only for transport, read, or decode failures. Shared with mizu-admin so
+// the CLI queries the backend exactly as the server does.
+func FetchAuthCredentials(ctx context.Context, client *http.Client, requestURL, token string) (int, *AuthResponse, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
-	// URL-encode the values
-	result = strings.ReplaceAll(result, "$email", url.QueryEscape(email))
-	result = strings.ReplaceAll(result, "$ip", url.QueryEscape(ip))
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer resp.Body.Close()
 
-	return result
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return resp.StatusCode, nil, nil, err
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var authResp AuthResponse
+		if err := json.Unmarshal(body, &authResp); err != nil {
+			return resp.StatusCode, nil, body, err
+		}
+		return resp.StatusCode, &authResp, body, nil
+	case http.StatusNotFound:
+		return resp.StatusCode, &AuthResponse{}, body, nil
+	default:
+		return resp.StatusCode, nil, body, nil
+	}
+}
+
+// BuildAuthURL builds an auth request URL by interpolating the $email and $ip
+// placeholders (URL-encoded) in the endpoint URL template.
+func BuildAuthURL(template, email, ip string) string {
+	result := strings.ReplaceAll(template, "$email", url.QueryEscape(email))
+	return strings.ReplaceAll(result, "$ip", url.QueryEscape(ip))
 }
 
 // CanSendAs checks if authenticated user can send as a specific FROM address
