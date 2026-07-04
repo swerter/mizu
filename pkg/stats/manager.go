@@ -65,8 +65,9 @@ type Manager struct {
 	lastSyncMu      sync.RWMutex
 
 	// Context for cleanup goroutine
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx      context.Context
+	cancel   context.CancelFunc
+	stopOnce sync.Once
 
 	// Channel for processing events concurrently
 	eventChan chan event
@@ -402,12 +403,18 @@ func (m *Manager) Start() {
 	concurrency.SafeGo(m.logger, "stats-manager-events", m.processEventsLoop)
 }
 
-// Stop stops the cleanup goroutine
+// Stop stops the cleanup goroutine. It is idempotent.
+//
+// The event channel is deliberately NOT closed: sessions may still call
+// sendEvent concurrently during a timed-out shutdown drain, and a send on a
+// closed channel panics even inside a select/default. Cancelling the context
+// is sufficient — processEventsLoop drains and exits on ctx.Done().
 func (m *Manager) Stop() {
-	if m.cancel != nil {
-		m.cancel()
-		close(m.eventChan)
-	}
+	m.stopOnce.Do(func() {
+		if m.cancel != nil {
+			m.cancel()
+		}
+	})
 }
 
 // cleanupLoop periodically removes expired entries
