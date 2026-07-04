@@ -1,6 +1,7 @@
 package poster
 
 import (
+	"context"
 	"io"
 
 	"errors"
@@ -118,6 +119,15 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 
 	// Execute the function and record the result
 	err := fn()
+
+	// Context cancellation/deadline (client disconnect or graceful shutdown) is
+	// not a backend-health signal. Recording it as a failure could trip the
+	// breaker Open against a perfectly healthy backend. IsRetryableError already
+	// treats these as non-retryable, so skip them here for consistency.
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return err
+	}
+
 	cb.recordResult(err)
 
 	return err
@@ -145,7 +155,10 @@ func (cb *CircuitBreaker) canProceed() bool {
 			cb.logger.Info("Circuit breaker transitioning from Open to Half-Open")
 			cb.state = StateHalfOpen
 			cb.lastStateChange = now
-			cb.halfOpenCalls = 0
+			// Count this caller as the first probe. Starting at 0 would let a
+			// concurrent goroutine also pass the halfOpenCalls < max check,
+			// admitting halfOpenMaxCalls+1 probes to a recovering backend.
+			cb.halfOpenCalls = 1
 			cb.successCount = 0
 			cb.updateMetricsState()
 			return true
