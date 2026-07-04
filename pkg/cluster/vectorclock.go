@@ -29,19 +29,38 @@ func (vc *VectorClock) Increment() {
 	vc.clocks[vc.localID]++
 }
 
+// snapshot returns a copy of the clock map taken under a read lock. Callers use
+// this to avoid holding two VectorClock locks at once (which risks an AB/BA
+// deadlock when two clocks are merged/compared against each other concurrently).
+func (vc *VectorClock) snapshot() map[string]uint64 {
+	vc.mu.RLock()
+	defer vc.mu.RUnlock()
+	out := make(map[string]uint64, len(vc.clocks))
+	for nodeID, clock := range vc.clocks {
+		out[nodeID] = clock
+	}
+	return out
+}
+
 // Update updates the clock with a remote clock, taking the maximum of each entry
 func (vc *VectorClock) Update(remote *VectorClock) {
 	if remote == nil {
 		return
 	}
 
+	// Snapshot the remote under its own lock and release it before locking our
+	// own. Holding both locks simultaneously deadlocks when two clocks update
+	// each other concurrently (A.Update(B) waits on B while B.Update(A) waits on A).
+	remoteClocks := remote.snapshot()
+
 	vc.mu.Lock()
 	defer vc.mu.Unlock()
 
-	remote.mu.RLock()
-	defer remote.mu.RUnlock()
+	if vc.clocks == nil {
+		vc.clocks = make(map[string]uint64)
+	}
 
-	for nodeID, remoteClock := range remote.clocks {
+	for nodeID, remoteClock := range remoteClocks {
 		if localClock, exists := vc.clocks[nodeID]; !exists || remoteClock > localClock {
 			vc.clocks[nodeID] = remoteClock
 		}
@@ -61,18 +80,17 @@ func (vc *VectorClock) Compare(other *VectorClock) int {
 		return 1
 	}
 
-	vc.mu.RLock()
-	defer vc.mu.RUnlock()
-
-	other.mu.RLock()
-	defer other.mu.RUnlock()
+	// Snapshot both clocks independently rather than holding both locks at once
+	// (see snapshot()), which avoids an AB/BA deadlock under concurrent access.
+	vcClocks := vc.snapshot()
+	otherClocks := other.snapshot()
 
 	// Collect all node IDs from both clocks
 	allNodes := make(map[string]bool)
-	for nodeID := range vc.clocks {
+	for nodeID := range vcClocks {
 		allNodes[nodeID] = true
 	}
-	for nodeID := range other.clocks {
+	for nodeID := range otherClocks {
 		allNodes[nodeID] = true
 	}
 
@@ -80,8 +98,8 @@ func (vc *VectorClock) Compare(other *VectorClock) int {
 	less := false
 
 	for nodeID := range allNodes {
-		vcClock := vc.clocks[nodeID]
-		otherClock := other.clocks[nodeID]
+		vcClock := vcClocks[nodeID]
+		otherClock := otherClocks[nodeID]
 
 		if vcClock > otherClock {
 			greater = true
@@ -153,6 +171,12 @@ func (vc *VectorClock) UnmarshalJSON(data []byte) error {
 
 	if err := json.Unmarshal(data, &tmp); err != nil {
 		return err
+	}
+
+	// A missing or null "clocks" field unmarshals to a nil map; guard against it
+	// so a later Increment/Update (which assigns into the map) cannot panic.
+	if tmp.Clocks == nil {
+		tmp.Clocks = make(map[string]uint64)
 	}
 
 	vc.mu.Lock()
