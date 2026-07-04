@@ -291,6 +291,12 @@ func (c *Cluster) LocalNode() *memberlist.Node {
 	return c.ml.LocalNode()
 }
 
+// LocalNodeName returns this node's stable name, used to attribute gossiped
+// state (e.g. rate-limit counts) to their source peer.
+func (c *Cluster) LocalNodeName() string {
+	return c.ml.LocalNode().Name
+}
+
 // Shutdown gracefully shuts down the cluster.
 // It first stops background goroutines, then gracefully leaves the cluster
 // (notifying peers), and finally shuts down the memberlist transport.

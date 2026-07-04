@@ -21,7 +21,16 @@ import (
 type RateLimiterCluster interface {
 	BroadcastRateLimit(data []byte) error
 	RegisterRateLimitHandler(handler func(data []byte))
+	// LocalNodeName returns this node's stable name, used to attribute gossiped
+	// counts to their source peer so contributions can be summed (not overwritten).
+	LocalNodeName() string
 }
+
+// maxGossipCount bounds a single peer's reported count for a key. Gossip is
+// untrusted; without a cap a malicious/buggy peer could report an enormous
+// count to deny a victim key, or overflow the running sum. Any legitimate count
+// far exceeds every configured dimension limit well below this ceiling.
+const maxGossipCount = 1_000_000
 
 // RateLimiter implements a multi-dimensional sliding window rate limiter with memberlist gossip sync.
 // It tracks connection attempts across multiple configurable dimensions (e.g., IP, FROM, TO, combinations).
@@ -36,6 +45,7 @@ type RateLimiter struct {
 	whitelistedSenders map[string]bool // Email addresses exempt from rate limits
 	logger             *slog.Logger
 	cluster            RateLimiterCluster // Memberlist cluster for gossip
+	nodeID             string             // This node's name (attached to outgoing gossip)
 	ctx                context.Context
 	cancel             context.CancelFunc
 }
@@ -51,16 +61,25 @@ type dimensionTracker struct {
 // connectionWindow tracks connection attempts for a single composite key using a sliding window
 // Uses counter-based approach to avoid timestamp accumulation bugs from gossip
 type connectionWindow struct {
-	localCount  int       // Connections from this node
-	peerCount   int       // Estimated connections from peers (from gossip)
-	windowStart time.Time // Start of current window
-	lastUpdate  time.Time // Last time this window was updated
-	lastCleanup time.Time // Last time old windows were cleaned up
+	localCount  int                         // Connections from this node
+	peerCount   int                         // Cached sum of peerCounts (cluster-wide estimate)
+	peerCounts  map[string]peerContribution // nodeID -> that peer's last reported count
+	windowStart time.Time                   // Start of current window
+	lastUpdate  time.Time                   // Last time this window was updated
+	lastCleanup time.Time                   // Last time old windows were cleaned up
+}
+
+// peerContribution is a single peer's reported count for a window, retained so
+// that per-peer contributions can be summed and aged out independently.
+type peerContribution struct {
+	count      int
+	reportedAt time.Time
 }
 
 // RateLimitData represents rate limit data that can be gossiped across the cluster
 type RateLimitData struct {
-	CompositeKey string    `json:"composite_key"` // e.g., "IP:1.2.3.4" or "FROM:user@example.com,TO:recipient@example.com"
+	NodeID       string    `json:"node_id"`       // Source node name (for per-peer attribution)
+	CompositeKey string    `json:"composite_key"` // e.g., "per_ip|IP:1.2.3.4"
 	Count        int       `json:"count"`         // Connection count in current window
 	WindowStart  time.Time `json:"window_start"`  // Start of this node's window
 	ReportedAt   time.Time `json:"reported_at"`   // When this data was reported
@@ -122,6 +141,7 @@ func NewRateLimiter(rlConfig config.RateLimitConfig, cluster RateLimiterCluster,
 
 	// Register handler for rate limit gossip from peers
 	if rlConfig.GossipEnabled && cluster != nil {
+		rl.nodeID = cluster.LocalNodeName()
 		cluster.RegisterRateLimitHandler(rl.handleGossipMessage)
 		concurrency.SafeGo(logger, "rate-limiter-gossip", rl.gossipLoop)
 	}
@@ -153,11 +173,15 @@ func (rl *RateLimiter) CheckRateLimit(sessionCtx SessionContext) error {
 			// Skip this dimension if we can't build a key (e.g., FROM dimension but no MAIL FROM yet)
 			continue
 		}
+		// Namespace the window by dimension name so two dimensions that share the
+		// same keys (e.g. per-IP-per-minute and per-IP-per-hour) get independent
+		// windows instead of colliding and corrupting each other's counts.
+		windowKey := dim.name + "|" + compositeKey
 
 		rl.mu.Lock()
 
 		// Get or create window for this composite key
-		window, exists := rl.windows[compositeKey]
+		window, exists := rl.windows[windowKey]
 		if !exists {
 			window = &connectionWindow{
 				localCount:  0,
@@ -166,13 +190,14 @@ func (rl *RateLimiter) CheckRateLimit(sessionCtx SessionContext) error {
 				lastUpdate:  now,
 				lastCleanup: now,
 			}
-			rl.windows[compositeKey] = window
+			rl.windows[windowKey] = window
 		}
 
 		// Reset window if it has expired
 		if now.Sub(window.windowStart) > dim.window {
 			window.localCount = 0
 			window.peerCount = 0
+			window.peerCounts = nil
 			window.windowStart = now
 			window.lastUpdate = now
 		}
@@ -332,6 +357,7 @@ func (rl *RateLimiter) sendGossip() {
 	for compositeKey, window := range rl.windows {
 		if window.localCount > 0 {
 			data = append(data, RateLimitData{
+				NodeID:       rl.nodeID,
 				CompositeKey: compositeKey,
 				Count:        window.localCount,
 				WindowStart:  window.windowStart,
@@ -368,8 +394,19 @@ func (rl *RateLimiter) handleGossipMessage(data []byte) {
 	rl.MergeGossipData(rateLimitData)
 }
 
-// MergeGossipData merges received gossip data into local state
-// Uses sum of peer counts to estimate cluster-wide rate limit consumption
+// MergeGossipData merges received gossip data into local state.
+//
+// Each gossip batch carries one peer's own counts. Contributions are tracked
+// per source node (window.peerCounts[nodeID]) and summed, so a batch from peer B
+// does not overwrite peer A's contribution — the previous implementation zeroed
+// all peer counts and rebuilt from a single batch, collapsing the cluster-wide
+// estimate to whichever peer gossiped last. A key that is absent from a peer's
+// batch means that peer's count for it is now zero, so the peer's prior entries
+// are cleared before the batch is applied.
+//
+// Gossip is untrusted, so counts are validated: negative counts (which could
+// disable limiting) and absurdly large counts (which could deny a victim key or
+// overflow the sum) are rejected, and unattributed batches are ignored.
 func (rl *RateLimiter) MergeGossipData(data []RateLimitData) {
 	if !rl.gossipEnabled {
 		return
@@ -381,33 +418,61 @@ func (rl *RateLimiter) MergeGossipData(data []RateLimitData) {
 	now := time.Now()
 	maxWindow := rl.getMaxWindow()
 
-	// First, reset all peer counts (we'll rebuild from gossip)
+	// Identify the peer(s) reporting in this batch so we can replace only their
+	// contribution across all windows.
+	reportingNodes := make(map[string]bool)
+	for _, item := range data {
+		if item.NodeID != "" && item.NodeID != rl.nodeID {
+			reportingNodes[item.NodeID] = true
+		}
+	}
 	for _, window := range rl.windows {
-		window.peerCount = 0
+		for nodeID := range reportingNodes {
+			delete(window.peerCounts, nodeID)
+		}
 	}
 
-	// Aggregate peer counts from gossip
+	// Apply the reported (and validated) counts, attributed to their source node.
 	for _, item := range data {
-		// Skip stale data (older than any configured window)
 		if now.Sub(item.ReportedAt) > maxWindow {
+			continue // Stale
+		}
+		if item.NodeID == "" || item.NodeID == rl.nodeID {
+			continue // Unattributable, or our own count echoed back
+		}
+		if item.Count < 0 || item.Count > maxGossipCount {
+			rl.logger.Warn("Rejecting out-of-range rate-limit gossip count",
+				"composite_key", item.CompositeKey, "count", item.Count, "node", item.NodeID)
 			continue
 		}
 
-		// Get or create window for this composite key
 		window, exists := rl.windows[item.CompositeKey]
 		if !exists {
 			window = &connectionWindow{
-				localCount:  0,
-				peerCount:   0,
 				windowStart: item.WindowStart,
 				lastUpdate:  now,
 				lastCleanup: now,
 			}
 			rl.windows[item.CompositeKey] = window
 		}
+		if window.peerCounts == nil {
+			window.peerCounts = make(map[string]peerContribution)
+		}
+		window.peerCounts[item.NodeID] = peerContribution{count: item.Count, reportedAt: item.ReportedAt}
+	}
 
-		// Add peer's count to our peer count (sum across all peers)
-		window.peerCount += item.Count
+	// Recompute cached peer sums, pruning contributions from peers we haven't
+	// heard from within the window.
+	for _, window := range rl.windows {
+		sum := 0
+		for nodeID, pc := range window.peerCounts {
+			if now.Sub(pc.reportedAt) > maxWindow {
+				delete(window.peerCounts, nodeID)
+				continue
+			}
+			sum += pc.count
+		}
+		window.peerCount = sum
 	}
 }
 
