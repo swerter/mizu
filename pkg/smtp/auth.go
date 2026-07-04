@@ -402,10 +402,29 @@ func (a *HTTPAuthenticator) getCredCached(username string) *credCacheEntry {
 	return entry
 }
 
+// maxCredCacheEntries bounds the credential cache. The keyspace is
+// attacker-controlled (arbitrary usernames from unauthenticated clients trigger
+// backend fetches), so without a cap a username flood could exhaust memory
+// within the TTL window.
+const maxCredCacheEntries = 10000
+
 // cacheCredentials stores credentials in cache
 func (a *HTTPAuthenticator) cacheCredentials(username string, passwordHashes []string, allowedFromAddresses []string) {
 	a.credCacheMu.Lock()
 	defer a.credCacheMu.Unlock()
+
+	if _, exists := a.credCache[username]; !exists && len(a.credCache) >= maxCredCacheEntries {
+		// At capacity: opportunistically drop expired entries before giving up.
+		now := time.Now()
+		for k, e := range a.credCache {
+			if now.After(e.expiresAt) {
+				delete(a.credCache, k)
+			}
+		}
+		if len(a.credCache) >= maxCredCacheEntries {
+			return // Still full; refuse to grow to bound memory against username floods.
+		}
+	}
 
 	a.credCache[username] = &credCacheEntry{
 		passwordHashes:       passwordHashes,
