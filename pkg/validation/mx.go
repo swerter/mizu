@@ -138,7 +138,13 @@ func CheckMXRecord(ctx context.Context, domain string, resolver *net.Resolver, t
 
 	// Check if we got any MX records
 	if len(mxRecords) > 0 {
-		return true, nil // Domain has MX records
+		// RFC 7505: a single MX record of "0 ." (empty/root target) is a "null
+		// MX" by which the domain explicitly declares it accepts no mail. Such a
+		// sender could never receive bounces or replies, so treat it as invalid.
+		if len(mxRecords) == 1 && strings.TrimSuffix(mxRecords[0].Host, ".") == "" {
+			return false, nil
+		}
+		return true, nil // Domain has usable MX records
 	}
 
 	// No MX records found - fall back to A/AAAA records per RFC 5321

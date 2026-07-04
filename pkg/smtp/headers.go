@@ -11,6 +11,16 @@ import (
 	"migadu/mizu/pkg/validation"
 )
 
+// normalizeToCRLF canonicalizes all line endings (lone CR, lone LF, and CRLF)
+// to CRLF. This removes the parsing differential between header-processing code
+// that splits on "\r\n" and net/mail's more lenient parsing, closing a
+// header-smuggling vector for messages that use bare-LF line endings.
+func normalizeToCRLF(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.ReplaceAll(s, "\n", "\r\n")
+}
+
 // InjectMizuHeaders adds Received and X-Mizu-* headers to the email
 // These headers provide email tracing, authentication results, and debugging information
 // If disableMizuHeaders is true, only the Received header is added (X-Mizu-* headers are skipped)
@@ -506,11 +516,27 @@ func checkReceivedHeaderForLoop(receivedHeader, serverHostname string) bool {
 	// Format: "Received: from <client> by <server> ..."
 	lowerHeader := strings.ToLower(receivedHeader)
 	lowerHostname := strings.ToLower(serverHostname)
+	needle := "by " + lowerHostname
 
-	// Look for "by <hostname>" pattern
-	if strings.Contains(lowerHeader, "by "+lowerHostname) {
-		return true
+	// Match "by <hostname>" only at a hostname boundary so that a host named
+	// "mx1" does not spuriously match "by mx10.example.com" (a substring match
+	// would falsely flag legitimate mail as a loop and reject it).
+	from := 0
+	for {
+		idx := strings.Index(lowerHeader[from:], needle)
+		if idx < 0 {
+			return false
+		}
+		end := from + idx + len(needle)
+		if end >= len(lowerHeader) || !isHostnameChar(lowerHeader[end]) {
+			return true
+		}
+		from = end
 	}
+}
 
-	return false
+// isHostnameChar reports whether b can be part of a hostname (letters, digits,
+// '.', '-'). Used to detect hostname boundaries when matching "by <hostname>".
+func isHostnameChar(b byte) bool {
+	return b == '.' || b == '-' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }

@@ -1,6 +1,10 @@
 package smtp
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/emersion/go-smtp"
+)
 
 // Common SMTP server errors
 var (
@@ -10,9 +14,19 @@ var (
 	ErrServerUnavailable   = errors.New("server temporarily unavailable")
 	ErrNoReverseDNS        = errors.New("no reverse DNS record")
 
-	// TLS errors
-	ErrTLSRequired         = errors.New("TLS required")
-	ErrTLSRequiredStartTLS = errors.New("TLS required - use STARTTLS before sending mail")
+	// TLS errors. These are structured SMTPErrors so clients receive the
+	// RFC 3207 §4 mandated "530 5.7.0 Must issue a STARTTLS command first"
+	// response rather than go-smtp's generic default reply.
+	ErrTLSRequired = &smtp.SMTPError{
+		Code:         530,
+		EnhancedCode: smtp.EnhancedCode{5, 7, 0},
+		Message:      "Must issue a STARTTLS command first",
+	}
+	ErrTLSRequiredStartTLS = &smtp.SMTPError{
+		Code:         530,
+		EnhancedCode: smtp.EnhancedCode{5, 7, 0},
+		Message:      "Must issue a STARTTLS command first",
+	}
 
 	// Message errors
 	ErrMessageTooBig = errors.New("message too big")

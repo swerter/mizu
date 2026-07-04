@@ -1385,13 +1385,44 @@ func (s *Session) readMessageData(r io.Reader) (string, error) {
 
 	s.Logger.Info("Receiving DATA", "from", s.from, "to", s.to)
 
-	// Read the entire email into a buffer, respecting the size limit.
-	if _, err := io.Copy(&s.mailData, io.LimitReader(r, int64(s.serverConfig.MaxMessageSize))); err != nil {
+	// Read the entire email into a buffer, enforcing the configured size limit.
+	// We read one byte past the limit so that an oversize message is detected
+	// and rejected with 552 rather than being silently truncated and accepted
+	// with 250 OK (which would violate the zero-message-loss guarantee). The
+	// underlying go-smtp reader also enforces MaxMessageBytes and returns its
+	// own 552; either path yields a rejection. go-smtp discards any remaining
+	// DATA after this returns.
+	maxSize := int64(s.serverConfig.MaxMessageSize)
+	// A non-positive limit means unlimited; only wrap with a bounded reader when
+	// a real limit is configured (otherwise LimitReader(r, 1) would truncate).
+	reader := io.Reader(r)
+	if maxSize > 0 {
+		reader = io.LimitReader(r, maxSize+1)
+	}
+	n, err := io.Copy(&s.mailData, reader)
+	if err != nil {
+		// A 552 (message exceeds MaxMessageBytes) from the underlying reader is
+		// returned as-is so the client receives the correct SMTP status.
 		s.Logger.Error("Failed to read message data", "error", err)
 		return "", err
 	}
+	if maxSize > 0 && n > maxSize {
+		s.Logger.Warn("Rejecting message - exceeds maximum size",
+			"from", s.from, "max_size_bytes", maxSize)
+		return "", &smtp.SMTPError{
+			Code:         552,
+			EnhancedCode: smtp.EnhancedCode{5, 3, 4},
+			Message:      "message exceeds maximum allowed size",
+		}
+	}
 
-	rawEmail := s.mailData.String()
+	// Canonicalize line endings to CRLF once, up front. Header-processing
+	// functions split on "\r\n" while validateHeaders uses net/mail (which
+	// tolerates bare "\n"); that parsing differential would otherwise let a
+	// message using lone-LF line endings smuggle a forged header (e.g.
+	// X-Envelope-To) past stripHeader and bypass mail-loop counting. A
+	// compliant client already sends CRLF, so this is a no-op for them.
+	rawEmail := normalizeToCRLF(s.mailData.String())
 
 	// Record message received and size in metrics
 	if s.metrics != nil {
@@ -2007,6 +2038,12 @@ func (s *Session) Reset() {
 	s.junkReasons = nil
 	s.senderDomain = ""
 	s.spfResult = nil
+	// Clear all per-message authentication/scan results so a later message on
+	// the same connection can never inherit an earlier message's verdict or
+	// headers (e.g. a stale spam result when a subsequent check fails open).
+	s.dmarcResult = nil
+	s.arcResult = nil
+	s.spamResult = nil
 
 	// Reset idle timeout after successful message
 	if err := s.setCommandTimeout(IdleTimeout); err != nil {
