@@ -83,6 +83,37 @@ type DistributedTracker struct {
 	wg     sync.WaitGroup
 }
 
+// Bounds for untrusted peer-supplied gossip state. Even with authenticated
+// gossip these cap the blast radius of a compromised or buggy cluster node.
+const (
+	maxPeerConnPerIP         = 1_000_000 // Reject absurd per-IP counts (overflow / victim-IP denial)
+	maxPeerConnIPs           = 100_000   // Cap distinct IPs accepted from a single peer snapshot
+	maxRecipientCacheEntries = 50_000    // Cap negative-recipient cache size (memory exhaustion)
+)
+
+// sanitizePeerConnections validates a peer's per-IP connection map before it is
+// summed into the cluster-wide limit: empty hosts and non-positive counts are
+// dropped, per-IP counts are clamped, and the map size is bounded.
+func sanitizePeerConnections(conns map[string]int) map[string]int {
+	if conns == nil {
+		return nil
+	}
+	out := make(map[string]int, len(conns))
+	for host, count := range conns {
+		if host == "" || count <= 0 {
+			continue
+		}
+		if count > maxPeerConnPerIP {
+			count = maxPeerConnPerIP
+		}
+		out[host] = count
+		if len(out) >= maxPeerConnIPs {
+			break
+		}
+	}
+	return out
+}
+
 // PeerConnectionState holds connection counts from a peer server
 type PeerConnectionState struct {
 	Hostname    string               `json:"hostname"`
@@ -330,6 +361,9 @@ func (dt *DistributedTracker) CacheRecipientNotFound(email string) {
 	dt.recipientMu.Lock()
 	defer dt.recipientMu.Unlock()
 
+	if _, exists := dt.recipientNotFound[email]; !exists && len(dt.recipientNotFound) >= maxRecipientCacheEntries {
+		return // At capacity; avoid unbounded growth from attacker-controlled addresses
+	}
 	expiry := time.Now().Add(dt.recipientCacheTTL)
 	dt.recipientNotFound[email] = expiry
 
@@ -343,6 +377,9 @@ func (dt *DistributedTracker) CacheRecipientBlocked(email string) {
 	dt.recipientMu.Lock()
 	defer dt.recipientMu.Unlock()
 
+	if _, exists := dt.recipientBlocked[email]; !exists && len(dt.recipientBlocked) >= maxRecipientCacheEntries {
+		return // At capacity; avoid unbounded growth from attacker-controlled addresses
+	}
 	expiry := time.Now().Add(dt.recipientCacheTTL)
 	dt.recipientBlocked[email] = expiry
 
@@ -606,12 +643,20 @@ func (dt *DistributedTracker) handleGossipMessage(data []byte) {
 	}
 
 	if shouldMerge {
-		// Convert to PeerConnectionState
+		// Convert to PeerConnectionState. Sanitize the peer-supplied counts
+		// (untrusted) before they can be summed into the cluster-wide per-IP
+		// limit, so a malicious/buggy peer cannot inflate a victim IP's count to
+		// deny it service or overflow the running total.
+		sanitized := sanitizePeerConnections(snapshot.Connections)
+		total := 0
+		for _, c := range sanitized {
+			total += c
+		}
 		peerState := &PeerConnectionState{
 			Hostname:    snapshot.Hostname,
 			Timestamp:   snapshot.Timestamp,
-			Connections: snapshot.Connections,
-			TotalCount:  snapshot.TotalCount,
+			Connections: sanitized,
+			TotalCount:  total,
 			VectorClock: snapshot.VectorClock,
 			UpdatedAt:   time.Now(),
 		}
@@ -655,25 +700,47 @@ func (dt *DistributedTracker) mergeRecipientCache(peerCache *RecipientCacheSnaps
 	now := time.Now()
 	merged := 0
 
+	// Peer-supplied expiries are untrusted: clamp them to our own configured TTL
+	// so a peer cannot inject a far-future negative-cache entry that denies mail
+	// to a victim address indefinitely. New entries are also capped to bound
+	// memory against a peer flooding attacker-controlled addresses.
+	maxExpiry := now.Add(dt.recipientCacheTTL)
+	clamp := func(expiry time.Time) time.Time {
+		if expiry.After(maxExpiry) {
+			return maxExpiry
+		}
+		return expiry
+	}
+
 	// Merge "not found" entries
 	for email, expiry := range peerCache.NotFound {
-		// Only merge if not expired and (not exists locally OR peer's expiry is later)
-		if now.Before(expiry) {
-			if localExpiry, exists := dt.recipientNotFound[email]; !exists || expiry.After(localExpiry) {
-				dt.recipientNotFound[email] = expiry
-				merged++
-			}
+		if email == "" || !now.Before(expiry) {
+			continue
+		}
+		expiry = clamp(expiry)
+		localExpiry, exists := dt.recipientNotFound[email]
+		if !exists && len(dt.recipientNotFound) >= maxRecipientCacheEntries {
+			continue // At capacity - don't accept new attacker-controlled entries
+		}
+		if !exists || expiry.After(localExpiry) {
+			dt.recipientNotFound[email] = expiry
+			merged++
 		}
 	}
 
 	// Merge "blocked" entries
 	for email, expiry := range peerCache.Blocked {
-		// Only merge if not expired and (not exists locally OR peer's expiry is later)
-		if now.Before(expiry) {
-			if localExpiry, exists := dt.recipientBlocked[email]; !exists || expiry.After(localExpiry) {
-				dt.recipientBlocked[email] = expiry
-				merged++
-			}
+		if email == "" || !now.Before(expiry) {
+			continue
+		}
+		expiry = clamp(expiry)
+		localExpiry, exists := dt.recipientBlocked[email]
+		if !exists && len(dt.recipientBlocked) >= maxRecipientCacheEntries {
+			continue // At capacity - don't accept new attacker-controlled entries
+		}
+		if !exists || expiry.After(localExpiry) {
+			dt.recipientBlocked[email] = expiry
+			merged++
 		}
 	}
 

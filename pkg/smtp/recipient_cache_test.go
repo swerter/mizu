@@ -243,7 +243,10 @@ func TestRecipientCache_MergeStrategy(t *testing.T) {
 	originalExpiry := dt.recipientNotFound["user@example.com"]
 	dt.recipientMu.RUnlock()
 
-	// Create a peer snapshot with a later expiry (10 minutes from now)
+	// Create a peer snapshot with an expiry far beyond our TTL (10 minutes from
+	// now, while RecipientCacheTTL is 5 minutes). Peer-supplied expiries are
+	// untrusted and must be clamped to our own TTL so a peer cannot inject a
+	// far-future negative-cache entry that denies mail to a victim indefinitely.
 	futureExpiry := time.Now().Add(10 * time.Minute)
 	peerCache := &RecipientCacheSnapshot{
 		NotFound: map[string]time.Time{
@@ -254,17 +257,23 @@ func TestRecipientCache_MergeStrategy(t *testing.T) {
 	// Merge the peer cache
 	dt.mergeRecipientCache(peerCache)
 
-	// Should have the later expiry
 	dt.recipientMu.RLock()
 	newExpiry := dt.recipientNotFound["user@example.com"]
 	dt.recipientMu.RUnlock()
 
-	if !newExpiry.After(originalExpiry) {
-		t.Fatal("Expected merge to keep the later expiry time")
+	// A recent peer entry may extend the expiry up to our TTL (legitimate
+	// refresh), so it should be at or after the original...
+	if newExpiry.Before(originalExpiry) {
+		t.Fatalf("Expected merged expiry (%v) to be >= original (%v)", newExpiry, originalExpiry)
 	}
 
-	if newExpiry != futureExpiry {
-		t.Fatalf("Expected expiry to be %v, got %v", futureExpiry, newExpiry)
+	// ...but it must be clamped to our TTL, well short of the peer's 10-minute value.
+	maxAllowed := time.Now().Add(5 * time.Minute)
+	if newExpiry.After(maxAllowed) {
+		t.Fatalf("Expected peer expiry to be clamped to <= now+TTL (%v), got %v", maxAllowed, newExpiry)
+	}
+	if !futureExpiry.After(newExpiry) {
+		t.Fatalf("Expected clamped expiry (%v) to be earlier than the peer's far-future value (%v)", newExpiry, futureExpiry)
 	}
 }
 

@@ -6,8 +6,17 @@ import (
 	"log/slog"
 	"migadu/mizu/pkg/cluster"
 	"migadu/mizu/pkg/concurrency"
+	"net"
 	"sync"
 	"time"
+)
+
+// Bounds applied to untrusted auth-rate-limit gossip. Without them a peer could
+// block any IP effectively forever or report an absurd failure count.
+const (
+	maxAuthGossipFailureCount = 10_000           // Sane ceiling for a failure counter
+	maxAuthGossipUsernameLen  = 320              // RFC 5321 max email/localpart-ish bound
+	authGossipBlockSkewMargin = 10 * time.Minute // Allowance for clock skew + event age
 )
 
 // AuthRateLimitEventType identifies the type of auth rate limit event
@@ -177,6 +186,13 @@ func (c *ClusterAuthRateLimiter) HandleClusterEvent(data []byte) {
 		return
 	}
 
+	// Gossip is untrusted: validate/clamp fields before applying so a malicious
+	// or buggy peer cannot lock out an arbitrary IP forever or inject an absurd
+	// failure counter. Events referencing an unparseable IP or username are dropped.
+	if !c.sanitizeEvent(&event) {
+		return
+	}
+
 	// Handle event based on type
 	switch event.Type {
 	case AuthRateLimitEventBlockIP:
@@ -197,6 +213,41 @@ func (c *ClusterAuthRateLimiter) HandleClusterEvent(data []byte) {
 	default:
 		c.logger.Warn("unknown auth rate limit event type", "type", event.Type)
 	}
+}
+
+// sanitizeEvent validates and clamps an incoming gossip event in place. It
+// returns false if the event should be dropped entirely.
+func (c *ClusterAuthRateLimiter) sanitizeEvent(event *AuthRateLimitEvent) bool {
+	switch event.Type {
+	case AuthRateLimitEventBlockIP, AuthRateLimitEventUnblockIP, AuthRateLimitEventFailureCount:
+		if net.ParseIP(event.IP) == nil {
+			c.logger.Warn("dropping auth rate limit event with invalid IP", "type", event.Type, "ip", event.IP)
+			return false
+		}
+	case AuthRateLimitEventUsernameFailure, AuthRateLimitEventUsernameSuccess:
+		if event.Username == "" || len(event.Username) > maxAuthGossipUsernameLen {
+			c.logger.Warn("dropping auth rate limit event with invalid username", "type", event.Type)
+			return false
+		}
+	}
+
+	// Clamp failure counts to a sane ceiling (also guards against negatives).
+	if event.FailureCount < 0 {
+		event.FailureCount = 0
+	} else if event.FailureCount > maxAuthGossipFailureCount {
+		event.FailureCount = maxAuthGossipFailureCount
+	}
+
+	// Clamp the block expiry: a peer must not be able to block an IP for longer
+	// than this node's own maximum block duration (plus a skew/age margin).
+	if !event.BlockedUntil.IsZero() {
+		maxUntil := time.Now().Add(c.limiter.MaxBlockDuration() + authGossipBlockSkewMargin)
+		if event.BlockedUntil.After(maxUntil) {
+			event.BlockedUntil = maxUntil
+		}
+	}
+
+	return true
 }
 
 // broadcastRoutine periodically broadcasts queued events

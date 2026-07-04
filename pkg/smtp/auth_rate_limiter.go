@@ -158,6 +158,16 @@ func NewAuthRateLimiter(cfg config.ServerAuthRateLimitConfig, logger *slog.Logge
 	return limiter, nil
 }
 
+// MaxBlockDuration returns the longest block this node would apply locally. It
+// is used to clamp block expiries received via untrusted cluster gossip.
+func (a *AuthRateLimiter) MaxBlockDuration() time.Duration {
+	max := a.ipBlockDuration
+	if a.ipUsernameBlockDuration > max {
+		max = a.ipUsernameBlockDuration
+	}
+	return max
+}
+
 // parseDuration parses a duration string or returns default
 func parseDuration(s string, defaultDuration time.Duration) (time.Duration, error) {
 	if s == "" {
