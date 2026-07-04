@@ -4,10 +4,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/pflag"
 )
+
+// envRefPattern matches an explicit ${VAR} reference. We deliberately only
+// expand this braced form (not bare $VAR) so that a literal secret containing a
+// '$' (common in passwords/tokens) is never mangled — os.ExpandEnv would treat
+// "pa$word" as "pa" + $word and silently truncate the credential.
+var envRefPattern = regexp.MustCompile(`\$\{(\w+)\}`)
+
+// expandEnvRefs replaces ${VAR} references with the corresponding environment
+// variable value, leaving all other text (including lone '$') untouched. A
+// reference to an unset variable expands to "".
+func expandEnvRefs(s string) string {
+	return envRefPattern.ReplaceAllStringFunc(s, func(ref string) string {
+		return os.Getenv(ref[2 : len(ref)-1]) // strip "${" and "}"
+	})
+}
 
 func defaultConfigPath() string {
 	for _, p := range []string{
@@ -56,10 +72,32 @@ func LoadConfig(args []string) (*Config, error) {
 		// If file doesn't exist, just use defaults (no error)
 	}
 
-	// Override with environment variables
+	// Expand ${VAR} references in secret fields, then apply env-var fallbacks
+	expandSecretEnvVars(cfg)
 	applyEnvironmentVariables(cfg)
 
 	return cfg, nil
+}
+
+// expandSecretEnvVars expands ${VAR} references in secret-bearing string fields
+// so configs can reference environment variables (e.g.
+// auth_token = "${AUTH_TOKEN}") as documented, instead of embedding secrets in
+// the file. Only the braced ${VAR} form is expanded so literal secrets
+// containing '$' are preserved. A reference to an unset variable expands to ""
+// so the dedicated applyEnvironmentVariables fallbacks can still populate it.
+func expandSecretEnvVars(cfg *Config) {
+	cfg.Storage.S3AccessKey = expandEnvRefs(cfg.Storage.S3AccessKey)
+	cfg.Storage.S3SecretKey = expandEnvRefs(cfg.Storage.S3SecretKey)
+	cfg.Cluster.SecretKey = expandEnvRefs(cfg.Cluster.SecretKey)
+	cfg.Health.Password = expandEnvRefs(cfg.Health.Password)
+	for i := range cfg.Servers {
+		s := &cfg.Servers[i]
+		s.Delivery.AuthToken = expandEnvRefs(s.Delivery.AuthToken)
+		s.Auth.AuthToken = expandEnvRefs(s.Auth.AuthToken)
+		s.SenderValidation.AuthToken = expandEnvRefs(s.SenderValidation.AuthToken)
+		s.RecipientValidation.AuthToken = expandEnvRefs(s.RecipientValidation.AuthToken)
+		s.SpamCheck.Password = expandEnvRefs(s.SpamCheck.Password)
+	}
 }
 
 // applyEnvironmentVariables overrides configuration with environment variables
@@ -138,7 +176,8 @@ func LoadFromFile(filename string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file '%s': %w", filename, err)
 	}
 
-	// Apply environment variable overrides
+	// Expand ${VAR} references in secret fields, then apply env-var fallbacks
+	expandSecretEnvVars(&cfg)
 	applyEnvironmentVariables(&cfg)
 
 	return &cfg, nil

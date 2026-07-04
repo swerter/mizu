@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -322,6 +323,33 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestExpandEnvRefs(t *testing.T) {
+	t.Setenv("MIZU_TEST_TOKEN", "s3cr3t-value")
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"braced ref expands", "${MIZU_TEST_TOKEN}", "s3cr3t-value"},
+		{"ref embedded in text", "Bearer ${MIZU_TEST_TOKEN}!", "Bearer s3cr3t-value!"},
+		{"unset ref expands to empty", "${MIZU_TEST_UNSET}", ""},
+		// Regression: a literal secret containing '$' must NOT be mangled the way
+		// os.ExpandEnv would ("pa$word" -> "pa"). Only ${...} is expanded.
+		{"literal dollar preserved", "pa$$w0rd$x", "pa$$w0rd$x"},
+		{"bare dollar-var not expanded", "$MIZU_TEST_TOKEN", "$MIZU_TEST_TOKEN"},
+		{"no refs unchanged", "plain-token-123", "plain-token-123"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := expandEnvRefs(tt.in); got != tt.want {
+				t.Errorf("expandEnvRefs(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSaveExample(t *testing.T) {
 	tmpDir := t.TempDir()
 	examplePath := filepath.Join(tmpDir, "config.toml.example")
@@ -447,8 +475,9 @@ func TestValidateConfig_ClusterBindAddr(t *testing.T) {
 				},
 			}
 
-			// Enable cluster
+			// Enable cluster (a valid 32-byte base64 secret key is now required)
 			cfg.Cluster.Enabled = true
+			cfg.Cluster.SecretKey = base64.StdEncoding.EncodeToString(make([]byte, 32))
 			cfg.Cluster.Addr = tt.addr
 			cfg.Cluster.Port = tt.port
 

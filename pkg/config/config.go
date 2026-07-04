@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -8,6 +9,16 @@ import (
 	"os"
 	"strings"
 )
+
+// requireHTTPSURL enforces that a token-bearing endpoint uses https:// so that
+// bearer tokens (and, for delivery, the full message) are never sent in
+// cleartext. Loopback URLs are exempt to allow local development.
+func requireHTTPSURL(fieldName, rawURL string) error {
+	if !strings.HasPrefix(rawURL, "https://") && !isLocalhostURL(rawURL) {
+		return fmt.Errorf("%s must use https:// (bearer token and message data are sent in cleartext over http, except for localhost)", fieldName)
+	}
+	return nil
+}
 
 // isLocalhostURL reports whether the given URL points to a loopback address,
 // allowing http:// for local development/testing of authentication endpoints.
@@ -100,6 +111,21 @@ func (c *Config) Validate() error {
 			if srv.Delivery.AuthToken == "" || srv.Delivery.AuthToken == "your-auth-token-here" {
 				return fmt.Errorf("server[%s].delivery.auth_token must be set", srv.Name)
 			}
+			if err := requireHTTPSURL(fmt.Sprintf("server[%s].delivery.url", srv.Name), srv.Delivery.URL); err != nil {
+				return err
+			}
+			// Other token-bearing endpoints must also use HTTPS in production so
+			// bearer tokens are not sent in cleartext (loopback exempt).
+			if srv.SenderValidation.Enabled {
+				if err := requireHTTPSURL(fmt.Sprintf("server[%s].sender_validation.url", srv.Name), srv.SenderValidation.URL); err != nil {
+					return err
+				}
+			}
+			if srv.RecipientValidation.Enabled {
+				if err := requireHTTPSURL(fmt.Sprintf("server[%s].recipient_validation.url", srv.Name), srv.RecipientValidation.URL); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -184,6 +210,21 @@ func (c *Config) Validate() error {
 		bindPort := c.Cluster.GetBindPort()
 		if bindPort < 1 || bindPort > 65535 {
 			return fmt.Errorf("cluster bind port must be between 1 and 65535, got %d", bindPort)
+		}
+
+		// A secret key is mandatory: without it gossip runs unauthenticated and
+		// unencrypted, so any host that reaches the gossip port can join the
+		// cluster and inject rate-limit / connection-state / auth-block messages.
+		// (CLUSTER_SECRET_KEY env var is copied into SecretKey during load.)
+		if c.Cluster.SecretKey == "" {
+			return errors.New("cluster.secret_key (or CLUSTER_SECRET_KEY env var) must be set when cluster.enabled=true - gossip must be authenticated and encrypted")
+		}
+		decoded, err := base64.StdEncoding.DecodeString(c.Cluster.SecretKey)
+		if err != nil {
+			return fmt.Errorf("cluster.secret_key must be base64-encoded: %w", err)
+		}
+		if len(decoded) != 32 {
+			return fmt.Errorf("cluster.secret_key must decode to exactly 32 bytes (got %d) - generate with: openssl rand -base64 32", len(decoded))
 		}
 	}
 
@@ -298,7 +339,33 @@ func (s *ServerConfig) Validate() error {
 		return fmt.Errorf("distributed.recipient_cache_ttl_seconds must be >= 60 (1m), got %d", s.Distributed.RecipientCacheTTLSeconds)
 	}
 
-	// Validate recipient validation config
+	// Validate sender validation config (HTTPS scheme is enforced in production
+	// mode by Config.Validate, alongside delivery.url).
+	if s.SenderValidation.Enabled {
+		if s.SenderValidation.URL == "" {
+			return errors.New("sender_validation.url is required when sender_validation.enabled=true")
+		}
+	}
+
+	// Validate rate limiting config: an enabled limiter with no usable dimension
+	// silently enforces nothing, which reads as "protected" but isn't.
+	if s.RateLimit.Enabled {
+		usable := 0
+		for i, dim := range s.RateLimit.Dimensions {
+			if len(dim.Keys) == 0 {
+				return fmt.Errorf("rate_limit.dimensions[%d] (%q) must specify at least one key", i, dim.Name)
+			}
+			if dim.Limit > 0 {
+				usable++
+			}
+		}
+		if usable == 0 {
+			return errors.New("rate_limit.enabled=true but no dimension has a positive limit - rate limiting would enforce nothing (set at least one dimension with limit > 0, or disable rate limiting)")
+		}
+	}
+
+	// Validate recipient validation config (HTTPS scheme is enforced in
+	// production mode by Config.Validate, alongside delivery.url).
 	if s.RecipientValidation.Enabled {
 		if s.RecipientValidation.URL == "" {
 			return errors.New("recipient_validation.url is required when recipient_validation.enabled=true")
