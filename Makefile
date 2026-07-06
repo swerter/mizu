@@ -7,7 +7,7 @@
 # ====================================================================================
 
 # Phony targets are not actual files, but commands to be executed.
-.PHONY: all build clean install test coverage linux-musl freebsd help
+.PHONY: all build clean install test coverage linux freebsd help
 
 # ====================================================================================
 # Variables
@@ -16,6 +16,11 @@
 # Binary names
 MIZU_SERVER_BINARY ?= mizu-server
 MIZU_ADMIN_BINARY ?= mizu-admin
+
+# Mizu is pure Go; disabling cgo yields static binaries and avoids
+# depending on a host C toolchain for building and linking.
+# Override with e.g. `CGO_ENABLED=1 make build` if cgo is ever needed.
+export CGO_ENABLED ?= 0
 
 # Get all .go files recursively
 GO_FILES := $(shell find . -type f -name '*.go')
@@ -43,11 +48,11 @@ all: build
 
 build: bin/$(MIZU_SERVER_BINARY) bin/$(MIZU_ADMIN_BINARY)
 
-# Rule to build a Go binary.
-# Usage: make build-binary CMD_PATH=./cmd/mizu-server BINARY_NAME=mizu-server
+# Rule to build a Go binary, optionally cross-compiled.
+# Usage: $(call build-binary,<cmd-path>,<binary-name>[,<GOOS>,<GOARCH>])
 define build-binary
-	@echo "Building $(2)..."
-	@go build $(LDFLAGS) -o ./bin/$(2) $(1)
+	@echo "Building $(2)$(if $(3), for $(3)/$(4))..."
+	@$(if $(3),GOOS=$(3) GOARCH=$(4)) go build $(LDFLAGS) -o ./bin/$(2) $(1)
 endef
 
 bin/$(MIZU_SERVER_BINARY): $(GO_FILES)
@@ -86,20 +91,13 @@ coverage:
 # Cross-Compilation
 # ====================================================================================
 
-# Rule to cross-compile a Go binary.
-# Usage: make cross-compile GOOS=linux GOARCH=amd64 CMD_PATH=./cmd/mizu-server BINARY_NAME=mizu-server-linux-amd64
-define cross-compile
-	@echo "Cross-compiling $(4) for $(1)/$(2)..."
-	@GOOS=$(1) GOARCH=$(2) $(3) go build $(LDFLAGS) -o ./bin/$(4) $(5)
-endef
-
-linux-musl:
-	$(call cross-compile,linux,amd64,CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++,$(MIZU_SERVER_BINARY)-linux-amd64,./cmd/mizu-server)
-	$(call cross-compile,linux,amd64,CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++,$(MIZU_ADMIN_BINARY)-linux-amd64,./cmd/mizu-admin)
+linux:
+	$(call build-binary,./cmd/mizu-server,$(MIZU_SERVER_BINARY)-linux-amd64,linux,amd64)
+	$(call build-binary,./cmd/mizu-admin,$(MIZU_ADMIN_BINARY)-linux-amd64,linux,amd64)
 
 freebsd:
-	$(call cross-compile,freebsd,amd64,CGO_ENABLED=0,$(MIZU_SERVER_BINARY)-freebsd-amd64,./cmd/mizu-server)
-	$(call cross-compile,freebsd,amd64,CGO_ENABLED=0,$(MIZU_ADMIN_BINARY)-freebsd-amd64,./cmd/mizu-admin)
+	$(call build-binary,./cmd/mizu-server,$(MIZU_SERVER_BINARY)-freebsd-amd64,freebsd,amd64)
+	$(call build-binary,./cmd/mizu-admin,$(MIZU_ADMIN_BINARY)-freebsd-amd64,freebsd,amd64)
 
 # ====================================================================================
 # Help Target
@@ -115,6 +113,6 @@ help:
 	@echo "  clean            Clean build artifacts"
 	@echo "  test             Run all tests"
 	@echo "  coverage         Run tests and generate a coverage report"
-	@echo "  linux-musl       Cross-compile with musl libc for a static Linux binary"
-	@echo "  freebsd          Cross-compile for FreeBSD"
+	@echo "  linux            Cross-compile a static pure-Go binary for Linux"
+	@echo "  freebsd          Cross-compile a static pure-Go binary for FreeBSD"
 	@echo "  help             Display this help message"
