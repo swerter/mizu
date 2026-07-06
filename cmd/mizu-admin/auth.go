@@ -52,10 +52,12 @@ func cmdAuth() {
 	}
 	email := args[0]
 	password := ""
-	havePassword := len(args) > 1
-	if havePassword {
+	if len(args) > 1 {
 		password = args[1]
 	}
+	// An explicitly-supplied empty password is treated the same as no password:
+	// report the served hashes instead of verifying "" against them.
+	havePassword := password != ""
 
 	urlTemplate := *urlOverride
 	token := *tokenOverride
@@ -96,7 +98,11 @@ func cmdAuth() {
 
 	if status == http.StatusNotFound {
 		if *jsonOut {
-			emitAuthJSON(email, nil, nil, false, havePassword, "not_found", status)
+			var extra map[string]any
+			if havePassword {
+				extra = map[string]any{"password_match": false}
+			}
+			emitAuthJSON(email, nil, nil, "not_found", status, extra)
 		} else {
 			fmt.Printf("NOT FOUND %s\n", email)
 		}
@@ -114,7 +120,7 @@ func cmdAuth() {
 	// No password supplied: just report what the backend serves for this user.
 	if !havePassword {
 		if *jsonOut {
-			emitAuthJSON(email, resp.PasswordHashes, resp.AllowedFrom, false, false, "found", status)
+			emitAuthJSON(email, resp.PasswordHashes, resp.AllowedFrom, "found", status, nil)
 		} else {
 			fmt.Printf("FOUND     %s  (%d hash(es))\n", email, len(resp.PasswordHashes))
 			for _, h := range resp.PasswordHashes {
@@ -127,18 +133,35 @@ func cmdAuth() {
 		os.Exit(exitAuthOK)
 	}
 
-	// Verify the supplied password against the served hashes, exactly as Mizu does.
-	matched := passwd.VerifyAny(resp.PasswordHashes, password).Matched
+	// Verify the supplied password against the served hashes, exactly as Mizu
+	// does. VerifyAny scans the full list so a corrupt or unsupported stored
+	// hash is reported even when another hash matches.
+	res := passwd.VerifyAny(resp.PasswordHashes, password)
 
 	if *jsonOut {
-		emitAuthJSON(email, resp.PasswordHashes, resp.AllowedFrom, matched, true, "found", status)
-	} else if matched {
-		fmt.Printf("MATCH     %s\n", email)
+		extra := map[string]any{"password_match": res.Matched}
+		if res.Unsupported > 0 {
+			extra["unsupported_hashes"] = res.Unsupported
+		}
+		if len(res.Malformed) > 0 {
+			extra["malformed_hashes"] = res.Malformed
+		}
+		emitAuthJSON(email, resp.PasswordHashes, resp.AllowedFrom, "found", status, extra)
 	} else {
-		fmt.Printf("NO MATCH  %s\n", email)
+		if res.Matched {
+			fmt.Printf("MATCH     %s\n", email)
+		} else {
+			fmt.Printf("NO MATCH  %s\n", email)
+		}
+		if res.Unsupported > 0 {
+			fmt.Fprintf(os.Stderr, "Note: %d hash(es) use a scheme Mizu does not support; these cannot authenticate and need to be regenerated.\n", res.Unsupported)
+		}
+		if len(res.Malformed) > 0 {
+			fmt.Fprintf(os.Stderr, "Note: %d stored hash(es) could not be parsed (corrupt?): %s\n", len(res.Malformed), strings.Join(res.Malformed, "; "))
+		}
 	}
 
-	if matched {
+	if res.Matched {
 		os.Exit(exitAuthOK)
 	}
 	os.Exit(exitAuthNoMatch)
@@ -157,7 +180,7 @@ func findAuthServer(cfg *config.Config) *config.ServerConfig {
 }
 
 // emitAuthJSON prints a machine-readable summary of the auth lookup.
-func emitAuthJSON(email string, hashes, allowedFrom []string, matched, checked bool, result string, status int) {
+func emitAuthJSON(email string, hashes, allowedFrom []string, result string, status int, extra map[string]any) {
 	out := map[string]any{
 		"email":           email,
 		"result":          result,
@@ -165,8 +188,8 @@ func emitAuthJSON(email string, hashes, allowedFrom []string, matched, checked b
 		"password_hashes": hashes,
 		"allowed_from":    allowedFrom,
 	}
-	if checked {
-		out["password_match"] = matched
+	for k, v := range extra {
+		out[k] = v
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
