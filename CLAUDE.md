@@ -421,14 +421,17 @@ deliveryCfg := serverCfg.Delivery
 ## Module Information
 
 - Module path: `migadu/mizu`
-- Go version: 1.24.1
+- Go version: 1.25.0
 - Key dependencies:
   - `emersion/go-smtp` - SMTP protocol implementation
   - `emersion/go-msgauth` - SPF/DKIM/DMARC validation
   - `hashicorp/memberlist` - Distributed cluster coordination
-  - `caddyserver/certmagic` - TLS certificate automation
-  - `minio/minio-go` - S3 client
+  - `aws/aws-sdk-go-v2` - S3 client (certs and stats sync)
   - `prometheus/client_golang` - Metrics
+  - `shared` (local module, `replace shared => ../shared`) - password hash
+    verification (`shared/passwd`), shared with rcptd/rcptctl. Building mizu
+    requires the sibling `../shared` checkout from the ansible-freebsd3 tree;
+    the Ansible build task provides it next to the clone in `.compile/`.
 
 ## Version Information
 
