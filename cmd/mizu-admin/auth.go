@@ -11,6 +11,8 @@ import (
 
 	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/smtp"
+
+	"shared/passwd"
 )
 
 // Auth exit codes. Operational failures (flag parse, config load, transport,
@@ -27,7 +29,7 @@ const (
 // It resolves the SMTP AUTH backend URL (rcptd's /auth) from the Mizu config —
 // the exact endpoint Mizu queries during SMTP AUTH — fetches the user's password
 // hashes and allowed_from list, and, if a password is supplied, verifies it
-// locally with smtp.VerifyPassword (the same routine Mizu uses at auth time,
+// locally via shared/passwd (the same implementation Mizu uses at auth time,
 // covering bcrypt/BLF-CRYPT/SSHA512/SHA512). The plaintext password is never
 // sent to the backend.
 func cmdAuth() {
@@ -126,13 +128,7 @@ func cmdAuth() {
 	}
 
 	// Verify the supplied password against the served hashes, exactly as Mizu does.
-	matched := false
-	for _, h := range resp.PasswordHashes {
-		if smtp.VerifyPassword(h, password) == nil {
-			matched = true
-			break
-		}
-	}
+	matched := passwd.VerifyAny(resp.PasswordHashes, password).Matched
 
 	if *jsonOut {
 		emitAuthJSON(email, resp.PasswordHashes, resp.AllowedFrom, matched, true, "found", status)

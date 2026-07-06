@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"shared/passwd"
 )
 
 // HTTPAuthenticator authenticates users via HTTPS GET API with local password verification
@@ -173,16 +175,10 @@ func (a *HTTPAuthenticator) AuthenticateWithIP(username, password, remoteIP stri
 }
 
 // verifyAgainstHashes tries to verify the password against a list of hashes.
-// Returns true if any hash matches. Always iterates all hashes to avoid
-// leaking which position matched via timing side-channel.
+// Returns true if any hash matches. passwd.VerifyAny always iterates all
+// hashes, so which position matched cannot leak via a timing side-channel.
 func (a *HTTPAuthenticator) verifyAgainstHashes(hashes []string, password string) bool {
-	matched := false
-	for _, hash := range hashes {
-		if VerifyPassword(hash, password) == nil {
-			matched = true
-		}
-	}
-	return matched
+	return passwd.VerifyAny(hashes, password).Matched
 }
 
 // fetchCredentials fetches user credentials from the backend via GET request
