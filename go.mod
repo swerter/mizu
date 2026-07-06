@@ -23,7 +23,7 @@ require (
 	golang.org/x/net v0.55.0
 )
 
-replace github.com/emersion/go-smtp => github.com/dejanstrbac/go-smtp v0.0.0-20260629123555-753f876d151b
+replace github.com/emersion/go-smtp => github.com/migadu/go-smtp v0.0.0-20260705092127-a9ff9fa2a2bb
 
 require (
 	github.com/armon/go-metrics v0.4.1 // indirect
@@ -71,3 +71,5 @@ require (
 )
 
 replace shared => ../shared
+
+replace github.com/emersion/go-message => github.com/migadu/go-message v0.0.0-20250216181611-b9039e0d248f

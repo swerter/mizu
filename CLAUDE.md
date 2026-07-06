@@ -423,7 +423,14 @@ deliveryCfg := serverCfg.Delivery
 - Module path: `migadu/mizu`
 - Go version: 1.25.0
 - Key dependencies:
-  - `emersion/go-smtp` - SMTP protocol implementation
+  - `emersion/go-smtp` - SMTP protocol implementation, replaced with the
+    `github.com/migadu/go-smtp` fork in go.mod (relay-specific behavior:
+    no line-length limit during DATA, session re-creation on re-EHLO,
+    STARTTLS hardening)
+  - `emersion/go-message` - message parsing, replaced with the
+    `github.com/migadu/go-message` fork in go.mod (currently identical to
+    upstream; pinned for org ownership). Note: `go get -u` does not update
+    replaced modules - bump the fork pins in go.mod manually.
   - `emersion/go-msgauth` - SPF/DKIM/DMARC validation
   - `hashicorp/memberlist` - Distributed cluster coordination
   - `aws/aws-sdk-go-v2` - S3 client (certs and stats sync)

@@ -1,0 +1,113 @@
+From 1e4336a4347c8edd7235e7f8a4f15159fee20715 Mon Sep 17 00:00:00 2001
+From: "Michael J. Bruderer" <hanslihuber1232@gmail.com>
+Date: Mon, 6 Jul 2026 17:43:48 +0200
+Subject: [PATCH] server: do not apply MaxLineLength to DATA message content
+
+MaxLineLength is meant to bound the SMTP command phase. Applying it to
+message bodies rejects legitimate mail with lines over 2000 bytes
+(common with unwrapped HTML), which a relay cannot recover from: the
+message bounces permanently at the sender.
+
+Disable the line limit while reading DATA (as handleBdat already does)
+and restore it for the following command phase. Message size remains
+bounded by MaxMessageBytes.
+---
+ conn.go        |  9 +++++++++
+ server_test.go | 50 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 59 insertions(+)
+
+diff --git a/conn.go b/conn.go
+index ff43e0e..825bab8 100644
+--- a/conn.go
++++ b/conn.go
+@@ -983,10 +983,15 @@ func (c *Conn) handleData(arg string) {
+ 		return
+ 	}
+ 
++	// The line length limit only applies to the SMTP command phase; message
++	// data is bounded by MaxMessageBytes instead (RFC 5322 line lengths are
++	// commonly exceeded in practice, e.g. by unwrapped HTML bodies).
++	c.lineLimitReader.LineLimit = 0
+ 	r := newDataReader(c)
+ 	code, enhancedCode, msg := dataErrorToStatus(c.Session().Data(r))
+ 	r.limited = false
+ 	io.Copy(ioutil.Discard, r) // Make sure all the data has been consumed
++	c.lineLimitReader.LineLimit = c.server.MaxLineLength
+ 	c.writeResponse(code, enhancedCode, msg)
+ }
+ 
+@@ -1206,6 +1211,10 @@ func (s *statusCollector) SetStatus(rcptTo string, err error) {
+ }
+ 
+ func (c *Conn) handleDataLMTP() {
++	// See handleData: the line length limit does not apply to message data.
++	c.lineLimitReader.LineLimit = 0
++	defer func() { c.lineLimitReader.LineLimit = c.server.MaxLineLength }()
++
+ 	r := newDataReader(c)
+ 	status := c.createStatusCollector()
+ 
+diff --git a/server_test.go b/server_test.go
+index 06db746..0e9289d 100644
+--- a/server_test.go
++++ b/server_test.go
+@@ -623,6 +623,56 @@ func TestServer(t *testing.T) {
+ 	}
+ }
+ 
++func TestServer_dataLineExceedingMaxLineLength(t *testing.T) {
++	be, s, c, scanner := testServerAuthenticated(t)
++	defer s.Close()
++	defer c.Close()
++
++	io.WriteString(c, "MAIL FROM:<root@nsa.gov>\r\n")
++	scanner.Scan()
++	if !strings.HasPrefix(scanner.Text(), "250 ") {
++		t.Fatal("Invalid MAIL response:", scanner.Text())
++	}
++
++	io.WriteString(c, "RCPT TO:<root@gchq.gov.uk>\r\n")
++	scanner.Scan()
++	if !strings.HasPrefix(scanner.Text(), "250 ") {
++		t.Fatal("Invalid RCPT response:", scanner.Text())
++	}
++
++	io.WriteString(c, "DATA\r\n")
++	scanner.Scan()
++	if !strings.HasPrefix(scanner.Text(), "354 ") {
++		t.Fatal("Invalid DATA response:", scanner.Text())
++	}
++
++	// MaxLineLength applies to the command phase only; message data lines
++	// may exceed it.
++	longLine := strings.Repeat("a", 2*s.MaxLineLength)
++	io.WriteString(c, "From: root@nsa.gov\r\n")
++	io.WriteString(c, "\r\n")
++	io.WriteString(c, longLine+"\r\n")
++	io.WriteString(c, ".\r\n")
++	scanner.Scan()
++	if !strings.HasPrefix(scanner.Text(), "250 ") {
++		t.Fatal("Invalid DATA response:", scanner.Text())
++	}
++
++	if len(be.messages) != 1 {
++		t.Fatal("Invalid number of sent messages:", len(be.messages))
++	}
++	if string(be.messages[0].Data) != "From: root@nsa.gov\r\n\r\n"+longLine+"\r\n" {
++		t.Fatal("Invalid mail data:", string(be.messages[0].Data))
++	}
++
++	// The command phase must still enforce MaxLineLength after DATA.
++	io.WriteString(c, "MAIL FROM:<"+strings.Repeat("a", s.MaxLineLength)+">\r\n")
++	scanner.Scan()
++	if !strings.HasPrefix(scanner.Text(), "500 5.4.0 ") {
++		t.Fatal("Invalid too long MAIL response:", scanner.Text())
++	}
++}
++
+ func TestServer_LFDotLF(t *testing.T) {
+ 	be, s, c, scanner := testServerAuthenticated(t)
+ 	defer s.Close()
+-- 
+2.54.0
+
