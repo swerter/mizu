@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -62,6 +63,10 @@ type Cluster struct {
 	leaderMtx sync.RWMutex
 	metrics   *metrics.Metrics // optional; publishes the cluster leader gauge
 
+	// rejoinInterval: how often to re-join configured peers that are not
+	// members (see maintainMembership)
+	rejoinInterval time.Duration
+
 	// Lifecycle
 	done         chan struct{} // Closed on Shutdown to stop background goroutines
 	shutdownOnce sync.Once     // Ensures Shutdown runs exactly once
@@ -77,7 +82,13 @@ type Config struct {
 	Logger        *slog.Logger
 	StateDelegate StateDelegate
 	EventDelegate EventDelegate
+	// RejoinInterval: how often to re-join configured peers that are not
+	// members (0 = 30s)
+	RejoinInterval time.Duration
 }
+
+// defaultRejoinInterval is how often a node re-joins missing peers.
+const defaultRejoinInterval = 30 * time.Second
 
 // NewCluster creates a new cluster instance with memberlist
 func NewCluster(cfg Config) (*Cluster, error) {
@@ -90,6 +101,10 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		stateDelegate: cfg.StateDelegate,
 		eventDelegate: cfg.EventDelegate,
 		done:          make(chan struct{}),
+	}
+	cluster.rejoinInterval = cfg.RejoinInterval
+	if cluster.rejoinInterval <= 0 {
+		cluster.rejoinInterval = defaultRejoinInterval
 	}
 
 	// Create memberlist configuration
@@ -161,6 +176,11 @@ func NewCluster(cfg Config) (*Cluster, error) {
 			cfg.Logger.Warn("Failed to join some peers", "error", err)
 			// Don't fail completely - we might be the first node
 		}
+		// Keep re-joining peers that are missing: memberlist never contacts
+		// a node again once it has declared it dead, so without this a
+		// partition splits the cluster until a restart.
+		peers := cfg.Peers
+		concurrency.SafeGo(cfg.Logger, "cluster-rejoin", func() { cluster.maintainMembership(peers) })
 	}
 
 	// Initialize leader election
@@ -189,6 +209,51 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		"is_leader", cluster.IsLeader())
 
 	return cluster, nil
+}
+
+// maintainMembership re-joins every configured peer that is not currently a
+// member. Peers are checked by address, not by counting members: with a
+// partial peer list, one side of a partition can hold enough members to look
+// complete while its configured seed is on the other side.
+func (c *Cluster) maintainMembership(peers []string) {
+	ticker := time.NewTicker(c.rejoinInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+		}
+		missing := c.missingPeers(peers)
+		if len(missing) == 0 {
+			continue
+		}
+		before := c.ml.NumMembers()
+		n, err := c.ml.Join(missing)
+		if after := c.ml.NumMembers(); after > before {
+			c.logger.Info("Rejoined cluster", "peers_reached", n, "members", after)
+		} else if err != nil {
+			c.logger.Debug("Cluster rejoin found no new peers", "missing", missing, "error", err, "members", after)
+		}
+	}
+}
+
+// missingPeers returns the configured peers whose address is not that of a
+// current member (this node included). A peer whose name doesn't resolve
+// counts as missing; Join reports the error.
+func (c *Cluster) missingPeers(peers []string) []string {
+	present := make(map[string]bool)
+	for _, m := range c.ml.Members() {
+		present[net.JoinHostPort(m.Addr.String(), strconv.Itoa(int(m.Port)))] = true
+	}
+	var missing []string
+	for _, p := range peers {
+		addr, err := net.ResolveTCPAddr("tcp", p)
+		if err != nil || !present[net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))] {
+			missing = append(missing, p)
+		}
+	}
+	return missing
 }
 
 // SetStateDelegate sets the state delegate for the cluster
@@ -468,7 +533,7 @@ func (c *Cluster) NotifyJoin(node *memberlist.Node) {
 
 // NotifyLeave is called when a node leaves the cluster gracefully
 func (c *Cluster) NotifyLeave(node *memberlist.Node) {
-	c.logger.Info("Node left cluster",
+	c.logger.Warn("Node left cluster",
 		"node", node.Name,
 		"addr", node.Address())
 

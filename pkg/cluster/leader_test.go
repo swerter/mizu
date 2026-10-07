@@ -260,3 +260,51 @@ func TestLeaderElection_LeaderFailover(t *testing.T) {
 		t.Errorf("Expected new leader to be 'node-b', got '%s'", c2.GetLeader())
 	}
 }
+
+// A peer that left (or was declared dead) is never contacted again by
+// memberlist on its own; the rejoin loop must bring a restarted peer back,
+// even when that peer has no peers configured itself.
+func TestCluster_RejoinsAfterPeerLost(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c1, err := NewCluster(Config{NodeName: "node1", BindAddr: "127.0.0.1", BindPort: 17957, Logger: logger})
+	if err != nil {
+		t.Fatalf("Failed to create node1: %v", err)
+	}
+	c2, err := NewCluster(Config{
+		NodeName: "node2", BindAddr: "127.0.0.1", BindPort: 17958,
+		Peers: []string{"127.0.0.1:17957"}, Logger: logger,
+		RejoinInterval: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create node2: %v", err)
+	}
+	defer c2.Shutdown()
+
+	waitFor := func(cond func() bool) bool {
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+			if cond() {
+				return true
+			}
+		}
+		return false
+	}
+	if !waitFor(func() bool { return c2.NumMembers() == 2 }) {
+		t.Fatalf("initial join failed: %d members", c2.NumMembers())
+	}
+	if got := c2.missingPeers([]string{"127.0.0.1:17957", "127.0.0.1:1"}); len(got) != 1 || got[0] != "127.0.0.1:1" {
+		t.Errorf("missingPeers = %v, want only 127.0.0.1:1", got)
+	}
+
+	c1.Shutdown()
+	if !waitFor(func() bool { return c2.NumMembers() == 1 }) {
+		t.Fatalf("node2 still sees node1 after it left: %d members", c2.NumMembers())
+	}
+	c1b, err := NewCluster(Config{NodeName: "node1", BindAddr: "127.0.0.1", BindPort: 17957, Logger: logger})
+	if err != nil {
+		t.Fatalf("Failed to restart node1: %v", err)
+	}
+	defer c1b.Shutdown()
+	if !waitFor(func() bool { return c2.NumMembers() == 2 && c1b.NumMembers() == 2 }) {
+		t.Fatalf("node2 did not rejoin node1: %d/%d members", c2.NumMembers(), c1b.NumMembers())
+	}
+}
